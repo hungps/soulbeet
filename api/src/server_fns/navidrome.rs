@@ -99,8 +99,14 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                                 if let Err(e) = tokio::fs::remove_file(path).await {
                                     warn!("Auto-delete failed for {}: {}", path.display(), e);
                                 } else {
-                                    if let Some(parent) = path.parent() {
-                                        let _ = super::cleanup_empty_ancestors(parent).await;
+                                    let library_root = folders
+                                        .iter()
+                                        .map(|f| std::path::Path::new(&f.path))
+                                        .find(|root| path.starts_with(root));
+                                    if let (Some(parent), Some(root)) =
+                                        (path.parent(), library_root)
+                                    {
+                                        let _ = super::cleanup_empty_ancestors(parent, root).await;
                                     }
                                     DeletionReviewRow::upsert(
                                         &song.id,
@@ -378,6 +384,11 @@ pub(crate) async fn promote_discovery_track_internal(
         return Err(e);
     }
 
+    if let Some(parent) = src.parent() {
+        let profile_root = folder.discovery_profile_path(&track.profile);
+        let _ = super::cleanup_empty_ancestors(parent, std::path::Path::new(&profile_root)).await;
+    }
+
     DiscoveryTrackRow::update_status(track_id, &DiscoveryStatus::Promoted).await?;
 
     if let Err(e) =
@@ -407,8 +418,11 @@ async fn remove_discovery_track_internal(track_id: &str) -> Result<(), String> {
         tokio::fs::remove_file(path)
             .await
             .map_err(|e| format!("Failed to delete file: {}", e))?;
-        if let Some(parent) = path.parent() {
-            let _ = super::cleanup_empty_ancestors(parent).await;
+        let folder = crate::models::folder::Folder::get_by_id(&track.folder_id).await;
+        if let (Some(parent), Ok(Some(folder))) = (path.parent(), folder) {
+            let profile_root = folder.discovery_profile_path(&track.profile);
+            let _ =
+                super::cleanup_empty_ancestors(parent, std::path::Path::new(&profile_root)).await;
         }
     }
 

@@ -75,11 +75,6 @@ pub async fn import_group(
                 })
                 .collect();
             let _ = tx.send(DownloadEvent::Progress(imported_entries));
-
-            // Clean up empty source directories left after beets moves the files
-            if let Some(parent) = Path::new(&source_path).parent() {
-                let _ = crate::server_fns::cleanup_empty_ancestors(parent).await;
-            }
         }
         Ok(ImportResult::Skipped(reason)) => {
             info!("Import skipped items: {}", reason);
@@ -98,9 +93,6 @@ pub async fn import_group(
             for entry in &entries {
                 cleanup_failed_file(&entry.item).await;
             }
-            if let Some(parent) = std::path::Path::new(&source_path).parent() {
-                let _ = crate::server_fns::cleanup_empty_ancestors(parent).await;
-            }
         }
         Ok(ImportResult::Failed(err)) => {
             info!("Import failed: {}", err);
@@ -116,9 +108,6 @@ pub async fn import_group(
 
             for entry in &entries {
                 cleanup_failed_file(&entry.item).await;
-            }
-            if let Some(parent) = std::path::Path::new(&source_path).parent() {
-                let _ = crate::server_fns::cleanup_empty_ancestors(parent).await;
             }
         }
         Ok(ImportResult::TimedOut) => {
@@ -136,9 +125,6 @@ pub async fn import_group(
             for entry in &entries {
                 cleanup_failed_file(&entry.item).await;
             }
-            if let Some(parent) = std::path::Path::new(&source_path).parent() {
-                let _ = crate::server_fns::cleanup_empty_ancestors(parent).await;
-            }
         }
         Err(e) => {
             warn!("Import error for {}: {}", source_path, e);
@@ -155,9 +141,19 @@ pub async fn import_group(
             for entry in &entries {
                 cleanup_failed_file(&entry.item).await;
             }
-            if let Some(parent) = std::path::Path::new(&source_path).parent() {
-                let _ = crate::server_fns::cleanup_empty_ancestors(parent).await;
-            }
         }
+    }
+
+    // beets moves the files out but never prunes the folder they came from:
+    // the import path is that folder (album) or the file itself (singleton).
+    let source_dir = if as_album {
+        Some(source)
+    } else {
+        source.parent()
+    };
+    if let Some(dir) = source_dir {
+        let _ =
+            crate::server_fns::cleanup_empty_ancestors(dir, crate::config::CONFIG.download_path())
+                .await;
     }
 }

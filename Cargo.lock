@@ -138,6 +138,7 @@ dependencies = [
  "shared",
  "soulbeet",
  "sqlx",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tower-cookies",

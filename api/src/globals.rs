@@ -381,6 +381,10 @@ async fn run_automation() {
         };
         let lifetime_map = settings.parse_lifetime_days();
         let now = chrono::Utc::now();
+        let folder = crate::models::folder::Folder::get_by_id(folder_id)
+            .await
+            .ok()
+            .flatten();
 
         // Check each profile's pending tracks and expire those past their lifetime
         let pending =
@@ -410,8 +414,13 @@ async fn run_automation() {
             let path = std::path::Path::new(&track.path);
             if path.exists() {
                 let _ = tokio::fs::remove_file(path).await;
-                if let Some(parent) = path.parent() {
-                    let _ = crate::server_fns::cleanup_empty_ancestors(parent).await;
+                if let (Some(parent), Some(folder)) = (path.parent(), &folder) {
+                    let profile_root = folder.discovery_profile_path(&track.profile);
+                    let _ = crate::server_fns::cleanup_empty_ancestors(
+                        parent,
+                        std::path::Path::new(&profile_root),
+                    )
+                    .await;
                 }
             }
             let _ = crate::models::discovery_playlist::DiscoveryTrackRow::update_status(

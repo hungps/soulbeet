@@ -142,7 +142,9 @@ pub async fn remove_discovery_track(req: TrackActionRequest) -> Result<(), Serve
             .map_err(|e| server_error(format!("Failed to delete: {}", e)))?;
         // Clean up empty Artist/Album/ dirs left by beets
         if let Some(parent) = path.parent() {
-            let _ = super::cleanup_empty_ancestors(parent).await;
+            let profile_root = folder.discovery_profile_path(&track.profile);
+            let _ =
+                super::cleanup_empty_ancestors(parent, std::path::Path::new(&profile_root)).await;
         }
     }
 
@@ -899,13 +901,14 @@ pub async fn generate_discovery_playlist_internal(
                 let before = collect_files(&discovery_target).await;
 
                 let src = std::path::Path::new(&src_path);
-                if let Ok(ref imp) = importer {
+                let imported = if let Ok(ref imp) = importer {
                     match imp.import(&[src], &discovery_target, false).await {
                         Ok(soulbeet::ImportResult::Success) => {
                             info!(
                                 "Imported '{}' - {} into Discovery/{}",
                                 qt.artist, qt.track, profile_name
                             );
+                            true
                         }
                         Ok(soulbeet::ImportResult::Skipped(reason)) => {
                             warn!(
@@ -925,7 +928,7 @@ pub async fn generate_discovery_playlist_internal(
                                 &profile_name,
                             )
                             .await?;
-                            continue;
+                            false
                         }
                         Ok(other) => {
                             warn!(
@@ -934,7 +937,7 @@ pub async fn generate_discovery_playlist_internal(
                             );
                             stats.imports_failed += 1;
                             let _ = tokio::fs::remove_file(src).await;
-                            continue;
+                            false
                         }
                         Err(e) => {
                             warn!(
@@ -943,7 +946,7 @@ pub async fn generate_discovery_playlist_internal(
                             );
                             stats.imports_failed += 1;
                             let _ = tokio::fs::remove_file(src).await;
-                            continue;
+                            false
                         }
                     }
                 } else {
@@ -969,6 +972,16 @@ pub async fn generate_discovery_playlist_internal(
                             continue;
                         }
                     }
+                    true
+                };
+
+                // The file is gone from its slskd folder now (imported, moved
+                // or deleted), but nothing prunes the folder itself (#84).
+                if let Some(dir) = src.parent() {
+                    let _ = super::cleanup_empty_ancestors(dir, &download_base).await;
+                }
+                if !imported {
+                    continue;
                 }
 
                 // Find imported files by diffing before/after snapshots

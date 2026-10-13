@@ -38,24 +38,84 @@ pub fn unauthorized_error<E: std::fmt::Display>(e: E) -> ServerFnError {
     }
 }
 
-/// Remove a directory if empty, then recurse upward to its parent.
-/// Stops at Discovery profile directories and beets library roots.
+/// Remove `dir` if empty, then each empty parent above it, stopping below
+/// `root`. `root` itself is never removed, and a `dir` outside `root` is left
+/// alone, so the walk can never climb out of the tree the caller owns (the
+/// download directory, a library folder, a Discovery profile).
 #[cfg(feature = "server")]
-pub async fn cleanup_empty_ancestors(dir: &std::path::Path) -> Result<(), std::io::Error> {
-    let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if matches!(
-        dir_name,
-        "Discovery" | "Conservative" | "Balanced" | "Adventurous"
-    ) || dir.join(".beets_library.db").exists()
-    {
-        return Ok(());
-    }
-    let mut read_dir = tokio::fs::read_dir(dir).await?;
-    if read_dir.next_entry().await?.is_none() {
+pub async fn cleanup_empty_ancestors(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+) -> Result<(), std::io::Error> {
+    let mut dir = dir;
+    while dir != root && dir.starts_with(root) {
+        if tokio::fs::read_dir(dir)
+            .await?
+            .next_entry()
+            .await?
+            .is_some()
+        {
+            break;
+        }
         tokio::fs::remove_dir(dir).await?;
-        if let Some(parent) = dir.parent() {
-            let _ = Box::pin(cleanup_empty_ancestors(parent)).await;
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    use super::cleanup_empty_ancestors;
+
+    #[tokio::test]
+    async fn removes_empty_dirs_up_to_but_not_including_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = root.path().join("Artist/Album");
+        std::fs::create_dir_all(&leaf).unwrap();
+
+        cleanup_empty_ancestors(&leaf, root.path()).await.unwrap();
+
+        assert!(!root.path().join("Artist").exists());
+        assert!(root.path().exists());
+    }
+
+    #[tokio::test]
+    async fn stops_at_the_first_dir_that_still_holds_something() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = root.path().join("Artist/Album");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(root.path().join("Artist/cover.jpg"), b"").unwrap();
+
+        cleanup_empty_ancestors(&leaf, root.path()).await.unwrap();
+
+        assert!(!leaf.exists());
+        assert!(root.path().join("Artist/cover.jpg").exists());
+    }
+
+    #[tokio::test]
+    async fn never_removes_the_root_even_when_it_is_empty() {
+        let root = tempfile::tempdir().unwrap();
+
+        cleanup_empty_ancestors(root.path(), root.path())
+            .await
+            .unwrap();
+
+        assert!(root.path().exists());
+    }
+
+    #[tokio::test]
+    async fn leaves_a_dir_outside_the_root_alone() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("downloads");
+        let outside = base.path().join("elsewhere/empty");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        cleanup_empty_ancestors(&outside, &root).await.unwrap();
+
+        assert!(outside.exists());
+    }
 }

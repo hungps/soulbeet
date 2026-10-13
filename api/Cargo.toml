@@ -41,6 +41,7 @@ dotenvy = "0.15.7"
 
 [dev-dependencies]
 async-trait = "0.1"
+tempfile = "3"
 
 [features]
 default = []
