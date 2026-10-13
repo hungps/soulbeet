@@ -82,11 +82,12 @@ RUN . /tmp/tier.env \
 # Prune the venv. beets 2.11 declares numba/scipy as deps but never imports
 # them (only lap + numpy in autotag/match.py). Stripping these and the venv
 # bootstrap tools (pip/wheel/setuptools, never used at runtime) reclaims
-# hundreds of MB. Also drop bytecode caches, package metadata, test suites,
-# locale files, and strip native extensions.
+# hundreds of MB. Also drop bytecode caches, test suites, locale files, and
+# strip native extensions. Keep the *.dist-info metadata: some packages read
+# their own version from it at import time (httpx2 via pylast breaks lastgenre
+# without it, issue #82), and it is only a few MB.
 RUN pip uninstall -y numba llvmlite scipy pip wheel setuptools \
   && find /opt/venv -type d -name __pycache__ -prune -exec rm -rf {} + \
-  && find /opt/venv -type d -name '*.dist-info' -prune -exec rm -rf {} + \
   && find /opt/venv/lib/python3.11/site-packages -type d \( \
        -name tests -o -name test -o -name testing \
        -o -name docs -o -name doc -o -name examples \

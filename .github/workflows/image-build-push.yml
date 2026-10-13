@@ -135,6 +135,16 @@ jobs:
           # build instead of being published. The beet shebang is patched to
           # /usr/bin/python3, which is why it runs under the distroless runtime.
           docker run --rm --entrypoint=/opt/venv/bin/beet "$IMG" --version
+          # Every plugin the tier enables must load. beets only logs
+          # "error loading plugin" and still exits 0 when a plugin fails to
+          # import, so check its output against the shipped config, which the
+          # bare `--version` above never reads (issue #82).
+          out=$(docker run --rm --entrypoint=/opt/venv/bin/beet "$IMG" \
+            --config /app/beets_config.yaml version 2>&1)
+          echo "$out"
+          if grep -q "error loading plugin" <<<"$out"; then
+            echo "FAIL: a configured beets plugin does not load"; exit 1
+          fi
           # /opt/venv/bin/python3 is a dangling symlink in the distroless
           # runtime (the builder's interpreter path does not exist there);
           # the real interpreter is /usr/bin/python3, which finds the venv
