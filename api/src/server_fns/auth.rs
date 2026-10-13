@@ -46,6 +46,8 @@ enum NavidromeAuthResult {
     AuthFailed,
     /// Navidrome could not be reached (network / timeout / circuit breaker).
     Unreachable,
+    /// NAVIDROME_URL is unset or empty: this instance runs without Navidrome.
+    NotConfigured,
 }
 
 /// Try to authenticate against Navidrome with the given credentials.
@@ -59,7 +61,7 @@ async fn try_navidrome_auth(username: &str, password: &str) -> NavidromeAuthResu
 
     let url = match std::env::var("NAVIDROME_URL") {
         Ok(u) if !u.is_empty() => u,
-        _ => return NavidromeAuthResult::Unreachable,
+        _ => return NavidromeAuthResult::NotConfigured,
     };
 
     let client = match NavidromeClientBuilder::new()
@@ -177,17 +179,23 @@ pub async fn login(username: String, password: String) -> Result<AuthResponse, S
                 navidrome_status: NavidromeStatus::InvalidCredentials,
             })
         }
-        NavidromeAuthResult::Unreachable => {
-            // Navidrome is down. Fall back to local password verification.
+        result @ (NavidromeAuthResult::Unreachable | NavidromeAuthResult::NotConfigured) => {
+            // Navidrome is down or not set up. Fall back to local password
+            // verification. Without Navidrome the status stays Unknown ("not
+            // configured") so the UI does not report a server that is down.
+            let status = match result {
+                NavidromeAuthResult::NotConfigured => NavidromeStatus::Unknown,
+                _ => NavidromeStatus::Offline,
+            };
             let user = User::verify(&username, &password)
                 .await
                 .map_err(|_| unauthorized_error("Invalid username or password"))?;
 
-            // Mark Navidrome status as offline (keep existing token)
+            // Keep the existing token so it works again once Navidrome is back
             User::update_navidrome_token(
                 &user.id,
                 user.navidrome_token.as_deref(),
-                NavidromeStatus::Offline.as_str(),
+                status.as_str(),
             )
             .await
             .map_err(server_error)?;
@@ -199,7 +207,7 @@ pub async fn login(username: String, password: String) -> Result<AuthResponse, S
             Ok(AuthResponse {
                 username: user.username,
                 user_id: user.id,
-                navidrome_status: NavidromeStatus::Offline,
+                navidrome_status: status,
             })
         }
     }

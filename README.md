@@ -96,7 +96,9 @@ docker-compose up -d
 
 ### Initial Setup
 
-1.  Open `http://localhost:9765` and log in with your **Navidrome credentials**.
+1.  Open `http://localhost:9765` and log in.
+    - **With Navidrome** (`NAVIDROME_URL` set): use your **Navidrome credentials**. Your account is created on first login.
+    - **Without Navidrome** (`NAVIDROME_URL` unset): log in as `admin` / `admin`, then change that password or create your own account in **Settings > Users**.
 2.  In **Settings > Config**, connect slskd (URL + API key). [How to get an slskd API key](https://github.com/slskd/slskd/blob/master/docs/config.md#yaml-24).
 3.  In **Settings > Library**, add your music folders (e.g. `/music`).
 4.  That's it. Search for something and download it.
@@ -112,9 +114,11 @@ For discovery (optional): add your Last.fm API key and/or ListenBrainz token in 
 | `DATABASE_URL` | Connection string for SQLite | `sqlite:soulbeet.db` |
 | `DOWNLOAD_PATH` | Path where slskd saves downloads | `/downloads` |
 | `SECRET_KEY` | Encryption key for tokens and credentials | |
-| `NAVIDROME_URL` | Your Navidrome server URL | |
+| `NAVIDROME_URL` | Your Navidrome server URL. Optional: without it you log in with local accounts, and discovery playlists, rating sync and auto-delete are unavailable | |
 | `BEETS_CONFIG` | Path to custom beets config file | `beets_config.yaml` |
 | `BEETS_ALBUM_MODE` | Enable album import mode (see below) | `false` |
+
+**Note**: Local passwords always work. If Navidrome rejects your credentials or can't be reached, Soulbeet checks the password stored in its own database, which is updated to your Navidrome password on every successful Navidrome login.
 
 **Note**: slskd URL and API key are configured through the web UI (Settings > Config) and stored in the database. Scrobble credentials (Last.fm API key, ListenBrainz token) are configured per-user in Settings > Library.
 
