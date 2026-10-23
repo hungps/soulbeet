@@ -111,6 +111,8 @@ fn WebNavbar() -> Element {
     let mut search_reset = use_signal(|| 0);
     #[allow(unused_mut)] // mutated in websocket callback (web feature only)
     let mut downloads = use_signal::<HashMap<String, DownloadProgress>>(HashMap::new);
+    #[allow(unused_mut)]
+    let mut has_downloads = use_signal(|| false);
 
     let search_prefill = use_signal(|| None::<(String, String)>);
     use_context_provider(|| SearchReset(search_reset));
@@ -130,6 +132,11 @@ fn WebNavbar() -> Element {
                     for file in data {
                         map.insert(file.item.clone(), file);
                     }
+                    let active = !map.is_empty();
+                    drop(map);
+                    if *has_downloads.peek() != active {
+                        has_downloads.set(active);
+                    }
                 }
                 DownloadEvent::Replaced {
                     previous_item,
@@ -138,6 +145,11 @@ fn WebNavbar() -> Element {
                     let mut map = downloads.write();
                     map.remove(&previous_item);
                     map.insert(entry.item.clone(), entry);
+                    let active = !map.is_empty();
+                    drop(map);
+                    if *has_downloads.peek() != active {
+                        has_downloads.set(active);
+                    }
                 }
                 DownloadEvent::AutoDownload(auto_event) => {
                     auto_download_signal.set(Some(auto_event));
@@ -238,7 +250,7 @@ fn WebNavbar() -> Element {
                         }
                     }
 
-                    if !downloads.read().is_empty() {
+                    if has_downloads() {
                         span { class: "absolute top-1.5 right-1.5 flex h-2.5 w-2.5",
                             span { class: "animate-ping absolute inline-flex h-full w-full rounded-full bg-beet-accent opacity-75" }
                             span { class: "relative inline-flex rounded-full h-2.5 w-2.5 bg-beet-accent" }
@@ -255,7 +267,7 @@ fn WebNavbar() -> Element {
 
             NavidromeBanner {}
 
-            main { class: "px-4 sm:px-6 lg:px-8 flex-grow flex flex-col relative overflow-y-auto w-full py-8 no-scrollbar",
+            main { class: "px-4 sm:px-6 lg:px-8 flex-grow flex flex-col relative overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch] w-full py-8 no-scrollbar",
                 Outlet::<Route> {}
             }
             Downloads { is_open: downloads_open, downloads }

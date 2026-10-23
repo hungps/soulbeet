@@ -15,8 +15,8 @@ pub fn SettingsPage() -> Element {
     let mut active_tab = use_signal(SettingsTab::default);
 
     rsx! {
-        div { class: "fixed top-1/4 -left-10 w-64 h-64 bg-beet-accent/10 rounded-full blur-[100px] pointer-events-none" }
-        div { class: "fixed bottom-1/4 -right-10 w-64 h-64 bg-beet-leaf/10 rounded-full blur-[100px] pointer-events-none" }
+        div { class: "fixed top-1/4 -left-10 w-64 h-64 bg-beet-accent/10 rounded-full blur-[100px] pointer-events-none max-md:hidden" }
+        div { class: "fixed bottom-1/4 -right-10 w-64 h-64 bg-beet-leaf/10 rounded-full blur-[100px] pointer-events-none max-md:hidden" }
 
         div { class: "space-y-6 text-white w-full max-w-3xl z-10 mx-auto",
             div { class: "text-center mb-6",

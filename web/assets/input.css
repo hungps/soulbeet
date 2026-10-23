@@ -72,3 +72,15 @@ body {
         linear-gradient(90deg, rgba(26, 11, 46, 0.5) 1px, transparent 1px);
     background-size: 40px 40px;
 }
+
+@media (max-width: 767px) {
+    .crt-overlay {
+        display: none;
+    }
+
+    .backdrop-blur-sm,
+    .backdrop-blur-md {
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
+    }
+}

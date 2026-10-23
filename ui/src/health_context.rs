@@ -35,7 +35,9 @@ pub fn HealthProvider(children: Element) -> Element {
         loop {
             if auth.is_logged_in() {
                 if let Ok(health) = auth.call(api::get_system_health()).await {
-                    state.set(health);
+                    if *state.peek() != health {
+                        state.set(health);
+                    }
                 }
             }
             gloo_timers::future::TimeoutFuture::new(10_000).await;
