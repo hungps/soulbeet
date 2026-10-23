@@ -124,6 +124,8 @@ pub struct DownloadMonitor {
     cancellation_token: CancellationToken,
     /// Username for logging.
     username: String,
+    /// User that owns the batch, used to trigger a library scan after import.
+    user_id: String,
     /// Batch identifier for grouping downloads.
     batch_id: Option<String>,
     /// Human-readable batch label (album name).
@@ -136,6 +138,7 @@ pub struct DownloadMonitor {
 
 impl DownloadMonitor {
     /// Create a new download monitor.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sources: Vec<String>,
         filenames: Vec<String>,
@@ -143,6 +146,7 @@ impl DownloadMonitor {
         tx: broadcast::Sender<DownloadEvent>,
         cancellation_token: CancellationToken,
         username: String,
+        user_id: String,
         batch_id: Option<String>,
         batch_label: Option<String>,
     ) -> Self {
@@ -165,6 +169,7 @@ impl DownloadMonitor {
             album_mode: CONFIG.is_album_mode(),
             cancellation_token,
             username,
+            user_id,
             batch_id,
             batch_label,
             last_readable_poll: Instant::now(),
@@ -704,8 +709,9 @@ impl DownloadMonitor {
                 let dl = download.clone();
                 let tp = self.target_path.clone();
                 let tx_clone = self.tx.clone();
+                let user_id = self.user_id.clone();
                 tokio::spawn(async move {
-                    process_downloads(vec![dl], tp, tx_clone).await;
+                    process_downloads(vec![dl], tp, tx_clone, user_id).await;
                 });
             }
 
@@ -903,7 +909,13 @@ impl DownloadMonitor {
                 "Album mode: Processing {} successful downloads together",
                 successful.len()
             );
-            process_downloads(successful, self.target_path.clone(), self.tx.clone()).await;
+            process_downloads(
+                successful,
+                self.target_path.clone(),
+                self.tx.clone(),
+                self.user_id.clone(),
+            )
+            .await;
         } else {
             info!("Album mode: No successful downloads to process");
         }
@@ -1083,6 +1095,7 @@ mod tests {
             PathBuf::from("/tmp"),
             tx,
             CancellationToken::new(),
+            "tester".to_string(),
             "tester".to_string(),
             None,
             None,

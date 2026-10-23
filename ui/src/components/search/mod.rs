@@ -661,7 +661,11 @@ pub fn Search() -> Element {
         }
 
 
-        SystemStatus { health: system_health.get(), navidrome_status: auth.navidrome_status() }
+        SystemStatus {
+            health: system_health.get(),
+            media_status: auth.media_status(),
+            media_server: auth.media_server(),
+        }
 
         // Results
         if let Some(results) = download_options.read().clone() {

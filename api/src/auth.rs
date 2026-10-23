@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
-use shared::system::NavidromeStatus;
+use shared::media_server::MediaServerKind;
+use shared::system::MediaServerStatus;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct AuthResponse {
     pub username: String,
     pub user_id: String,
     #[serde(default)]
-    pub navidrome_status: NavidromeStatus,
+    pub media_server: MediaServerKind,
+    #[serde(default)]
+    pub media_status: MediaServerStatus,
 }
 
 #[cfg(feature = "server")]

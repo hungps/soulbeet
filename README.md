@@ -15,9 +15,9 @@ Screenshots: [here](./screenshots)
 ## Features
 
 - **Search & Download**: Find albums and tracks, hit download. Soulbeet picks the best available source from Soulseek, downloads it, tags it with beets, and puts it in your library. No manual file management.
-- **Music Discovery**: Soulbeet analyzes your Last.fm and ListenBrainz history, finds new music through track similarity, artist exploration, collaborative filtering, and genre discovery, downloads the best candidates, and pushes playlists to your Navidrome server. Fully automatic.
+- **Music Discovery**: Soulbeet analyzes your Last.fm and ListenBrainz history, finds new music through track similarity, artist exploration, collaborative filtering, and genre discovery, downloads the best candidates, and pushes playlists to your Navidrome or Plex server. Fully automatic.
 - **Three Discovery Profiles**: Conservative (close to what you know), Balanced, or Adventurous (unfamiliar territory). Run one or all three, each with its own playlist.
-- **Rate & Keep**: Listen in Navidrome. 3+ stars promotes a track to your permanent library, 1 star deletes it. Unrated tracks expire and get replaced with fresh picks.
+- **Rate & Keep**: Listen in Navidrome or Plex. 3+ stars promotes a track to your permanent library, 1 star deletes it. Unrated tracks expire and get replaced with fresh picks.
 - **Multi-user**: Private or shared folders. Each user gets their own discovery profiles, scrobble credentials, and preferences.
 - **Multiple Metadata Providers**: MusicBrainz (albums) or Last.fm (single tracks), selectable per user.
 
@@ -26,8 +26,8 @@ Screenshots: [here](./screenshots)
 You search, you click download. Behind the scenes:
 
 1. **Soulbeet** finds the best source on Soulseek, downloads it through **slskd**, tags and organizes it with **beets**, and puts it in your library.
-2. **Navidrome** picks up the new files and makes them streamable.
-3. For discovery: **Last.fm / ListenBrainz** feed your listening history into the recommendation engine, which finds new tracks, downloads them, and pushes playlists to Navidrome.
+2. **Navidrome** or **Plex** picks up the new files and makes them streamable.
+3. For discovery: **Last.fm / ListenBrainz** feed your listening history into the recommendation engine, which finds new tracks, downloads them, and pushes playlists to your media server.
 
 ## Self-Hosting with Docker
 
@@ -54,7 +54,6 @@ services:
       - DATABASE_URL=sqlite:/data/soulbeet.db
       - DOWNLOAD_PATH=/downloads
       - SECRET_KEY=change-me-in-production
-      - NAVIDROME_URL=http://navidrome:4533
       # Optional
       - BEETS_CONFIG=/config/config.yaml
     volumes:
@@ -64,29 +63,9 @@ services:
     depends_on:
       - slskd
       - navidrome
-
-  navidrome:
-    image: deluan/navidrome:latest
-    ports:
-      - "4533:4533"
-    environment:
-      - ND_MUSICFOLDER=/music
-    volumes:
-      - ./navidrome-data:/data
-      - /path/to/music:/music
-
-  slskd:
-    image: slskd/slskd
-    environment:
-      - SLSKD_REMOTE_CONFIGURATION=true
-    volumes:
-      - ./slskd-config:/app/slskd.conf.d
-      - /path/to/slskd/downloads:/app/downloads
-    ports:
-      - "5030:5030"
 ```
 
-2.  **Important**: The `/downloads` volume must match between `slskd` and `soulbeet` so Soulbeet can see the files `slskd` downloaded. The `/music` volume must match between `soulbeet` and `navidrome` so Navidrome can see the organized library. Soulbeet requires **slskd 0.26 or newer** (downloads are enqueued through the batches API introduced in 0.26).
+2.  **Important**: The `/downloads` volume must match between `slskd` and `soulbeet` so Soulbeet can see the files `slskd` downloaded. The `/music` volume must match between `soulbeet` and your media server (`navidrome` or `plex`) so it can see the organized library. Soulbeet requires **slskd 0.26 or newer** (downloads are enqueued through the batches API introduced in 0.26).
 
 3.  Run:
 
@@ -96,12 +75,11 @@ docker-compose up -d
 
 ### Initial Setup
 
-1.  Open `http://localhost:9765` and log in.
-    - **With Navidrome** (`NAVIDROME_URL` set): use your **Navidrome credentials**. Your account is created on first login.
-    - **Without Navidrome** (`NAVIDROME_URL` unset): log in as `admin` / `admin`, then change that password or create your own account in **Settings > Users**.
+1.  Open `http://localhost:9765` and log in with default admin/admin account
 2.  In **Settings > Config**, connect slskd (URL + API key). [How to get an slskd API key](https://github.com/slskd/slskd/blob/master/docs/config.md#yaml-24).
 3.  In **Settings > Library**, add your music folders (e.g. `/music`).
-4.  That's it. Search for something and download it.
+4.  In **Settings > Media Server**, choose the active server. Navidrome users can override the URL and credentials; Plex users can log in, pick a server from their plex.tv account, and toggle HTTPS. Add path mappings when Soulbeet and the media server mount the library at different paths.
+5.  That's it. Search for something and download it.
 
 For discovery (optional): add your Last.fm API key and/or ListenBrainz token in Settings > Library, enable discovery on a folder, pick your profiles, and hit Generate.
 
@@ -114,13 +92,11 @@ For discovery (optional): add your Last.fm API key and/or ListenBrainz token in 
 | `DATABASE_URL` | Connection string for SQLite | `sqlite:soulbeet.db` |
 | `DOWNLOAD_PATH` | Path where slskd saves downloads | `/downloads` |
 | `SECRET_KEY` | Encryption key for tokens and credentials | |
-| `NAVIDROME_URL` | Your Navidrome server URL. Optional: without it you log in with local accounts, and discovery playlists, rating sync and auto-delete are unavailable | |
 | `BEETS_CONFIG` | Path to custom beets config file | `beets_config.yaml` |
 | `BEETS_ALBUM_MODE` | Enable album import mode (see below) | `false` |
 
-**Note**: Local passwords always work. If Navidrome rejects your credentials or can't be reached, Soulbeet checks the password stored in its own database, which is updated to your Navidrome password on every successful Navidrome login.
 
-**Note**: slskd URL and API key are configured through the web UI (Settings > Config) and stored in the database. Scrobble credentials (Last.fm API key, ListenBrainz token) are configured per-user in Settings > Library.
+**Note**: slskd URL and API key are configured through the web UI (Settings > Config) and stored in the database. Scrobble credentials (Last.fm API key, ListenBrainz token) are configured per-user in Settings > Library. Navidrome and Plex URLs and credentials are configured per-user in Settings > Media Server.
 
 ### Beets Configuration
 
@@ -194,13 +170,19 @@ match:
 
 ### Discovery Setup
 
-Discovery generates personalized playlists from your scrobble history and pushes them to Navidrome. Here's how to set it up.
+Discovery generates personalized playlists from your scrobble history and pushes them to Navidrome or Plex. Here's how to set it up.
 
-#### Navidrome Configuration
+#### Media Server Configuration
+
+Your Soulbeet folder paths must point to the same physical directories that the media server's music library uses. The mount paths inside each container can differ (e.g. Soulbeet at `/music`, Navidrome at `/media/music`), as long as they map to the same files on the host. Add a **path mapping** in **Settings > Media Server** (local path → server path) when the paths differ.
+
+**Navidrome**
 
 1. **Enable ReportRealPath** for the Soulbeet player. Go to your Navidrome instance > Settings > Players (e.g. `https://your-navidrome/app/#/player`), find the Soulbeet player entry, and enable "Report Real Path". Without this, rating sync and auto-delete cannot resolve file paths.
 
-2. Your Soulbeet folder paths must point to the same physical directories that Navidrome's music library uses. The mount paths inside each container can differ (e.g. Soulbeet at `/music`, Navidrome at `/media/music`), as long as they map to the same files on the host.
+**Plex**
+
+1. No player setting is required: Plex reports the indexed file path directly. Make sure the Plex token belongs to an account that can access the music library.
 
 #### Soulbeet Configuration
 
@@ -214,12 +196,13 @@ Discovery generates personalized playlists from your scrobble history and pushes
 
 - Discovery creates a `Discovery/` directory inside your chosen folder, with subdirectories per profile (e.g., `Discovery/Balanced/`, `Discovery/Adventurous/`).
 - Tracks are downloaded from Soulseek, imported via beets into the profile subdirectory, and tagged properly.
-- A smart playlist is created in Navidrome (via the native API) for each profile, filtered by the folder path. The playlist auto-updates as Navidrome scans new files.
+- On Navidrome, a smart playlist is created (via the native API) for each profile, filtered by the folder path. The playlist auto-updates as Navidrome scans new files.
+- On Plex, a regular playlist is created from the tracks currently in the profile's `Discovery/` folder and replaced on every reconciliation (6-hour automation, and after each generation once Plex finishes scanning).
 - Every 6 hours, an automation task syncs ratings, creates playlists if missing, and regenerates expired discovery batches.
 
 #### Auto-Delete
 
-When enabled (Settings > Library > Auto-delete), 1-star tracks are deleted from disk during rating sync. This requires ReportRealPath to be enabled in Navidrome so Soulbeet receives the actual file path. For shared folders (multiple users), a track is only deleted if the average rating across all users is 1 or below.
+When enabled (Settings > Library > Auto-delete), 1-star tracks are deleted from disk during rating sync. This requires ReportRealPath on Navidrome so Soulbeet receives the actual file path; Plex reports paths directly. For shared folders on Navidrome, a track is only deleted if the average rating across all users is 1 or below. Plex ratings are per account, so that shared-veto check is unavailable.
 
 ## Development
 

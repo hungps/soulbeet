@@ -18,8 +18,10 @@ pub struct User {
     pub username: String,
     #[serde(skip)]
     pub password_hash: String,
-    pub navidrome_token: Option<String>,
-    pub navidrome_status: String,
+    pub media_server: String,
+    pub media_token: Option<String>,
+    pub media_status: String,
+    pub media_account_id: Option<String>,
 }
 
 #[cfg(feature = "server")]
@@ -35,12 +37,12 @@ impl User {
         let id = Uuid::new_v4().to_string();
 
         let user = sqlx::query_as::<_, User>(
-            "INSERT INTO users (id, username, password_hash, navidrome_status) VALUES (?, ?, ?, ?) RETURNING *"
+            "INSERT INTO users (id, username, password_hash, media_status) VALUES (?, ?, ?, ?) RETURNING *"
         )
         .bind(&id)
         .bind(username)
         .bind(password_hash)
-        .bind(shared::system::NavidromeStatus::Unknown.as_str())
+        .bind(shared::system::MediaServerStatus::Unknown.as_str())
         .fetch_one(&*DB)
         .await
         .map_err(|e| e.to_string())?;
@@ -134,14 +136,48 @@ impl User {
             .map_err(|e| e.to_string())
     }
 
-    pub async fn update_navidrome_token(
+    pub async fn update_media(
         id: &str,
+        server: &str,
+        token: Option<&str>,
+        status: &str,
+        account_id: Option<&str>,
+    ) -> Result<(), String> {
+        sqlx::query(
+            "UPDATE users SET media_server = ?, media_token = ?, media_status = ?, media_account_id = ? WHERE id = ?",
+        )
+        .bind(server)
+        .bind(token)
+        .bind(status)
+        .bind(account_id)
+        .bind(id)
+        .execute(&*DB)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn set_active_media(
+        id: &str,
+        server: &str,
         token: Option<&str>,
         status: &str,
     ) -> Result<(), String> {
-        sqlx::query("UPDATE users SET navidrome_token = ?, navidrome_status = ? WHERE id = ?")
-            .bind(token)
-            .bind(status)
+        sqlx::query(
+            "UPDATE users SET media_server = ?, media_token = ?, media_status = ? WHERE id = ?",
+        )
+        .bind(server)
+        .bind(token)
+        .bind(status)
+        .bind(id)
+        .execute(&*DB)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn clear_media_account(id: &str) -> Result<(), String> {
+        sqlx::query("UPDATE users SET media_account_id = NULL WHERE id = ?")
             .bind(id)
             .execute(&*DB)
             .await
@@ -149,10 +185,24 @@ impl User {
         Ok(())
     }
 
+    pub async fn get_by_media_account(
+        server: &str,
+        account_id: &str,
+    ) -> Result<Option<User>, String> {
+        sqlx::query_as::<_, User>(
+            "SELECT * FROM users WHERE media_server = ? AND media_account_id = ?",
+        )
+        .bind(server)
+        .bind(account_id)
+        .fetch_optional(&*DB)
+        .await
+        .map_err(|e| e.to_string())
+    }
+
     pub async fn get_connected_users() -> Result<Vec<User>, String> {
-        sqlx::query_as::<_, User>("SELECT * FROM users WHERE navidrome_status IN (?, ?)")
-            .bind(shared::system::NavidromeStatus::Connected.as_str())
-            .bind(shared::system::NavidromeStatus::MissingReportRealPath.as_str())
+        sqlx::query_as::<_, User>("SELECT * FROM users WHERE media_status IN (?, ?)")
+            .bind(shared::system::MediaServerStatus::Connected.as_str())
+            .bind(shared::system::MediaServerStatus::MissingReportRealPath.as_str())
             .fetch_all(&*DB)
             .await
             .map_err(|e| e.to_string())

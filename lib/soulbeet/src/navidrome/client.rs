@@ -5,6 +5,8 @@ use url::Url;
 
 use crate::error::{Result, SoulseekError};
 use crate::http::{resolve_docker_url, CircuitBreaker};
+use crate::traits::{MediaServer, PlaylistSpec};
+use shared::media_server::{MediaAlbum, MediaServerKind, MediaTrack};
 
 use super::models::*;
 
@@ -592,5 +594,110 @@ impl NavidromeClient {
             status: 0,
             message: format!("Failed to parse players response: {}", e),
         })
+    }
+}
+
+fn map_song(song: SubsonicSong) -> MediaTrack {
+    MediaTrack {
+        id: song.id,
+        title: song.title,
+        artist: song.artist,
+        album: song.album,
+        genre: song.genre,
+        duration_secs: song.duration,
+        path: song.path,
+        user_rating: song.user_rating,
+        average_rating: song.average_rating,
+        play_count: song.play_count,
+    }
+}
+
+#[async_trait::async_trait]
+impl MediaServer for NavidromeClient {
+    fn kind(&self) -> MediaServerKind {
+        MediaServerKind::Navidrome
+    }
+
+    async fn ping(&self) -> Result<()> {
+        NavidromeClient::ping(self).await
+    }
+
+    async fn start_scan(&self) -> Result<()> {
+        NavidromeClient::start_scan(self).await
+    }
+
+    async fn get_scan_status(&self) -> Result<bool> {
+        NavidromeClient::get_scan_status(self).await
+    }
+
+    async fn get_tracks(&self) -> Result<Vec<MediaTrack>> {
+        Ok(self
+            .get_all_songs_with_ratings()
+            .await?
+            .into_iter()
+            .map(map_song)
+            .collect())
+    }
+
+    async fn get_albums(&self) -> Result<Vec<MediaAlbum>> {
+        Ok(self
+            .get_all_albums()
+            .await?
+            .into_iter()
+            .map(|album| {
+                let name = album.display_name().to_string();
+                MediaAlbum {
+                    id: album.id,
+                    name,
+                    artist: album.artist,
+                    song_count: album.song_count,
+                    genre: album.genre,
+                }
+            })
+            .collect())
+    }
+
+    fn needs_report_real_path(&self) -> bool {
+        true
+    }
+
+    async fn report_real_path_enabled(&self) -> Result<Option<bool>> {
+        let players = self.get_players().await?;
+        Ok(players
+            .iter()
+            .find(|p| p.client == "Soulbeet")
+            .map(|p| p.report_real_path))
+    }
+
+    async fn reconcile_playlist(&self, spec: &PlaylistSpec<'_>) -> Result<Option<String>> {
+        let profile_path = match self.get_songs_by_path_prefix(spec.profile, 50).await {
+            Ok(songs) if !songs.is_empty() => {
+                let song_path = &songs[0].path;
+                if let Some(idx) = song_path.find(&format!("{}/", spec.profile)) {
+                    let end = idx + spec.profile.len();
+                    song_path[..end].to_string()
+                } else {
+                    warn!(
+                        "Could not extract profile prefix from song path '{}', falling back to Discovery/{}",
+                        song_path, spec.profile
+                    );
+                    format!("Discovery/{}", spec.profile)
+                }
+            }
+            _ => format!("Discovery/{}", spec.profile),
+        };
+
+        let playlist_id = self
+            .create_smart_playlist(spec.name, spec.comment, &profile_path)
+            .await?;
+        info!(
+            "Created smart playlist '{}' (path filter: {})",
+            spec.name, profile_path
+        );
+        Ok(Some(playlist_id))
+    }
+
+    async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
+        self.delete_smart_playlist(playlist_id).await
     }
 }

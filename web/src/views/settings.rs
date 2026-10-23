@@ -1,11 +1,14 @@
 use dioxus::prelude::*;
-use ui::settings::{AppConfigManager, FolderManager, PreferencesManager, UserManager};
+use ui::settings::{
+    AppConfigManager, FolderManager, MediaServerManager, PreferencesManager, UserManager,
+};
 
 #[derive(PartialEq, Clone, Copy, Default)]
 enum SettingsTab {
     #[default]
     Search,
     Library,
+    MediaServer,
     Users,
     Config,
 }
@@ -40,6 +43,12 @@ pub fn SettingsPage() -> Element {
                     onclick: move |_| active_tab.set(SettingsTab::Library),
                 }
                 TabButton {
+                    label: "Media Server",
+                    icon_path: "M4 7v3a2 2 0 002 2h12a2 2 0 002-2V7a2 2 0 00-2-2H6a2 2 0 00-2 2zm0 10v-3a2 2 0 012-2h12a2 2 0 012 2v3a2 2 0 01-2 2H6a2 2 0 01-2-2z",
+                    active: active_tab() == SettingsTab::MediaServer,
+                    onclick: move |_| active_tab.set(SettingsTab::MediaServer),
+                }
+                TabButton {
                     label: "Users",
                     icon_path: "M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z",
                     active: active_tab() == SettingsTab::Users,
@@ -58,6 +67,7 @@ pub fn SettingsPage() -> Element {
                 match active_tab() {
                     SettingsTab::Search => rsx! { PreferencesManager {} },
                     SettingsTab::Library => rsx! { FolderManager {} },
+                    SettingsTab::MediaServer => rsx! { MediaServerManager {} },
                     SettingsTab::Users => rsx! { UserManager {} },
                     SettingsTab::Config => rsx! { AppConfigManager {} },
                 }

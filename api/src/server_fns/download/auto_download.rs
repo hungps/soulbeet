@@ -123,6 +123,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
     let album = req.query.album.clone();
     let tracks = req.query.tracks.clone();
     let task_username = username.clone();
+    let task_user_id = auth.0.sub.clone();
 
     tokio::spawn(async move {
         // Send Searching event
@@ -380,6 +381,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             tx,
             task_cancellation,
             task_username.clone(),
+            task_user_id,
             Some(batch_id),
             Some(batch_label),
         )

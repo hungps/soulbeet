@@ -2,6 +2,8 @@ use dioxus::prelude::*;
 use shared::navidrome::{DiscoveryConfig, DiscoveryTrack};
 
 #[cfg(feature = "server")]
+use shared::media_server::MediaServerKind;
+#[cfg(feature = "server")]
 use shared::navidrome::DiscoveryStatus;
 
 #[cfg(feature = "server")]
@@ -911,10 +913,7 @@ pub async fn generate_discovery_playlist_internal(
                             true
                         }
                         Ok(soulbeet::ImportResult::Skipped(reason)) => {
-                            warn!(
-                                "Beets skipped '{}' - {}: {}",
-                                qt.artist, qt.track, reason
-                            );
+                            warn!("Beets skipped '{}' - {}: {}", qt.artist, qt.track, reason);
                             stats.imports_skipped += 1;
                             let _ = tokio::fs::remove_file(src).await;
                             // A duplicate is a permanent condition: the library
@@ -1038,26 +1037,28 @@ pub async fn generate_discovery_playlist_internal(
 
     UserSettings::update_discovery_last_generated(user_id).await?;
 
-    // Trigger a Navidrome scan then wait for it to finish so playlists can be created.
+    // Trigger a media-server scan then wait for it to finish so playlists can
+    // reference the new files.
     if total_downloads > 0 {
-        if let Ok(navi) = crate::services::navidrome_client_for_user(user_id).await {
-            if let Err(e) = navi.start_scan().await {
-                warn!("Failed to trigger Navidrome scan: {}", e);
+        if let Ok(server) = crate::services::media_server_for_user(user_id).await {
+            if let Err(e) = server.start_scan().await {
+                warn!("Failed to trigger {} scan: {}", server.kind(), e);
             } else {
                 info!(
-                    "Triggered Navidrome library scan after {} discovery imports",
+                    "Triggered {} library scan after {} discovery imports",
+                    server.kind(),
                     total_downloads
                 );
                 // Wait for scan to complete (poll every 3s, max 2 min)
                 for _ in 0..40u32 {
                     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                    match navi.get_scan_status().await {
+                    match server.get_scan_status().await {
                         Ok(false) => break,
                         Ok(true) => continue,
                         Err(_) => break,
                     }
                 }
-                // Create/update smart playlists now that tracks are indexed
+                // Create/update playlists now that tracks are indexed
                 if let Err(e) = reconcile_discovery_playlists(user_id).await {
                     warn!("Playlist reconciliation after generation failed: {}", e);
                 }
@@ -1071,11 +1072,12 @@ pub async fn generate_discovery_playlist_internal(
     })
 }
 
-/// Create or update smart playlists in Navidrome for each discovery profile.
+/// Create or update the media-server playlists for each discovery profile.
 ///
-/// Uses Navidrome's native API to create smart playlists with a filepath rule
-/// that matches the Discovery/{profile}/ directory. The playlist auto-updates
-/// as Navidrome scans new files. Owned by the authenticated user.
+/// Navidrome gets a smart playlist with a filepath rule that auto-updates as
+/// its library scans. Plex has no path-filtered smart playlists through its
+/// API, so its playlist is materialised from the pending discovery tracks and
+/// replaced on every reconciliation.
 #[cfg(feature = "server")]
 pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> {
     let settings = UserSettings::get(user_id).await?;
@@ -1090,15 +1092,31 @@ pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> 
         .await?
         .ok_or("Discovery folder not found")?;
 
-    let navi = match crate::services::navidrome_client_for_user(user_id).await {
+    let server = match crate::services::media_server_for_user(user_id).await {
         Ok(c) => c,
         Err(e) => {
             info!(
-                "Playlist reconciliation skipped (no Navidrome client): {}",
+                "Playlist reconciliation skipped (no media-server client): {}",
                 e
             );
             return Ok(());
         }
+    };
+
+    let library = if server.needs_library() {
+        match server.get_tracks().await {
+            Ok(tracks) => tracks,
+            Err(e) => {
+                warn!(
+                    "Playlist reconciliation could not list {} tracks: {}",
+                    server.kind(),
+                    e
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
     };
 
     let selected_profiles = parse_profiles(&settings.discovery_profiles);
@@ -1106,12 +1124,18 @@ pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> 
     for profile in &selected_profiles {
         let profile_name = profile.to_string();
 
-        // Delete stale playlist so we can recreate with the correct rule
-        if let Some(old_id) = UserSettings::get_playlist_id_for_profile(
+        let old_id = UserSettings::get_playlist_id_for_profile(
             &settings.discovery_navidrome_playlist_id,
             &profile_name,
-        ) {
-            let _ = navi.delete_smart_playlist(&old_id).await;
+        );
+
+        // Navidrome playlists are recreated from scratch, so delete first.
+        // Plex playlists are only replaced after the new one exists, which
+        // keeps the old one when the library has not indexed the files yet.
+        if server.kind() == MediaServerKind::Navidrome {
+            if let Some(id) = &old_id {
+                let _ = server.delete_playlist(id).await;
+            }
         }
 
         let playlist_name = UserSettings::get_playlist_name_for_profile(
@@ -1119,41 +1143,41 @@ pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> 
             &profile_name,
         );
 
-        // Derive the Navidrome-relative path prefix by sampling a song from this profile's folder.
-        // The native API returns the raw media_file.path (relative to library root), which is what
-        // the filepath smart playlist operator matches against.
-        let profile_path = match navi.get_songs_by_path_prefix(&profile_name, 50).await {
-            Ok(songs) if !songs.is_empty() => {
-                // Extract the directory prefix from the first song's path.
-                // Song path looks like "Discovery/Balanced/Artist/Album/track.flac"
-                // or "staging/Discovery/Balanced/Artist/Album/track.flac"
-                // We want everything up to and including the profile name.
-                let song_path = &songs[0].path;
-                if let Some(idx) = song_path.find(&format!("{}/", profile_name)) {
-                    let end = idx + profile_name.len();
-                    song_path[..end].to_string()
-                } else {
-                    // Song matched but path doesn't contain profile name as a directory
-                    warn!(
-                        "Could not extract profile prefix from song path '{}', falling back to Discovery/{}",
-                        song_path, profile_name
-                    );
-                    format!("Discovery/{}", profile_name)
-                }
-            }
-            _ => {
-                // No songs imported yet (first run) or API error: use hardcoded default.
-                // This is correct because on first run the folder structure matches the default.
-                format!("Discovery/{}", profile_name)
-            }
-        };
-        let comment = format!("Soulbeet discovery ({})", profile_name);
+        let paths: Vec<String> =
+            DiscoveryTrackRow::get_pending_by_folder_and_profile(&folder_id, &profile_name)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|track| track.path)
+                .collect();
 
-        match navi
-            .create_smart_playlist(&playlist_name, &comment, &profile_path)
-            .await
-        {
-            Ok(playlist_id) => {
+        let mut mapped_paths = Vec::with_capacity(paths.len());
+        for path in paths {
+            match crate::models::media_server::local_to_remote(user_id, server.kind(), &path).await
+            {
+                Ok(Some(remote)) => mapped_paths.push(remote),
+                _ => mapped_paths.push(path),
+            }
+        }
+
+        let comment = format!("Soulbeet discovery ({})", profile_name);
+        let spec = soulbeet::PlaylistSpec {
+            name: &playlist_name,
+            comment: &comment,
+            profile: &profile_name,
+            paths: &mapped_paths,
+            library: &library,
+        };
+
+        match server.reconcile_playlist(&spec).await {
+            Ok(Some(playlist_id)) => {
+                if server.kind() == MediaServerKind::Plex {
+                    if let Some(id) = &old_id {
+                        if id != &playlist_id {
+                            let _ = server.delete_playlist(id).await;
+                        }
+                    }
+                }
                 if let Err(e) =
                     UserSettings::update_discovery_playlist_id(user_id, &profile_name, &playlist_id)
                         .await
@@ -1161,12 +1185,30 @@ pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> 
                     warn!("Failed to save playlist ID for '{}': {}", profile_name, e);
                 }
                 info!(
-                    "Created smart playlist '{}' (path filter: {}) for user {}",
-                    playlist_name, profile_path, user_id
+                    "Created {} playlist '{}' for user {}",
+                    server.kind(),
+                    playlist_name,
+                    user_id
+                );
+            }
+            Ok(None) => {
+                if server.kind() == MediaServerKind::Navidrome || mapped_paths.is_empty() {
+                    if let Some(id) = &old_id {
+                        let _ = server.delete_playlist(id).await;
+                    }
+                    let _ = UserSettings::clear_discovery_playlist_id(user_id, &profile_name).await;
+                }
+                info!(
+                    "No {} tracks available for playlist '{}' yet",
+                    server.kind(),
+                    playlist_name
                 );
             }
             Err(e) => {
-                warn!("Failed to create smart playlist '{}': {}", playlist_name, e);
+                if server.kind() == MediaServerKind::Navidrome {
+                    let _ = UserSettings::clear_discovery_playlist_id(user_id, &profile_name).await;
+                }
+                warn!("Failed to create playlist '{}': {}", playlist_name, e);
             }
         }
     }
@@ -1238,8 +1280,12 @@ fn find_new_files(
 
 /// Import a file into a target directory via beets, with raw-move fallback.
 #[cfg(feature = "server")]
-pub async fn import_or_move(src: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
-    match crate::services::music_importer(None).await {
+pub async fn import_or_move(
+    src: &std::path::Path,
+    target: &std::path::Path,
+    user_id: &str,
+) -> Result<(), String> {
+    let result = match crate::services::music_importer(None).await {
         Ok(imp) => match imp.import(&[src], target, false).await {
             Ok(soulbeet::ImportResult::Success) => Ok(()),
             Ok(soulbeet::ImportResult::Skipped(reason)) => {
@@ -1267,7 +1313,17 @@ pub async fn import_or_move(src: &std::path::Path, target: &std::path::Path) -> 
             }
             Ok(())
         }
+    };
+
+    if result.is_ok() {
+        let user_id = user_id.to_string();
+        let target = target.to_path_buf();
+        tokio::spawn(async move {
+            crate::server_fns::media_server::trigger_media_scan(&user_id, &target).await;
+        });
     }
+
+    result
 }
 
 #[cfg(feature = "server")]

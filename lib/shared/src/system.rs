@@ -1,24 +1,24 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
-pub enum NavidromeStatus {
-    /// Credentials verified against Navidrome, all features available.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum MediaServerStatus {
+    /// Credentials verified against the media server, all features available.
     Connected,
-    /// Navidrome rejected the credentials. Local auth succeeded but
-    /// Navidrome features (discovery playlists, rating sync) won't work
+    /// The media server rejected the credentials. Local auth succeeded but
+    /// media-server features (discovery playlists, rating sync) won't work
     /// until the user logs in with matching credentials.
     InvalidCredentials,
-    /// Navidrome was unreachable at login time. Existing token may still work.
+    /// The media server was unreachable at login time. Existing token may still work.
     Offline,
     /// ReportRealPath is not enabled on the Soulbeet player in Navidrome.
     /// Path resolution and auto-delete features will not work correctly.
     MissingReportRealPath,
-    /// No Navidrome auth has been attempted yet (fresh account).
+    /// No media-server auth has been attempted yet (fresh account).
     #[default]
     Unknown,
 }
 
-impl NavidromeStatus {
+impl MediaServerStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Connected => "connected",
@@ -34,13 +34,13 @@ impl NavidromeStatus {
     }
 }
 
-impl std::fmt::Display for NavidromeStatus {
+impl std::fmt::Display for MediaServerStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl std::str::FromStr for NavidromeStatus {
+impl std::str::FromStr for MediaServerStatus {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, ()> {
         match s {
@@ -53,13 +53,13 @@ impl std::str::FromStr for NavidromeStatus {
     }
 }
 
-impl From<&str> for NavidromeStatus {
+impl From<&str> for MediaServerStatus {
     fn from(s: &str) -> Self {
         s.parse().unwrap_or(Self::Unknown)
     }
 }
 
-impl From<String> for NavidromeStatus {
+impl From<String> for MediaServerStatus {
     fn from(s: String) -> Self {
         Self::from(s.as_str())
     }
@@ -69,7 +69,7 @@ impl From<String> for NavidromeStatus {
 pub struct SystemHealth {
     pub downloader_online: bool,
     pub beets_ready: bool,
-    pub navidrome_online: bool,
+    pub media_server_online: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

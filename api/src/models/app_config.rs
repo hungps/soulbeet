@@ -6,6 +6,7 @@ use crate::db::DB;
 pub mod keys {
     pub const SLSKD_API_KEY: &str = "slskd_api_key";
     pub const SLSKD_URL: &str = "slskd_url";
+    pub const PLEX_CLIENT_ID: &str = "plex_client_id";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -18,7 +18,6 @@ services:
       - DOWNLOAD_PATH=/downloads
       - BEETS_CONFIG=/app/beets-e2e.yaml
       - MUSICBRAINZ_HOST=stubs:5050
-      - NAVIDROME_URL=http://navidrome:4533
     volumes:
       - ./.runtime/downloads:/downloads
       - ./.runtime/music:/music

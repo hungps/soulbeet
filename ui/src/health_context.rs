@@ -15,8 +15,8 @@ impl Health {
         self.state.read().clone()
     }
 
-    pub fn navidrome_online(&self) -> bool {
-        self.state.read().navidrome_online
+    pub fn media_server_online(&self) -> bool {
+        self.state.read().media_server_online
     }
 }
 

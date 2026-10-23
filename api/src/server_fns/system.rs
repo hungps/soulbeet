@@ -7,7 +7,7 @@ use shared::system::BackendInfo;
 #[cfg(feature = "server")]
 use crate::services::{
     available_download_backends, available_importers, available_metadata_providers,
-    download_backend, evict_navidrome_client, music_importer, navidrome_client_for_user,
+    download_backend, evict_media_server, media_server_for_user, music_importer,
 };
 #[cfg(feature = "server")]
 use crate::AuthSession;
@@ -28,17 +28,17 @@ pub async fn get_system_health() -> Result<SystemHealth, ServerFnError> {
             Err(_) => false,
         };
 
-        let navidrome_online = match navidrome_client_for_user(&auth.0.sub).await {
-            Ok(client) => match client.ping().await {
+        let media_server_online = match media_server_for_user(&auth.0.sub).await {
+            Ok(server) => match server.ping().await {
                 Ok(()) => true,
                 Err(e) => {
                     let err_str = e.to_string();
                     if err_str.contains("Circuit breaker open") {
                         debug!(
-                            "Evicted stale Navidrome client for user {} after circuit-breaker-open ping",
+                            "Evicted stale media-server client for user {} after circuit-breaker-open ping",
                             auth.0.sub
                         );
-                        evict_navidrome_client(&auth.0.sub).await;
+                        evict_media_server(&auth.0.sub).await;
                     }
                     false
                 }
@@ -49,7 +49,7 @@ pub async fn get_system_health() -> Result<SystemHealth, ServerFnError> {
         Ok(SystemHealth {
             downloader_online,
             beets_ready,
-            navidrome_online,
+            media_server_online,
         })
     }
     #[cfg(not(feature = "server"))]

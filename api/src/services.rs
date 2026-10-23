@@ -9,11 +9,15 @@ use soulbeet::{
     beets::BeetsImporter,
     musicbrainz::MusicBrainzProvider,
     navidrome::NavidromeClientBuilder,
+    plex::PlexClientBuilder,
     slskd::{DownloadConfig, SoulseekClientBuilder},
-    DownloadBackend, LastFmProvider, MetadataProvider, MusicImporter, NavidromeClient,
+    DownloadBackend, LastFmProvider, MediaServer, MetadataProvider, MusicImporter,
 };
 #[cfg(feature = "server")]
 use tokio::sync::RwLock;
+
+#[cfg(feature = "server")]
+use shared::media_server::{AuthServers, MediaServerKind};
 
 #[cfg(feature = "server")]
 use crate::models::app_config::{keys, AppConfig};
@@ -44,7 +48,7 @@ static MUSIC_IMPORTERS: LazyLock<RwLock<HashMap<String, Arc<dyn MusicImporter>>>
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[cfg(feature = "server")]
-static NAVIDROME_CLIENTS: LazyLock<RwLock<HashMap<String, Arc<NavidromeClient>>>> =
+static MEDIA_SERVERS: LazyLock<RwLock<HashMap<String, Arc<dyn MediaServer>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[cfg(feature = "server")]
@@ -188,41 +192,92 @@ pub async fn music_importer(id: Option<&str>) -> Result<Arc<dyn MusicImporter>, 
 }
 
 #[cfg(feature = "server")]
-pub async fn navidrome_client_for_user(user_id: &str) -> Result<Arc<NavidromeClient>, String> {
-    // Check cache first
-    if let Some(client) = NAVIDROME_CLIENTS.read().await.get(user_id) {
-        return Ok(client.clone());
+pub async fn media_server_for_user(user_id: &str) -> Result<Arc<dyn MediaServer>, String> {
+    if let Some(server) = MEDIA_SERVERS.read().await.get(user_id) {
+        return Ok(server.clone());
     }
 
     let user = crate::models::user::User::get_by_id(user_id).await?;
+    let kind = MediaServerKind::from(user.media_server.as_str());
+    let config = crate::models::media_server::MediaServerConfig::get(user_id, kind)
+        .await?
+        .ok_or("Media server not configured for user")?;
 
-    let encrypted_token = user
-        .navidrome_token
-        .ok_or("Navidrome not configured for user")?;
+    let encrypted_token = config
+        .token
+        .as_deref()
+        .ok_or("Media server not configured for user")?;
+    let secret = crate::crypto::decrypt(encrypted_token)?;
 
-    let password = crate::crypto::decrypt(&encrypted_token)?;
+    let server: Arc<dyn MediaServer> = match kind {
+        MediaServerKind::Navidrome => {
+            let url = config
+                .url
+                .as_deref()
+                .ok_or("Navidrome URL is not configured")?;
+            let username = config.account_name.as_deref().unwrap_or(&user.username);
+            Arc::new(
+                NavidromeClientBuilder::new()
+                    .base_url(url)
+                    .username(username)
+                    .password(&secret)
+                    .build()
+                    .map_err(|e| e.to_string())?,
+            )
+        }
+        MediaServerKind::Plex => {
+            let url = config
+                .url
+                .as_deref()
+                .ok_or("Plex server URL is not configured")?;
+            let client_id = plex_client_id().await?;
+            Arc::new(
+                PlexClientBuilder::new()
+                    .base_url(url)
+                    .token(&secret)
+                    .client_id(&client_id)
+                    .build()
+                    .map_err(|e| e.to_string())?,
+            )
+        }
+    };
 
-    let url = std::env::var("NAVIDROME_URL")
-        .map_err(|_| "NAVIDROME_URL environment variable not set".to_string())?;
-
-    let client = NavidromeClientBuilder::new()
-        .base_url(&url)
-        .username(&user.username)
-        .password(&password)
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let client = Arc::new(client);
-    NAVIDROME_CLIENTS
+    MEDIA_SERVERS
         .write()
         .await
-        .insert(user_id.to_string(), client.clone());
-    Ok(client)
+        .insert(user_id.to_string(), server.clone());
+    Ok(server)
 }
 
 #[cfg(feature = "server")]
-pub async fn evict_navidrome_client(user_id: &str) {
-    NAVIDROME_CLIENTS.write().await.remove(user_id);
+pub async fn evict_media_server(user_id: &str) {
+    MEDIA_SERVERS.write().await.remove(user_id);
+}
+
+#[cfg(feature = "server")]
+pub async fn available_media_servers() -> AuthServers {
+    use crate::models::media_server::MediaServerConfig;
+
+    AuthServers {
+        navidrome: MediaServerConfig::any_configured(MediaServerKind::Navidrome)
+            .await
+            .unwrap_or(false),
+        plex: MediaServerConfig::any_configured(MediaServerKind::Plex)
+            .await
+            .unwrap_or(false),
+    }
+}
+
+#[cfg(feature = "server")]
+pub async fn plex_client_id() -> Result<String, String> {
+    if let Some(id) = AppConfig::get(keys::PLEX_CLIENT_ID).await? {
+        if !id.is_empty() {
+            return Ok(id);
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    AppConfig::set(keys::PLEX_CLIENT_ID, &id).await?;
+    Ok(id)
 }
 
 #[cfg(feature = "server")]
@@ -230,7 +285,7 @@ pub async fn reload_providers() {
     METADATA_PROVIDERS.write().await.clear();
     DOWNLOAD_BACKENDS.write().await.clear();
     MUSIC_IMPORTERS.write().await.clear();
-    NAVIDROME_CLIENTS.write().await.clear();
+    MEDIA_SERVERS.write().await.clear();
 }
 
 #[cfg(feature = "server")]

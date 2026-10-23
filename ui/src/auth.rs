@@ -20,6 +20,13 @@ impl Auth {
         self.state.set(None);
     }
 
+    /// Reload the session snapshot after media-server settings change.
+    pub async fn refresh(&mut self) {
+        if let Ok(Some(response)) = api::get_current_user().await {
+            self.state.set(Some(response));
+        }
+    }
+
     /// Check if a server error is an authentication error.
     /// If it is, logs the user out locally.
     /// Returns true if the error was handled (user logged out), false otherwise.
@@ -57,11 +64,19 @@ impl Auth {
         self.state.read().is_some()
     }
 
-    pub fn navidrome_status(&self) -> shared::system::NavidromeStatus {
+    pub fn media_status(&self) -> shared::system::MediaServerStatus {
         self.state
             .read()
             .as_ref()
-            .map(|a| a.navidrome_status)
+            .map(|a| a.media_status)
+            .unwrap_or_default()
+    }
+
+    pub fn media_server(&self) -> shared::media_server::MediaServerKind {
+        self.state
+            .read()
+            .as_ref()
+            .map(|a| a.media_server)
             .unwrap_or_default()
     }
 }

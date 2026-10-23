@@ -10,7 +10,6 @@ services:
       # This path must match the volume mapping for downloads inside the container
       - DOWNLOAD_PATH=/downloads
       - SECRET_KEY=a_secret_key # Change this to a secure random key
-      - NAVIDROME_URL=http://localhost:4533 # Your Navidrome server URL
     volumes:
       - soulbeet_data:/data
       # Map the download folder.

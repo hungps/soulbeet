@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use shared::navidrome::{DiscoveryProgress, DiscoveryStatus, GenerationStatus, ProfilePhase};
-use shared::system::NavidromeStatus;
+use shared::system::MediaServerStatus;
 
 use crate::friendly_error;
 use crate::use_auth;
@@ -111,15 +111,17 @@ pub fn DiscoveryOverview() -> Element {
     let current_progress = progress.read().as_ref().and_then(|p| p.clone()).clone();
 
     let auth = use_auth();
-    let nav_status = auth.navidrome_status();
+    let media_status = auth.media_status();
+    let media_server = auth.media_server();
+    let media_server_name = media_server.display_name();
 
     rsx! {
         div { class: "space-y-4",
             h3 { class: "text-sm font-semibold text-white", "Discovery" }
 
-            if matches!(nav_status, NavidromeStatus::InvalidCredentials | NavidromeStatus::Unknown) {
+            if matches!(media_status, MediaServerStatus::InvalidCredentials | MediaServerStatus::Unknown) {
                 p { class: "text-xs font-mono text-beet-accent",
-                    "Your username is not linked to Navidrome. Discovery playlists and rating sync require a matching Navidrome account."
+                    "Your account is not linked to {media_server_name}. Discovery playlists and rating sync require a matching {media_server_name} account."
                 }
             }
 

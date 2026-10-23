@@ -13,7 +13,7 @@ use crate::models::discovery_playlist::DiscoveryTrackRow;
 #[cfg(feature = "server")]
 use crate::models::user_settings::UserSettings;
 #[cfg(feature = "server")]
-use crate::services::navidrome_client_for_user;
+use crate::services::media_server_for_user;
 #[cfg(feature = "server")]
 use crate::AuthSession;
 #[cfg(feature = "server")]
@@ -31,11 +31,8 @@ pub async fn sync_ratings() -> Result<SyncResult, ServerFnError> {
 
 #[cfg(feature = "server")]
 pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> {
-    let client = navidrome_client_for_user(user_id).await?;
-    let songs = client
-        .get_all_songs_with_ratings()
-        .await
-        .map_err(|e| e.to_string())?;
+    let client = media_server_for_user(user_id).await?;
+    let songs = client.get_tracks().await.map_err(|e| e.to_string())?;
 
     let total_songs_scanned = songs.len() as u32;
 
@@ -92,9 +89,11 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
                         });
                         if !is_discovery {
                             // Navidrome stores relative paths from its library
-                            // root. Resolve to a local absolute path by trying
-                            // each user folder.
-                            if let Some(local_path) = resolve_navidrome_path(path_str, &folders) {
+                            // root; Plex reports absolute paths inside its own
+                            // container. Both are resolved to a local path.
+                            if let Some(local_path) =
+                                resolve_media_path(user_id, client.kind(), path_str, &folders).await
+                            {
                                 let path = std::path::Path::new(&local_path);
                                 if let Err(e) = tokio::fs::remove_file(path).await {
                                     warn!("Auto-delete failed for {}: {}", path.display(), e);
@@ -196,7 +195,7 @@ pub async fn sync_ratings_internal(user_id: &str) -> Result<SyncResult, String> 
         if real_path_failures > 0 {
             warn!(
                 "Auto-delete: {} tracks could not be resolved to a local file. \
-                 Ensure your folder paths in Soulbeet match the Navidrome library root.",
+                 Add a path mapping under Settings > Media Server.",
                 real_path_failures
             );
         }
@@ -221,35 +220,42 @@ pub async fn get_deletion_history() -> Result<Vec<DeletionReview>, ServerFnError
         .map_err(server_error)
 }
 
-/// Check if the Soulbeet player in Navidrome has ReportRealPath enabled.
-/// Returns Some(true) if enabled, Some(false) if disabled, None if player not found yet.
+/// Check if the media server needs an extra opt-in before it reports
+/// resolvable real paths. Navidrome requires ReportRealPath on the Soulbeet
+/// player; Plex always returns the file path it has indexed.
 #[cfg(feature = "server")]
 pub async fn check_report_real_path(user_id: &str) -> Result<Option<bool>, String> {
-    let client = navidrome_client_for_user(user_id).await?;
-    let players = client.get_players().await.map_err(|e| e.to_string())?;
-    let soulbeet = players.iter().find(|p| p.client == "Soulbeet");
-    Ok(soulbeet.map(|p| p.report_real_path))
+    let server = media_server_for_user(user_id).await?;
+    if !server.needs_report_real_path() {
+        return Ok(Some(true));
+    }
+    server
+        .report_real_path_enabled()
+        .await
+        .map_err(|e| e.to_string())
 }
 
-/// Resolve a Navidrome relative path to a local absolute path.
+/// Resolve a media-server path to a local absolute path.
 ///
 /// Navidrome stores paths relative to its library root (e.g.
 /// "Artist/Album/track.flac"). We try prepending each user folder
 /// path and return the first one that exists on disk.
 ///
-/// When direct resolution fails and NAVIDROME_MUSIC_PATH is set,
-/// falls back to prefix substitution for Docker deployments where
-/// Navidrome sees different mount points than Soulful.
+/// When direct resolution fails, explicit path mappings provide prefix
+/// substitution for Docker deployments where the media server sees different
+/// mount points than Soulbeet.
 #[cfg(feature = "server")]
-fn resolve_navidrome_path(
-    navidrome_path: &str,
+async fn resolve_media_path(
+    user_id: &str,
+    kind: shared::media_server::MediaServerKind,
+    media_path: &str,
     folders: &[crate::models::folder::Folder],
 ) -> Option<String> {
-    let rel = std::path::Path::new(navidrome_path);
+    let rel = std::path::Path::new(media_path);
 
     // 1. Path exists as-is (same machine, same mounts)
     if rel.is_absolute() && rel.exists() {
-        return Some(navidrome_path.to_string());
+        return Some(media_path.to_string());
     }
 
     // 2. Relative path -- prepend each folder root
@@ -262,27 +268,13 @@ fn resolve_navidrome_path(
         }
     }
 
-    // 3. Docker prefix swap: Navidrome sees /media/music, Soulful sees /music.
-    //    Replace the Navidrome prefix with the local root (parent of folder paths).
-    let navi_prefix = std::env::var("NAVIDROME_MUSIC_PATH").ok()?;
-    let navi_prefix = navi_prefix.trim_end_matches('/');
-
-    if !navidrome_path.starts_with(navi_prefix) {
-        return None;
-    }
-    let rest = &navidrome_path[navi_prefix.len()..];
-    if !rest.is_empty() && !rest.starts_with('/') {
-        return None;
-    }
-
-    let local_root = folders
-        .first()
-        .and_then(|f| std::path::Path::new(&f.path).parent())
-        .map(|p| p.to_string_lossy().to_string())?;
-
-    let resolved = format!("{}{}", local_root, rest);
-    if std::path::Path::new(&resolved).exists() {
-        return Some(resolved);
+    // 3. Explicit folder mapping (Media Server > Path mappings).
+    if let Ok(Some(local)) =
+        crate::models::media_server::remote_to_local(user_id, kind, media_path).await
+    {
+        if std::path::Path::new(&local).exists() {
+            return Some(local);
+        }
     }
 
     None
@@ -290,15 +282,38 @@ fn resolve_navidrome_path(
 
 #[get("/api/navidrome/library-stats", auth: AuthSession)]
 pub async fn get_library_stats() -> Result<LibraryStats, ServerFnError> {
-    let client = navidrome_client_for_user(&auth.0.sub)
+    let client = media_server_for_user(&auth.0.sub)
         .await
-        .map_err(server_error)?;
-    let songs = client
-        .get_all_songs_with_ratings()
-        .await
-        .map_err(server_error)?;
+        .map_err(|e| server_error(format!("Media server unavailable: {}", e)))?;
+    let songs = client.get_tracks().await.map_err(|e| {
+        server_error(format!(
+            "Could not read the {} library: {}",
+            client.kind(),
+            e
+        ))
+    })?;
 
-    let albums = client.get_all_albums().await.map_err(server_error)?;
+    let mut derived_albums: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for song in &songs {
+        if let Some(album) = &song.album {
+            derived_albums.insert((
+                song.artist.clone().unwrap_or_default().to_lowercase(),
+                album.to_lowercase(),
+            ));
+        }
+    }
+    let total_albums = match client.get_albums().await {
+        Ok(albums) => albums.len() as u32,
+        Err(e) => {
+            warn!(
+                "Could not list {} albums for dashboard stats: {}",
+                client.kind(),
+                e
+            );
+            derived_albums.len() as u32
+        }
+    };
 
     let total_tracks = songs.len() as u32;
     let mut rated_tracks = 0u32;
@@ -338,10 +353,10 @@ pub async fn get_library_stats() -> Result<LibraryStats, ServerFnError> {
     Ok(LibraryStats {
         total_tracks,
         rated_tracks,
-        unrated_tracks: total_tracks - rated_tracks,
+        unrated_tracks: total_tracks.saturating_sub(rated_tracks),
         average_rating,
         rating_distribution,
-        total_albums: albums.len() as u32,
+        total_albums,
         total_artists: artists.len() as u32,
         genres: genre_vec,
     })
@@ -378,7 +393,7 @@ pub(crate) async fn promote_discovery_track_internal(
     }
 
     let target = std::path::PathBuf::from(&folder.path);
-    if let Err(e) = crate::server_fns::discovery::import_or_move(&src, &target).await {
+    if let Err(e) = crate::server_fns::discovery::import_or_move(&src, &target, user_id).await {
         // Import failed -- revert to Pending
         let _ = DiscoveryTrackRow::update_status(track_id, &DiscoveryStatus::Pending).await;
         return Err(e);

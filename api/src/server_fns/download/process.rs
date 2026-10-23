@@ -62,6 +62,7 @@ pub async fn process_downloads(
     successful_downloads: Vec<DownloadProgress>,
     target_path: std::path::PathBuf,
     tx: broadcast::Sender<DownloadEvent>,
+    user_id: String,
 ) {
     if !successful_downloads.is_empty() {
         info!(
@@ -109,15 +110,30 @@ pub async fn process_downloads(
             }
 
             for (source_path, entries) in pending_imports {
-                import_group(entries, source_path, target_path.clone(), tx.clone(), true).await;
+                import_group(
+                    entries,
+                    source_path,
+                    target_path.clone(),
+                    tx.clone(),
+                    true,
+                    &user_id,
+                )
+                .await;
             }
 
             for download in singletons {
                 if let Some(path) =
                     resolve_download_path_with_retry(&download.item, &download_path_buf).await
                 {
-                    import_group(vec![download], path, target_path.clone(), tx.clone(), false)
-                        .await;
+                    import_group(
+                        vec![download],
+                        path,
+                        target_path.clone(),
+                        tx.clone(),
+                        false,
+                        &user_id,
+                    )
+                    .await;
                 }
             }
         } else {
@@ -126,8 +142,15 @@ pub async fn process_downloads(
                 if let Some(path) =
                     resolve_download_path_with_retry(&download.item, &download_path_buf).await
                 {
-                    import_group(vec![download], path, target_path.clone(), tx.clone(), false)
-                        .await;
+                    import_group(
+                        vec![download],
+                        path,
+                        target_path.clone(),
+                        tx.clone(),
+                        false,
+                        &user_id,
+                    )
+                    .await;
                 } else {
                     let failed_entry = DownloadProgress {
                         state: DownloadState::Failed("Could not resolve file path".into()),

@@ -1,9 +1,10 @@
 use auth::{use_auth, AuthProvider};
 use dioxus::prelude::*;
-use shared::download::DownloadProgress;
 #[cfg(feature = "web")]
 use shared::download::DownloadEvent;
-use shared::system::NavidromeStatus;
+use shared::download::DownloadProgress;
+use shared::media_server::MediaServerKind;
+use shared::system::MediaServerStatus;
 use std::collections::HashMap;
 
 #[cfg(feature = "web")]
@@ -265,7 +266,7 @@ fn WebNavbar() -> Element {
                 }
             }
 
-            NavidromeBanner {}
+            MediaServerBanner {}
 
             main { class: "px-4 sm:px-6 lg:px-8 flex-grow flex flex-col relative overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch] w-full py-8 no-scrollbar",
                 Outlet::<Route> {}
@@ -276,11 +277,12 @@ fn WebNavbar() -> Element {
 }
 
 #[component]
-fn NavidromeBanner() -> Element {
+fn MediaServerBanner() -> Element {
     let auth = use_auth();
     let mut settings = ui::use_settings();
     let health = ui::use_system_health();
-    let status = auth.navidrome_status();
+    let status = auth.media_status();
+    let server = auth.media_server();
 
     let dismissed = settings
         .get()
@@ -288,36 +290,40 @@ fn NavidromeBanner() -> Element {
         .unwrap_or(false);
 
     // The status is a login-time snapshot; live health overrides it, so the
-    // banner clears on its own once Navidrome answers again.
-    let back_online = matches!(status, NavidromeStatus::Offline) && health.navidrome_online();
+    // banner clears on its own once the media server answers again.
+    let back_online = matches!(status, MediaServerStatus::Offline) && health.media_server_online();
+    let server_name = server.display_name();
 
     if dismissed
         || back_online
         || matches!(
             status,
-            NavidromeStatus::Connected | NavidromeStatus::Unknown
+            MediaServerStatus::Connected | MediaServerStatus::Unknown
         )
     {
         return rsx! {};
     }
 
-    let (dot_color, label, message) = match status {
-        NavidromeStatus::InvalidCredentials => (
-            "bg-beet-accent",
-            "NAVIDROME",
-            "Credentials mismatch. Log in with your Navidrome password to reconnect.",
+    let message = match status {
+        MediaServerStatus::InvalidCredentials => format!(
+            "Credentials mismatch. Log in with your {} password to reconnect.",
+            server_name
         ),
-        NavidromeStatus::Offline => (
-            "bg-gray-500",
-            "NAVIDROME",
-            "Unreachable. Discovery and rating sync paused.",
-        ),
-        NavidromeStatus::MissingReportRealPath => (
-            "bg-yellow-500",
-            "NAVIDROME",
-            "ReportRealPath is not enabled on the Soulbeet player. Path features and auto-delete won't work. Enable it in Navidrome > Settings > Players.",
-        ),
+        MediaServerStatus::Offline => "Unreachable. Discovery and rating sync paused.".to_string(),
+        MediaServerStatus::MissingReportRealPath => {
+            "ReportRealPath is not enabled on the Soulbeet player. Path features and auto-delete won't work. Enable it in Navidrome > Settings > Players.".to_string()
+        }
         _ => return rsx! {},
+    };
+    let dot_color = match status {
+        MediaServerStatus::InvalidCredentials => "bg-beet-accent",
+        MediaServerStatus::Offline => "bg-gray-500",
+        MediaServerStatus::MissingReportRealPath => "bg-yellow-500",
+        _ => return rsx! {},
+    };
+    let label = match server {
+        MediaServerKind::Navidrome => "NAVIDROME",
+        MediaServerKind::Plex => "PLEX",
     };
 
     let dismiss = move |_| {

@@ -29,5 +29,8 @@ export const downloadsDirOnHost = join(e2eRoot, '.runtime', 'downloads');
 /** Navidrome-dependent specs only run when the stack includes one. */
 export const navidromeEnabled = process.env.E2E_NAVIDROME === '1';
 
+/** Navidrome URL as the APP must dial it inside the compose network. */
+export const navidromeUrlForApp = 'http://navidrome:4533';
+
 export const navidromeAdminUser = 'admin';
 export const navidromeAdminPassword = 'e2e-navidrome-admin';

@@ -239,6 +239,7 @@ pub async fn download(req: DownloadRequest) -> Result<Vec<QueuedDownload>, Serve
 
     // Register this task for cleanup tracking
     let task_username = username.clone();
+    let task_user_id = auth.0.sub.clone();
     let task_cancellation = register_user_task(&username).await;
 
     // Spawn the monitoring task
@@ -250,6 +251,7 @@ pub async fn download(req: DownloadRequest) -> Result<Vec<QueuedDownload>, Serve
             tx,
             task_cancellation,
             task_username.clone(),
+            task_user_id,
             None, // batch_id - will be set by auto_download in Plan 02
             None, // batch_label - will be set by auto_download in Plan 02
         );

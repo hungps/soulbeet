@@ -50,6 +50,7 @@
     --spacing: 0.25rem;
     --container-md: 28rem;
     --container-lg: 32rem;
+    --container-xl: 36rem;
     --container-2xl: 42rem;
     --container-3xl: 48rem;
     --container-5xl: 64rem;
@@ -520,6 +521,9 @@
   .h-full {
     height: 100%;
   }
+  .h-px {
+    height: 1px;
+  }
   .h-screen {
     height: 100vh;
   }
@@ -627,6 +631,9 @@
   }
   .max-w-md {
     max-width: var(--container-md);
+  }
+  .max-w-xl {
+    max-width: var(--container-xl);
   }
   .min-w-0 {
     min-width: 0px;
@@ -967,6 +974,12 @@
       border-color: color-mix(in oklab, var(--color-purple-500) 40%, transparent);
     }
   }
+  .border-red-500\/40 {
+    border-color: color-mix(in srgb, oklch(63.7% 0.237 25.331) 40%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      border-color: color-mix(in oklab, var(--color-red-500) 40%, transparent);
+    }
+  }
   .border-red-500\/50 {
     border-color: color-mix(in srgb, oklch(63.7% 0.237 25.331) 50%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
@@ -1037,6 +1050,12 @@
     background-color: color-mix(in srgb, #0f0518 50%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--color-beet-dark) 50%, transparent);
+    }
+  }
+  .bg-beet-dark\/70 {
+    background-color: color-mix(in srgb, #0f0518 70%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-beet-dark) 70%, transparent);
     }
   }
   .bg-beet-leaf {
@@ -1119,6 +1138,9 @@
   }
   .bg-gray-900 {
     background-color: var(--color-gray-900);
+  }
+  .bg-green-400 {
+    background-color: var(--color-green-400);
   }
   .bg-green-500\/20 {
     background-color: color-mix(in srgb, oklch(72.3% 0.219 149.579) 20%, transparent);
@@ -1765,6 +1787,9 @@
         border-color: color-mix(in oklab, var(--color-beet-accent) 50%, transparent);
       }
     }
+    .hover\:border-beet-leaf:hover {
+      border-color: var(--color-beet-leaf);
+    }
     .hover\:border-red-500\/30:hover {
       border-color: color-mix(in srgb, oklch(63.7% 0.237 25.331) 30%, transparent);
     }
@@ -1801,6 +1826,14 @@
     @supports (color: color-mix(in lab, red, red)) {
       .hover\:bg-green-800\/50:hover {
         background-color: color-mix(in oklab, var(--color-green-800) 50%, transparent);
+      }
+    }
+    .hover\:bg-red-500\/10:hover {
+      background-color: color-mix(in srgb, oklch(63.7% 0.237 25.331) 10%, transparent);
+    }
+    @supports (color: color-mix(in lab, red, red)) {
+      .hover\:bg-red-500\/10:hover {
+        background-color: color-mix(in oklab, var(--color-red-500) 10%, transparent);
       }
     }
     .hover\:bg-red-800\/50:hover {
@@ -1897,6 +1930,9 @@
     }
     .sm\:inline {
       display: inline;
+    }
+    .sm\:grid-cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .sm\:p-8 {
       padding: calc(var(--spacing) * 8);

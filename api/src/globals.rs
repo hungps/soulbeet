@@ -261,7 +261,7 @@ async fn run_automation() {
     };
 
     if connected_users.is_empty() {
-        info!("Automation: no connected Navidrome users, skipping");
+        info!("Automation: no connected media-server users, skipping");
         return;
     }
 
@@ -279,13 +279,15 @@ async fn run_automation() {
         match crate::server_fns::navidrome::check_report_real_path(&user.id).await {
             Ok(Some(true)) => {
                 // ReportRealPath is enabled. If status was MissingReportRealPath, restore to Connected.
-                if user.navidrome_status
-                    == shared::system::NavidromeStatus::MissingReportRealPath.as_str()
+                if user.media_status
+                    == shared::system::MediaServerStatus::MissingReportRealPath.as_str()
                 {
-                    let _ = crate::models::user::User::update_navidrome_token(
+                    let _ = crate::models::user::User::update_media(
                         &user.id,
-                        user.navidrome_token.as_deref(),
-                        shared::system::NavidromeStatus::Connected.as_str(),
+                        &user.media_server,
+                        user.media_token.as_deref(),
+                        shared::system::MediaServerStatus::Connected.as_str(),
+                        user.media_account_id.as_deref(),
                     )
                     .await;
                     let _ = crate::models::user_settings::UserSettings::reset_navidrome_banner(
@@ -304,13 +306,15 @@ async fn run_automation() {
                      Enable it in Navidrome Settings > Players > Soulbeet > ReportRealPath.",
                     user.username
                 );
-                if user.navidrome_status
-                    != shared::system::NavidromeStatus::MissingReportRealPath.as_str()
+                if user.media_status
+                    != shared::system::MediaServerStatus::MissingReportRealPath.as_str()
                 {
-                    let _ = crate::models::user::User::update_navidrome_token(
+                    let _ = crate::models::user::User::update_media(
                         &user.id,
-                        user.navidrome_token.as_deref(),
-                        shared::system::NavidromeStatus::MissingReportRealPath.as_str(),
+                        &user.media_server,
+                        user.media_token.as_deref(),
+                        shared::system::MediaServerStatus::MissingReportRealPath.as_str(),
+                        user.media_account_id.as_deref(),
                     )
                     .await;
                     let _ = crate::models::user_settings::UserSettings::reset_navidrome_banner(

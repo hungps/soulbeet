@@ -1,28 +1,46 @@
 // Navidrome integration, only when the stack runs one (compose does, the
-// native dev stack does not). With NAVIDROME_URL set, logins authenticate
-// against Navidrome first and fall back to local accounts.
+// native dev stack does not). Media-server URLs are configured per user in
+// Settings > Media Server, so the app can no longer be pointed at Navidrome
+// through the environment.
 
 import { expect, test } from '@playwright/test';
-import { loginViaUi, openSettings, registerUser, uniqueUser } from '../helpers/app.js';
-import { navidromeAdminPassword, navidromeAdminUser, navidromeEnabled } from '../helpers/env.js';
+import { loginViaApi, openSettings, registerUser, uniqueUser } from '../helpers/app.js';
+import {
+  navidromeAdminPassword,
+  navidromeAdminUser,
+  navidromeEnabled,
+  navidromeUrlForApp,
+} from '../helpers/env.js';
 
 test.skip(!navidromeEnabled, 'stack has no Navidrome (set E2E_NAVIDROME=1)');
 
-test('authenticates through Navidrome and reports the connection', async ({ page }) => {
-  await loginViaUi(page, { username: navidromeAdminUser, password: navidromeAdminPassword });
+test('connects to Navidrome from the media server settings', async ({ page, context }) => {
+  const user = uniqueUser('navidrome');
+  await registerUser(context.request, user);
+  await loginViaApi(context, user);
+  await page.goto('/');
 
   await openSettings(page);
   await page.getByRole('button', { name: 'Config' }).click();
 
+  await page.getByPlaceholder('http://localhost:4533').fill(navidromeUrlForApp);
+  await page.getByPlaceholder('Navidrome username').fill(navidromeAdminUser);
+  await page.getByPlaceholder('Navidrome password').fill(navidromeAdminPassword);
+  await page.getByRole('button', { name: 'Connect' }).click();
+
   await expect(page.getByText('Connected', { exact: true })).toBeVisible({ timeout: 30_000 });
 });
 
-test('still accepts local accounts when Navidrome rejects them', async ({ page }) => {
-  // A locally registered user is unknown to Navidrome, so its auth fails
-  // and the local Argon2 fallback must let them in.
+test('accepts local accounts without a media server', async ({ page, context }) => {
+  // A locally registered user has no saved Navidrome URL, so login falls back
+  // to the local Argon2 password.
   const user = uniqueUser('local-only');
-  await registerUser(page.context().request, user);
+  await registerUser(context.request, user);
 
-  await loginViaUi(page, user);
+  await page.goto('/login');
+  await page.getByPlaceholder('Enter username').fill(user.username);
+  await page.getByPlaceholder('Enter password').fill(user.password);
+  await page.getByRole('button', { name: 'AUTHENTICATE' }).click();
+
   await expect(page.getByPlaceholder('Search artist, album or track...')).toBeVisible();
 });

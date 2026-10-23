@@ -31,6 +31,7 @@ pub async fn import_group(
     target_path: std::path::PathBuf,
     tx: broadcast::Sender<DownloadEvent>,
     as_album: bool,
+    user_id: &str,
 ) {
     info!(
         "Importing group from: {:?} (album: {})",
@@ -75,6 +76,12 @@ pub async fn import_group(
                 })
                 .collect();
             let _ = tx.send(DownloadEvent::Progress(imported_entries));
+
+            let user_id = user_id.to_string();
+            let scan_target = target_path.clone();
+            tokio::spawn(async move {
+                crate::server_fns::media_server::trigger_media_scan(&user_id, &scan_target).await;
+            });
         }
         Ok(ImportResult::Skipped(reason)) => {
             info!("Import skipped items: {}", reason);

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use shared::{
     download::{DownloadProgress, DownloadableItem, QueuedDownload, SearchResult},
     library::DuplicateReport,
+    media_server::{MediaAlbum, MediaServerKind, MediaTrack},
     metadata::{Album, AlbumWithTracks, SearchResult as MetadataSearchResult, Track},
     recommendation::{
         ArtistPopularity, CandidateSet, Listen, ProfileConfig, RankedArtist, RankedTrack,
@@ -51,8 +52,7 @@ pub trait DownloadBackend: Send + Sync {
     /// needs peers outside the batch: adopting a file retried from a source
     /// nobody is tracking.
     async fn get_downloads(&self) -> Result<Vec<DownloadProgress>>;
-    async fn cancel_download(&self, username: &str, download_id: &str, remove: bool)
-        -> Result<()>;
+    async fn cancel_download(&self, username: &str, download_id: &str, remove: bool) -> Result<()>;
     async fn health_check(&self) -> bool;
 }
 
@@ -196,4 +196,60 @@ pub trait CandidateGenerator: Send + Sync {
         profile: &UserMusicProfile,
         config: &ProfileConfig,
     ) -> Result<(CandidateSet, Vec<SignalReport>, usize)>;
+}
+
+/// A discovery playlist to create or replace on the media server.
+pub struct PlaylistSpec<'a> {
+    pub name: &'a str,
+    pub comment: &'a str,
+    /// Discovery profile name (`Conservative`, `Balanced`, `Adventurous`).
+    pub profile: &'a str,
+    /// Absolute local paths of the tracks currently pending for this profile.
+    pub paths: &'a [String],
+    /// The server's full track list, used to resolve paths to server item ids.
+    pub library: &'a [MediaTrack],
+}
+
+/// Playback/ratings server abstraction. Navidrome uses Subsonic plus its
+/// native API; Plex uses the Plex Media Server HTTP API.
+#[async_trait]
+pub trait MediaServer: Send + Sync {
+    fn kind(&self) -> MediaServerKind;
+
+    async fn ping(&self) -> Result<()>;
+    async fn start_scan(&self) -> Result<()>;
+
+    /// Ask the server to rescan specific local paths. Servers that cannot
+    /// scan a subtree fall back to a full library scan.
+    async fn start_scan_paths(&self, _paths: &[String]) -> Result<()> {
+        self.start_scan().await
+    }
+
+    async fn get_scan_status(&self) -> Result<bool>;
+
+    async fn get_tracks(&self) -> Result<Vec<MediaTrack>>;
+    async fn get_albums(&self) -> Result<Vec<MediaAlbum>>;
+
+    /// Navidrome only: the Soulbeet player must have ReportRealPath enabled
+    /// before paths can be resolved for auto-delete.
+    fn needs_report_real_path(&self) -> bool {
+        false
+    }
+
+    /// Whether `reconcile_playlist` needs the full track list to resolve
+    /// local paths to server item ids (Plex). Navidrome uses a path filter.
+    fn needs_library(&self) -> bool {
+        false
+    }
+
+    async fn report_real_path_enabled(&self) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// Create (or replace) the playlist for a discovery profile.
+    /// Returns the new playlist id, or `None` when the server has nothing to
+    /// put in it (Plex cannot create an empty audio playlist).
+    async fn reconcile_playlist(&self, spec: &PlaylistSpec<'_>) -> Result<Option<String>>;
+
+    async fn delete_playlist(&self, playlist_id: &str) -> Result<()>;
 }

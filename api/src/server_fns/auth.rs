@@ -1,5 +1,6 @@
 use crate::auth::AuthResponse;
 use dioxus::prelude::*;
+use shared::media_server::{AuthServers, MediaServerKind};
 
 #[cfg(feature = "server")]
 use crate::{
@@ -29,6 +30,18 @@ fn build_auth_cookie(token: String) -> Cookie<'static> {
     cookie
 }
 
+/// Which media servers this instance is configured for. Public: the login
+/// page needs it before there is a session.
+#[get("/api/auth/servers")]
+pub async fn get_auth_servers() -> Result<AuthServers, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        Ok(crate::services::available_media_servers().await)
+    }
+    #[cfg(not(feature = "server"))]
+    Ok(AuthServers::default())
+}
+
 #[post("/api/auth/register")]
 pub async fn register(username: String, password: String) -> Result<(), ServerFnError> {
     models::user::User::create(&username, &password)
@@ -46,7 +59,7 @@ enum NavidromeAuthResult {
     AuthFailed,
     /// Navidrome could not be reached (network / timeout / circuit breaker).
     Unreachable,
-    /// NAVIDROME_URL is unset or empty: this instance runs without Navidrome.
+    /// The user has no saved Navidrome URL: authenticate locally instead.
     NotConfigured,
 }
 
@@ -56,16 +69,19 @@ enum NavidromeAuthResult {
 /// soulbeet lets us distinguish auth rejection (Subsonic error codes) from
 /// network failures (status 408, 503, or request-level errors).
 #[cfg(feature = "server")]
-async fn try_navidrome_auth(username: &str, password: &str) -> NavidromeAuthResult {
+async fn try_navidrome_auth(
+    url: Option<&str>,
+    username: &str,
+    password: &str,
+) -> NavidromeAuthResult {
     use soulbeet::NavidromeClientBuilder;
 
-    let url = match std::env::var("NAVIDROME_URL") {
-        Ok(u) if !u.is_empty() => u,
-        _ => return NavidromeAuthResult::NotConfigured,
+    let Some(url) = url else {
+        return NavidromeAuthResult::NotConfigured;
     };
 
     let client = match NavidromeClientBuilder::new()
-        .base_url(&url)
+        .base_url(url)
         .username(username)
         .password(password)
         .build()
@@ -95,122 +111,295 @@ async fn try_navidrome_auth(username: &str, password: &str) -> NavidromeAuthResu
 }
 
 #[post("/api/auth/login", cookies: Cookies)]
-pub async fn login(username: String, password: String) -> Result<AuthResponse, ServerFnError> {
-    use crate::crypto;
-    use crate::services::evict_navidrome_client;
-    use models::user::User;
-    use shared::system::NavidromeStatus;
+pub async fn login(
+    username: String,
+    password: String,
+    server: Option<MediaServerKind>,
+) -> Result<AuthResponse, ServerFnError> {
+    use crate::services::available_media_servers;
 
-    match try_navidrome_auth(&username, &password).await {
+    let available = available_media_servers().await;
+
+    // Local-account login: authenticate against the Argon2 hash only. Also
+    // covers instance-wide local mode, where no media server is configured.
+    if server.is_none() || !available.any() {
+        use models::user::User;
+        use shared::system::MediaServerStatus;
+
+        let user = User::verify(&username, &password)
+            .await
+            .map_err(|_| unauthorized_error("Invalid username or password"))?;
+        return issue_session(
+            user.id,
+            user.username,
+            MediaServerKind::from(user.media_server.as_str()),
+            MediaServerStatus::from(user.media_status),
+            cookies,
+        );
+    }
+
+    let kind = server.unwrap_or_else(|| available.default_kind());
+    if !available.supports(kind) {
+        return Err(unauthorized_error(format!(
+            "{} is not configured on this server",
+            kind.display_name()
+        )));
+    }
+
+    match kind {
+        MediaServerKind::Navidrome => login_navidrome(username, password, cookies).await,
+        MediaServerKind::Plex => login_plex(username, password, cookies).await,
+    }
+}
+
+#[cfg(feature = "server")]
+async fn login_navidrome(
+    username: String,
+    password: String,
+    cookies: Cookies,
+) -> Result<AuthResponse, ServerFnError> {
+    use crate::crypto;
+    use crate::models::media_server::MediaServerConfig;
+    use crate::services::evict_media_server;
+    use models::user::User;
+    use shared::system::MediaServerStatus;
+
+    let stored_url = match User::get_by_username(&username)
+        .await
+        .map_err(server_error)?
+    {
+        Some(user) => MediaServerConfig::get(&user.id, MediaServerKind::Navidrome)
+            .await
+            .map_err(server_error)?
+            .and_then(|c| c.url),
+        None => None,
+    };
+
+    match try_navidrome_auth(stored_url.as_deref(), &username, &password).await {
         NavidromeAuthResult::Success => {
-            // Look up or create user
             let user = match User::get_by_username(&username)
                 .await
                 .map_err(server_error)?
             {
-                Some(u) => u,
+                Some(u) => {
+                    let has_navidrome =
+                        MediaServerConfig::get(&u.id, MediaServerKind::Navidrome)
+                            .await
+                            .map_err(server_error)?
+                            .is_some();
+                    if u.media_account_id.is_some() && !has_navidrome {
+                        return Err(unauthorized_error(
+                            "This username is linked to a Plex account",
+                        ));
+                    }
+                    u
+                }
                 None => User::create(&username, &password)
                     .await
                     .map_err(server_error)?,
             };
 
-            // Encrypt the Navidrome password and store it
             let encrypted = crypto::encrypt(&password).map_err(server_error)?;
-            User::update_navidrome_token(
+            let existing = MediaServerConfig::get(&user.id, MediaServerKind::Navidrome)
+                .await
+                .map_err(server_error)?;
+            let url = existing
+                .as_ref()
+                .and_then(|c| c.url.clone())
+                .or_else(|| stored_url.clone())
+                .unwrap_or_default();
+            MediaServerConfig::upsert_navidrome(
                 &user.id,
-                Some(&encrypted),
-                NavidromeStatus::Connected.as_str(),
+                &url,
+                false,
+                &encrypted,
+                &username,
+                MediaServerStatus::Connected.as_str(),
             )
             .await
             .map_err(server_error)?;
 
-            // Keep local password hash current
+            User::update_media(
+                &user.id,
+                "navidrome",
+                Some(&encrypted),
+                MediaServerStatus::Connected.as_str(),
+                user.media_account_id.as_deref(),
+            )
+            .await
+            .map_err(server_error)?;
+
             User::update_password(&user.id, &password)
                 .await
                 .map_err(server_error)?;
 
-            // Reset the dismissed banner so it can reappear if credentials break again
             let _ = models::user_settings::UserSettings::reset_navidrome_banner(&user.id).await;
+            evict_media_server(&user.id).await;
 
-            // Evict any cached client so it picks up the new token
-            evict_navidrome_client(&user.id).await;
-
-            let token =
-                auth::create_token(user.id.clone(), user.username.clone()).map_err(server_error)?;
-            cookies.add(build_auth_cookie(token));
-
-            Ok(AuthResponse {
-                username: user.username,
-                user_id: user.id,
-                navidrome_status: NavidromeStatus::Connected,
-            })
+            issue_session(
+                user.id,
+                user.username,
+                MediaServerKind::Navidrome,
+                MediaServerStatus::Connected,
+                cookies,
+            )
         }
         NavidromeAuthResult::AuthFailed => {
-            // Navidrome rejected the credentials. Fall back to local auth.
             let user = User::get_by_username(&username)
                 .await
                 .map_err(server_error)?
                 .ok_or_else(|| unauthorized_error("Invalid username or password"))?;
 
-            // Verify local password
             let _ = User::verify(&username, &password)
                 .await
                 .map_err(|_| unauthorized_error("Invalid username or password"))?;
 
-            // Mark Navidrome status as invalid_credentials
-            User::update_navidrome_token(
+            let navidrome = MediaServerConfig::get(&user.id, MediaServerKind::Navidrome)
+                .await
+                .map_err(server_error)?;
+            let has_navidrome = navidrome.is_some();
+            if user.media_account_id.is_some() && !has_navidrome {
+                return Err(unauthorized_error(
+                    "This account is linked to a different media server",
+                ));
+            }
+
+            if has_navidrome {
+                let _ = MediaServerConfig::update_status(
+                    &user.id,
+                    MediaServerKind::Navidrome,
+                    MediaServerStatus::InvalidCredentials.as_str(),
+                )
+                .await;
+            }
+
+            User::update_media(
                 &user.id,
-                user.navidrome_token.as_deref(),
-                NavidromeStatus::InvalidCredentials.as_str(),
+                "navidrome",
+                navidrome.as_ref().and_then(|c| c.token.as_deref()),
+                MediaServerStatus::InvalidCredentials.as_str(),
+                user.media_account_id.as_deref(),
             )
             .await
             .map_err(server_error)?;
 
-            // Evict cached client with stale credentials
-            evict_navidrome_client(&user.id).await;
+            evict_media_server(&user.id).await;
 
-            let token =
-                auth::create_token(user.id.clone(), user.username.clone()).map_err(server_error)?;
-            cookies.add(build_auth_cookie(token));
-
-            Ok(AuthResponse {
-                username: user.username,
-                user_id: user.id,
-                navidrome_status: NavidromeStatus::InvalidCredentials,
-            })
+            issue_session(
+                user.id,
+                user.username,
+                MediaServerKind::Navidrome,
+                MediaServerStatus::InvalidCredentials,
+                cookies,
+            )
         }
         result @ (NavidromeAuthResult::Unreachable | NavidromeAuthResult::NotConfigured) => {
-            // Navidrome is down or not set up. Fall back to local password
-            // verification. Without Navidrome the status stays Unknown ("not
-            // configured") so the UI does not report a server that is down.
             let status = match result {
-                NavidromeAuthResult::NotConfigured => NavidromeStatus::Unknown,
-                _ => NavidromeStatus::Offline,
+                NavidromeAuthResult::NotConfigured => MediaServerStatus::Unknown,
+                _ => MediaServerStatus::Offline,
             };
             let user = User::verify(&username, &password)
                 .await
                 .map_err(|_| unauthorized_error("Invalid username or password"))?;
 
-            // Keep the existing token so it works again once Navidrome is back
-            User::update_navidrome_token(
+            let navidrome = MediaServerConfig::get(&user.id, MediaServerKind::Navidrome)
+                .await
+                .map_err(server_error)?;
+            let has_navidrome = navidrome.is_some();
+            if user.media_account_id.is_some() && !has_navidrome {
+                return Err(unauthorized_error(
+                    "This account is linked to a different media server",
+                ));
+            }
+
+            if has_navidrome {
+                let _ = MediaServerConfig::update_status(
+                    &user.id,
+                    MediaServerKind::Navidrome,
+                    status.as_str(),
+                )
+                .await;
+            }
+
+            // Keep the existing token so it works again once Navidrome is back.
+            User::update_media(
                 &user.id,
-                user.navidrome_token.as_deref(),
+                "navidrome",
+                navidrome.as_ref().and_then(|c| c.token.as_deref()),
                 status.as_str(),
+                user.media_account_id.as_deref(),
             )
             .await
             .map_err(server_error)?;
 
-            let token =
-                auth::create_token(user.id.clone(), user.username.clone()).map_err(server_error)?;
-            cookies.add(build_auth_cookie(token));
-
-            Ok(AuthResponse {
-                username: user.username,
-                user_id: user.id,
-                navidrome_status: status,
-            })
+            issue_session(
+                user.id,
+                user.username,
+                MediaServerKind::Navidrome,
+                status,
+                cookies,
+            )
         }
     }
+}
+
+#[cfg(feature = "server")]
+async fn login_plex(
+    username: String,
+    password: String,
+    cookies: Cookies,
+) -> Result<AuthResponse, ServerFnError> {
+    use crate::models::media_server::MediaServerConfig;
+    use models::user::User;
+    use shared::system::MediaServerStatus;
+
+    let user = User::verify(&username, &password)
+        .await
+        .map_err(|_| unauthorized_error("Invalid username or password"))?;
+
+    let config = MediaServerConfig::get(&user.id, MediaServerKind::Plex)
+        .await
+        .map_err(server_error)?;
+
+    let (kind, status) = match &config {
+        Some(config) => {
+            let status = MediaServerStatus::from(config.status.as_str());
+            User::set_active_media(
+                &user.id,
+                "plex",
+                config.token.as_deref(),
+                status.as_str(),
+            )
+            .await
+            .map_err(server_error)?;
+            (MediaServerKind::Plex, status)
+        }
+        None => (
+            MediaServerKind::from(user.media_server.as_str()),
+            MediaServerStatus::from(user.media_status.as_str()),
+        ),
+    };
+
+    issue_session(user.id, user.username, kind, status, cookies)
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn issue_session(
+    user_id: String,
+    username: String,
+    media_server: MediaServerKind,
+    media_status: shared::system::MediaServerStatus,
+    cookies: Cookies,
+) -> Result<AuthResponse, ServerFnError> {
+    let token = auth::create_token(user_id.clone(), username.clone()).map_err(server_error)?;
+    cookies.add(build_auth_cookie(token));
+
+    Ok(AuthResponse {
+        username,
+        user_id,
+        media_server,
+        media_status,
+    })
 }
 
 #[post("/api/auth/refresh", auth: AuthSession, cookies: Cookies)]
@@ -242,14 +431,12 @@ pub async fn logout() -> Result<(), ServerFnError> {
 pub async fn get_current_user() -> Result<Option<AuthResponse>, ServerFnError> {
     let claims = auth.0;
 
-    let status = models::user::User::get_by_id(&claims.sub)
-        .await
-        .map(|u| shared::system::NavidromeStatus::from(u.navidrome_status))
-        .unwrap_or_default();
+    let user = models::user::User::get_by_id(&claims.sub).await.ok();
 
-    Ok(Some(AuthResponse {
+    Ok(user.map(|u| AuthResponse {
         username: claims.username,
         user_id: claims.sub,
-        navidrome_status: status,
+        media_server: MediaServerKind::from(u.media_server.as_str()),
+        media_status: shared::system::MediaServerStatus::from(u.media_status),
     }))
 }

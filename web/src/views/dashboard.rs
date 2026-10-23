@@ -45,9 +45,12 @@ fn OverviewTab() -> Element {
             let s = s.clone();
             rsx! { StatsOverview { stats: s } }
         }
-        Some(Err(_)) => rsx! {
-            div { class: "text-center text-gray-500 font-mono",
-                "Failed to load library stats. Is Navidrome configured?"
+        Some(Err(e)) => rsx! {
+            div { class: "text-center text-gray-500 font-mono max-w-xl mx-auto",
+                p { class: "text-red-400", "Failed to load library stats: {e}" }
+                p { class: "text-xs mt-2",
+                    "Check Settings > Media Server and make sure the server is reachable from this network."
+                }
             }
         },
         None => rsx! {

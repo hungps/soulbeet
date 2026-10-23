@@ -38,7 +38,7 @@ pub async fn update_user_settings(
     }
 }
 
-/// Delete Navidrome smart playlists that are no longer valid because
+/// Delete media-server playlists that are no longer valid because
 /// discovery was disabled, the folder changed, or profiles were removed.
 #[cfg(feature = "server")]
 async fn cleanup_stale_discovery_playlists(
@@ -68,7 +68,7 @@ async fn cleanup_stale_discovery_playlists(
         return;
     }
 
-    let navi = match crate::services::navidrome_client_for_user(user_id).await {
+    let server = match crate::services::media_server_for_user(user_id).await {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -91,7 +91,7 @@ async fn cleanup_stale_discovery_playlists(
 
     for profile in &profiles_to_delete {
         if let Some(playlist_id) = old_ids.get(profile) {
-            if let Err(e) = navi.delete_smart_playlist(playlist_id).await {
+            if let Err(e) = server.delete_playlist(playlist_id).await {
                 warn!(
                     "Failed to delete playlist '{}' ({}): {}",
                     profile, playlist_id, e

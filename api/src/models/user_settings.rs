@@ -211,6 +211,39 @@ impl UserSettings {
         Ok(())
     }
 
+    pub async fn clear_discovery_playlist_id(user_id: &str, profile: &str) -> Result<(), String> {
+        let current = Self::get(user_id).await?;
+        let mut ids: std::collections::HashMap<String, String> = current
+            .discovery_navidrome_playlist_id
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        if ids.remove(profile).is_none() {
+            return Ok(());
+        }
+        let json = serde_json::to_string(&ids).map_err(|e| e.to_string())?;
+        sqlx::query(
+            "UPDATE user_settings SET discovery_navidrome_playlist_id = ? WHERE user_id = ?",
+        )
+        .bind(&json)
+        .bind(user_id)
+        .execute(&*DB)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn clear_all_discovery_playlist_ids(user_id: &str) -> Result<(), String> {
+        sqlx::query(
+            "UPDATE user_settings SET discovery_navidrome_playlist_id = NULL WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .execute(&*DB)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn get_playlist_id_for_profile(
         playlist_ids_json: &Option<String>,
         profile: &str,

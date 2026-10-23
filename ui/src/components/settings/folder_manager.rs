@@ -589,7 +589,7 @@ pub fn FolderManager() -> Element {
                         div { class: "mt-3",
                             p { class: "text-sm text-white font-medium mb-1", "ListenBrainz Token" }
                             p { class: "text-xs text-gray-500 font-mono mb-2",
-                                "Configure scrobbling in your Navidrome personal settings."
+                                "Configure scrobbling in your media server's personal settings."
                             }
                             input {
                                 class: "w-full p-2 rounded bg-beet-panel border border-white/10 focus:border-beet-accent focus:outline-none text-white font-mono text-sm",
@@ -607,7 +607,7 @@ pub fn FolderManager() -> Element {
                             }
                         }
                         p { class: "text-xs text-gray-500 font-mono mt-3",
-                            "Set up scrobbling in your Navidrome personal settings to feed the recommendation engine."
+                            "Set up scrobbling in your media server's personal settings to feed the recommendation engine."
                         }
                     }
 
@@ -616,7 +616,7 @@ pub fn FolderManager() -> Element {
                         div {
                             p { class: "text-sm text-white font-medium", "Auto-delete 1-star tracks" }
                             p { class: "text-xs text-gray-500 font-mono mt-0.5",
-                                "Automatically delete files rated 1 star in Navidrome during sync"
+                                "Automatically delete files rated 1 star in your media server during sync"
                             }
                         }
                         button {
