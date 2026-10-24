@@ -1,6 +1,8 @@
 #[cfg(feature = "server")]
 use shared::slskd::{sanitize_filename, sanitize_filename_unix};
 #[cfg(feature = "server")]
+use std::collections::HashSet;
+#[cfg(feature = "server")]
 use std::path::{Path, PathBuf};
 #[cfg(feature = "server")]
 use tracing::warn;
@@ -110,6 +112,88 @@ pub fn resolve_download_path(filename: &str, download_base: &Path) -> Option<Str
     None
 }
 
+/// A file's identity on disk, independent of its name: beets can move a
+/// handed-off file away and slskd can then write the next download under the
+/// same name, which must not count as the file already handed off. Birth
+/// time, where the file system records it, tells a reused inode number apart.
+#[cfg(feature = "server")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileId {
+    dev: u64,
+    ino: u64,
+    born: Option<std::time::SystemTime>,
+}
+
+#[cfg(feature = "server")]
+pub fn file_id(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    Some(FileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+        born: meta.created().ok(),
+    })
+}
+
+/// Find a finished download in its batch folder `base/destination`.
+///
+/// slskd keeps the remote basename (sanitized) and, when that name is already
+/// taken, writes `<stem>_<ticks><ext>` with 18-digit ticks. Two files of one
+/// batch with the same basename therefore land as the plain name and its
+/// copies. The plain name is tried first, then the copies oldest first, and
+/// files in `exclude` (already handed off) are skipped.
+#[cfg(feature = "server")]
+pub fn resolve_in_destination(
+    filename: &str,
+    base: &Path,
+    destination: &str,
+    exclude: &HashSet<FileId>,
+) -> Option<PathBuf> {
+    let normalized = filename.replace('\\', "/");
+    let remote_name = normalized.rsplit('/').find(|s| !s.is_empty())?;
+    let folder = base.join(destination);
+    let names = basename_candidates(remote_name);
+
+    let usable =
+        |path: &PathBuf| path.is_file() && file_id(path).is_some_and(|id| !exclude.contains(&id));
+    if let Some(plain) = names.iter().map(|n| folder.join(n)).find(usable) {
+        return Some(plain);
+    }
+
+    let mut copies: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| names.iter().any(|want| is_ticks_copy(n, want)))
+        })
+        .filter(usable)
+        .collect();
+    // Equal-width ticks, so name order is age order.
+    copies.sort();
+    copies.into_iter().next()
+}
+
+/// Whether `name` is slskd's renamed copy of `original`: `<stem>_<18 digits><ext>`.
+#[cfg(feature = "server")]
+fn is_ticks_copy(name: &str, original: &str) -> bool {
+    let original = Path::new(original);
+    let Some(stem) = original.file_stem().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let ext = original
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    name.strip_prefix(stem)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .and_then(|rest| rest.strip_suffix(ext.as_str()))
+        .is_some_and(|ticks| ticks.len() == 18 && ticks.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// The on-disk basename variants slskd may have produced for a remote
 /// filename: sanitized with the Windows-invalid set (slskd on Windows, and
 /// what Soulful's own destinations use) or with the Unix set (slskd on
@@ -209,30 +293,6 @@ fn find_file_recursive_fuzzy(dir: &Path, expected_filename: &str) -> Option<Path
     search(dir, expected_filename, 0)
 }
 
-/// Extract the album directory from a resolved path.
-/// This is used for grouping files by album for beets import.
-///
-/// # Arguments
-/// * `resolved_path` - A resolved filesystem path to a downloaded file
-///
-/// # Returns
-/// * The parent directory path (album directory)
-#[cfg(feature = "server")]
-pub fn get_album_directory(resolved_path: &str) -> Option<String> {
-    let path = Path::new(resolved_path);
-    path.parent().map(|p| p.to_string_lossy().to_string())
-}
-
-/// Check if two paths are in the same album directory.
-/// This is used for grouping files together for album-mode import.
-#[cfg(feature = "server")]
-pub fn same_album_directory(path1: &str, path2: &str) -> bool {
-    match (get_album_directory(path1), get_album_directory(path2)) {
-        (Some(dir1), Some(dir2)) => dir1 == dir2,
-        _ => false,
-    }
-}
-
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::*;
@@ -270,6 +330,83 @@ mod tests {
 
         let resolved = resolve_download_path(r"music\Album\AC: DC - 01.mp3", &base).unwrap();
         assert!(resolved.ends_with("AC: DC - 01.mp3"));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn resolves_inside_the_batch_folder_and_skips_claimed_copies() {
+        let base = temp_base("batch");
+        let folder = base.join("F");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("01.flac"), b"x").unwrap();
+        std::fs::write(folder.join("01_639097129778484198.flac"), b"x").unwrap();
+        // Same name one folder up: outside the batch, never a candidate.
+        std::fs::write(base.join("01.flac"), b"x").unwrap();
+
+        let mut claimed = HashSet::new();
+        let first = resolve_in_destination(r"music\A\01.flac", &base, "F", &claimed).unwrap();
+        assert_eq!(first, folder.join("01.flac"));
+
+        claimed.insert(file_id(&first).unwrap());
+        let second = resolve_in_destination(r"other\B\01.flac", &base, "F", &claimed).unwrap();
+        assert_eq!(second, folder.join("01_639097129778484198.flac"));
+
+        claimed.insert(file_id(&second).unwrap());
+        assert_eq!(
+            resolve_in_destination(r"music\A\01.flac", &base, "F", &claimed),
+            None
+        );
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_new_file_under_a_handed_off_name_resolves() {
+        // beets moved the first 01.flac away, and the batch's second 01.flac
+        // then landed under the free plain name.
+        let base = temp_base("reused-name");
+        let folder = base.join("F");
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("01.flac");
+        std::fs::write(&path, b"disc 1").unwrap();
+        let claimed = HashSet::from([file_id(&path).unwrap()]);
+        assert_eq!(
+            resolve_in_destination("01.flac", &base, "F", &claimed),
+            None
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"disc 2").unwrap();
+
+        assert_eq!(
+            resolve_in_destination("01.flac", &base, "F", &claimed),
+            Some(path)
+        );
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn collision_copies_resolve_oldest_first_and_need_exact_ticks() {
+        let base = temp_base("ticks-order");
+        let folder = base.join("F");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("01_639097129778484199.flac"), b"x").unwrap();
+        std::fs::write(folder.join("01_639097129778484198.flac"), b"x").unwrap();
+        // Not slskd's pattern: wrong digit count, or a different track.
+        std::fs::write(folder.join("01_123.flac"), b"x").unwrap();
+        std::fs::write(folder.join("01_x.flac"), b"x").unwrap();
+
+        let claimed = HashSet::new();
+        assert_eq!(
+            resolve_in_destination("01.flac", &base, "F", &claimed),
+            Some(folder.join("01_639097129778484198.flac"))
+        );
+        assert_eq!(
+            resolve_in_destination("02.flac", &base, "F", &claimed),
+            None
+        );
 
         std::fs::remove_dir_all(&base).unwrap();
     }

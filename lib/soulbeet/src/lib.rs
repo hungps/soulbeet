@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod beets;
 pub mod engine;
 pub mod error;
@@ -15,6 +16,7 @@ pub use listenbrainz::ListenBrainzProvider;
 pub use navidrome::{NavidromeClient, NavidromeClientBuilder};
 pub use services::{Services, ServicesBuilder};
 pub use traits::{
-    CandidateGenerator, DownloadBackend, FallbackMetadataProvider, ImportResult, MetadataProvider,
-    MusicImporter, ScrobbleProvider,
+    CandidateGenerator, DownloadBackend, FallbackMetadataProvider, ImportMode, ImportOutcome,
+    ImportResult, MetadataProvider, MusicImporter, ScrobbleProvider, SkipReason, TaskCount,
+    TimeoutKind,
 };

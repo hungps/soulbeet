@@ -19,7 +19,9 @@ pub struct DownloadResponse {
     pub username: String,
     pub filename: String,
     pub size: u64,
-    pub error: Option<String>,
+    /// slskd's transfer id, present when the file was enqueued.
+    pub transfer_id: Option<String>,
+    pub status: crate::download::EnqueueStatus,
 }
 
 /// Download states ordered by display priority (active first, errors last)
@@ -84,6 +86,10 @@ impl From<String> for DownloadState {
 #[serde(rename_all = "camelCase")]
 pub struct FileEntry {
     pub id: String,
+    /// The batch the transfer was enqueued in. Absent for transfers enqueued
+    /// without one.
+    #[serde(default)]
+    pub batch_id: Option<String>,
     pub username: String,
     pub direction: String,
     pub filename: String,
@@ -250,8 +256,10 @@ fn truncated(value: &Value) -> String {
 
 fn collect_user_files(user: &Value, out: &mut FlattenedFiles) {
     let Some(directories) = user.get("directories").and_then(|d| d.as_array()) else {
-        out.errors
-            .push(format!("user entry without directories: {}", truncated(user)));
+        out.errors.push(format!(
+            "user entry without directories: {}",
+            truncated(user)
+        ));
         return;
     };
     for dir in directories {
@@ -567,6 +575,9 @@ impl From<FileEntry> for crate::download::DownloadProgress {
             backend: Some("slskd".into()),
             batch_id: None,
             batch_label: None,
+            local_path: None,
+            import_output: None,
+            retryable: false,
         }
     }
 }
@@ -601,11 +612,11 @@ impl From<DownloadState> for crate::download::DownloadState {
 impl From<DownloadResponse> for crate::download::QueuedDownload {
     fn from(resp: DownloadResponse) -> Self {
         Self {
-            id: resp.filename.clone(),
+            id: resp.transfer_id.unwrap_or_else(|| resp.filename.clone()),
             source: resp.username,
             item: resp.filename,
             size: resp.size,
-            error: resp.error,
+            status: resp.status,
         }
     }
 }

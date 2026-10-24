@@ -55,6 +55,21 @@ jobs:
             type=gha,scope=e2e
           cache-to: type=gha,mode=max,scope=e2e
 
+      - name: Probe the shipped beets config
+        shell: bash
+        run: |
+          set -euo pipefail
+          script=$(cat "$GITHUB_WORKSPACE/lib/soulbeet/src/beets/probe.py")
+          [ -n "$script" ] || { echo "FAIL: probe.py is empty or missing"; exit 1; }
+          probe=$(docker run --rm --entrypoint=/usr/bin/python3 soulbeet:e2e \
+            -P -c "$script" /app/beets_config.yaml)
+          echo "$probe"
+          jq -e '.fatal == null and (.plugin_errors | length) == 0
+                 and ([.metadata_sources[] | select(. != "Acoustid")] | length) > 0' \
+            <<<"$probe" >/dev/null \
+            || { echo "FAIL: shipped beets config does not probe clean"; exit 1; }
+          docker run --rm --entrypoint=/tini soulbeet:e2e --version
+
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
@@ -64,8 +79,11 @@ jobs:
       - name: Start the stack
         run: docker compose -f compose.e2e.yml up -d --build
 
-      - name: Wait for the app
-        run: timeout 120 bash -c 'until curl -fso /dev/null --max-time 2 http://127.0.0.1:9765/; do sleep 2; done'
+      - name: Wait for the apps
+        run: |
+          for port in 9765 9766; do
+            timeout 120 bash -c "until curl -fso /dev/null --max-time 2 http://127.0.0.1:$port/; do sleep 2; done"
+          done
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
@@ -76,6 +94,7 @@ jobs:
           E2E_SLSKD_URL: http://stubs:5030
           E2E_MUSIC_DIR: /music
           E2E_NAVIDROME: "1"
+          E2E_USER90_BASE_URL: http://127.0.0.1:9766
         run: npx playwright test
 
       - name: Collect stack logs

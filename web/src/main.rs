@@ -1,8 +1,8 @@
 use auth::{use_auth, AuthProvider};
 use dioxus::prelude::*;
-use shared::download::DownloadProgress;
 #[cfg(feature = "web")]
 use shared::download::DownloadEvent;
+use shared::download::DownloadProgress;
 use shared::system::NavidromeStatus;
 use std::collections::HashMap;
 
@@ -15,7 +15,7 @@ use ui::{
     AutoDownloadSignal, Downloads, HealthProvider, Layout, Navbar, SearchPrefill, SearchReset,
     SettingsProvider,
 };
-use views::{DashboardPage, LoginPage, SearchPage, SettingsPage};
+use views::{DashboardPage, LoginPage, SearchPage, SettingsPage, SettingsTab, SettingsTabRequest};
 
 mod auth;
 mod views;
@@ -49,6 +49,8 @@ fn main() {
         dioxus::serve(|| async move {
             // Start background cleanup task for user channels
             api::globals::start_channel_cleanup_task();
+            // Check the beets config in the background; never awaited here.
+            api::importer_health::start_startup_probe();
 
             Ok(dioxus::server::router(App).layer(CookieManagerLayer::new()))
         });
@@ -115,6 +117,8 @@ fn WebNavbar() -> Element {
     let search_prefill = use_signal(|| None::<(String, String)>);
     use_context_provider(|| SearchReset(search_reset));
     use_context_provider(|| SearchPrefill(search_prefill));
+    let settings_tab_request = use_signal(|| None::<SettingsTab>);
+    use_context_provider(|| SettingsTabRequest(settings_tab_request));
 
     #[allow(unused_mut)]
     let mut auto_download_signal = use_signal(|| None::<shared::download::AutoDownloadEvent>);
@@ -123,25 +127,23 @@ fn WebNavbar() -> Element {
     #[cfg(feature = "web")]
     use_resilient_websocket(
         || api::download_updates_ws(WebSocketOptions::new()),
-        move |event: DownloadEvent| {
-            match event {
-                DownloadEvent::Progress(data) => {
-                    let mut map = downloads.write();
-                    for file in data {
-                        map.insert(file.item.clone(), file);
-                    }
+        move |event: DownloadEvent| match event {
+            DownloadEvent::Progress(data) => {
+                let mut map = downloads.write();
+                for file in data {
+                    map.insert(file.item.clone(), file);
                 }
-                DownloadEvent::Replaced {
-                    previous_item,
-                    entry,
-                } => {
-                    let mut map = downloads.write();
-                    map.remove(&previous_item);
-                    map.insert(entry.item.clone(), entry);
-                }
-                DownloadEvent::AutoDownload(auto_event) => {
-                    auto_download_signal.set(Some(auto_event));
-                }
+            }
+            DownloadEvent::Replaced {
+                previous_item,
+                entry,
+            } => {
+                let mut map = downloads.write();
+                map.remove(&previous_item);
+                map.insert(entry.item.clone(), entry);
+            }
+            DownloadEvent::AutoDownload(auto_event) => {
+                auto_download_signal.set(Some(auto_event));
             }
         },
     );
@@ -253,12 +255,58 @@ fn WebNavbar() -> Element {
                 }
             }
 
+            ImporterBanner {}
             NavidromeBanner {}
 
             main { class: "px-4 sm:px-6 lg:px-8 flex-grow flex flex-col relative overflow-y-auto w-full py-8 no-scrollbar",
                 Outlet::<Route> {}
             }
             Downloads { is_open: downloads_open, downloads }
+        }
+    }
+}
+
+/// Shown while beets cannot import. Not dismissible: downloads are refused until it is fixed.
+#[component]
+fn ImporterBanner() -> Element {
+    let health = ui::use_system_health();
+    let SettingsTabRequest(mut requested_tab) = use_context();
+
+    let importer = health.importer();
+    let Some(issue) = importer.blocking_issue() else {
+        return rsx! {};
+    };
+
+    rsx! {
+        StatusBanner {
+            dot_class: ui::importer_chip(importer.level).0,
+            label: "BEETS",
+            message: issue.title.clone(),
+            Link {
+                class: "shrink-0 text-gray-300 hover:text-white underline decoration-dotted",
+                to: Route::SettingsPage {},
+                onclick: move |_| requested_tab.set(Some(SettingsTab::Config)),
+                "Fix in Config"
+            }
+        }
+    }
+}
+
+/// One line under the navbar: a status dot, a label (hidden on small
+/// screens), a message and an action.
+#[component]
+fn StatusBanner(
+    dot_class: &'static str,
+    label: &'static str,
+    message: String,
+    children: Element,
+) -> Element {
+    rsx! {
+        div { class: "mx-4 sm:mx-6 lg:mx-8 mt-2 px-3 py-2 bg-beet-panel border border-white/10 rounded flex items-center gap-3 text-xs font-mono",
+            span { class: "w-1.5 h-1.5 rounded-full {dot_class} shrink-0" }
+            span { class: "text-gray-500 uppercase tracking-widest shrink-0 hidden sm:inline", "{label}" }
+            span { class: "text-gray-400 flex-1 min-w-0 truncate", "{message}" }
+            {children}
         }
     }
 }
@@ -320,10 +368,7 @@ fn NavidromeBanner() -> Element {
     };
 
     rsx! {
-        div { class: "mx-4 sm:mx-6 lg:mx-8 mt-2 px-3 py-2 bg-beet-panel border border-white/10 rounded flex items-center gap-3 text-xs font-mono",
-            span { class: format!("w-1.5 h-1.5 rounded-full {} shrink-0", dot_color) }
-            span { class: "text-gray-500 uppercase tracking-widest shrink-0 hidden sm:inline", "{label}" }
-            span { class: "text-gray-400 flex-1 min-w-0 truncate", "{message}" }
+        StatusBanner { dot_class: dot_color, label, message: message.to_string(),
             button {
                 class: "shrink-0 text-gray-600 hover:text-gray-300 transition-colors cursor-pointer p-2 -mr-1",
                 onclick: dismiss,

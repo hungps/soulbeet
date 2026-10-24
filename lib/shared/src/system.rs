@@ -68,8 +68,53 @@ impl From<String> for NavidromeStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SystemHealth {
     pub downloader_online: bool,
-    pub beets_ready: bool,
+    #[serde(default)]
+    pub importer: ImporterHealth,
     pub navidrome_online: bool,
+}
+
+/// How well the importer can do its job; later variants are worse.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum HealthLevel {
+    #[default]
+    Checking,
+    Ready,
+    Degraded,
+    Broken,
+}
+
+impl HealthLevel {
+    pub fn chip(&self) -> &'static str {
+        match self {
+            Self::Checking => "CHECKING",
+            Self::Ready => "READY",
+            Self::Degraded => "WARN",
+            Self::Broken => "BROKEN",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HealthIssue {
+    pub severity: HealthLevel,
+    pub title: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ImporterHealth {
+    pub level: HealthLevel,
+    pub issues: Vec<HealthIssue>,
+    pub facts: Vec<(String, String)>,
+}
+
+impl ImporterHealth {
+    /// The first issue that keeps imports from running.
+    pub fn blocking_issue(&self) -> Option<&HealthIssue> {
+        self.issues
+            .iter()
+            .find(|i| i.severity == HealthLevel::Broken)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,4 +128,37 @@ pub struct AvailableBackends {
     pub metadata: Vec<BackendInfo>,
     pub download: Vec<BackendInfo>,
     pub importer: Vec<BackendInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn importer_health_defaults_to_checking_and_finds_the_blocking_issue() {
+        let h = ImporterHealth::default();
+        assert_eq!(h.level, HealthLevel::Checking);
+        assert_eq!(HealthLevel::Degraded.chip(), "WARN");
+        let issue = |s, t: &str| HealthIssue {
+            severity: s,
+            title: t.into(),
+            detail: String::new(),
+        };
+        let h = ImporterHealth {
+            level: HealthLevel::Broken,
+            issues: vec![
+                issue(HealthLevel::Degraded, "w"),
+                issue(HealthLevel::Broken, "b"),
+            ],
+            facts: vec![],
+        };
+        assert_eq!(h.blocking_issue().unwrap().title, "b");
+    }
+
+    #[test]
+    fn system_health_without_importer_field_deserializes() {
+        let v = serde_json::json!({"downloader_online":true,"navidrome_online":false});
+        let h: SystemHealth = serde_json::from_value(v).unwrap();
+        assert_eq!(h.importer.level, HealthLevel::Checking);
+    }
 }

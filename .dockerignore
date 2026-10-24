@@ -32,3 +32,9 @@ screenshots/
 # Not part of the image; keeps test and CI changes from invalidating the build cache
 e2e/
 .github/
+lib/soulbeet/tests/
+# Read only by #[cfg(test)] include_str!, which release builds never expand
+lib/soulbeet/fixtures/
+
+# Python bytecode
+**/__pycache__

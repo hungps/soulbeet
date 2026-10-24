@@ -53,6 +53,7 @@ pub fn Search() -> Element {
     let mut album_cache = use_signal::<HashMap<String, AlbumWithTracks>>(HashMap::new);
     let mut download_options = use_signal::<Option<Vec<DownloadableGroup>>>(|| None);
     let mut is_downloading = use_signal(|| false);
+    let mut download_error = use_signal(String::new);
     let search_reset = try_use_context::<SearchReset>();
     let search_prefill = try_use_context::<SearchPrefill>();
 
@@ -160,7 +161,9 @@ pub fn Search() -> Element {
 
             match event {
                 AutoDownloadEvent::Searching { .. } | AutoDownloadEvent::ScoringResults { .. } => {
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Searching);
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Searching);
                     // D-09: propagate to expanded track rows
                     if let Some(cached) = album_cache.peek().get(&item_id) {
                         let mut states = download_states.write();
@@ -171,7 +174,9 @@ pub fn Search() -> Element {
                 }
                 AutoDownloadEvent::PickedSource { .. } | AutoDownloadEvent::Downloading { .. } => {
                     let item_id_timer = item_id.clone();
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Done);
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Done);
                     // D-09: propagate to expanded track rows
                     if let Some(cached) = album_cache.peek().get(&item_id) {
                         let mut states = download_states.write();
@@ -184,14 +189,24 @@ pub fn Search() -> Element {
                         gloo_timers::future::TimeoutFuture::new(5000).await;
                         let current = download_states.peek().get(&item_id_timer).cloned();
                         if matches!(current, Some(DownloadRowState::Done)) {
-                            download_states.write().insert(item_id_timer, DownloadRowState::Idle);
+                            download_states
+                                .write()
+                                .insert(item_id_timer, DownloadRowState::Idle);
                         }
                     });
                 }
-                AutoDownloadEvent::FallbackToManual { batch_id, results, .. } => {
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Idle);
+                AutoDownloadEvent::FallbackToManual {
+                    batch_id, results, ..
+                } => {
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Idle);
 
-                    let track_name = batch_to_name.peek().get(&batch_id).cloned().unwrap_or(item_id.clone());
+                    let track_name = batch_to_name
+                        .peek()
+                        .get(&batch_id)
+                        .cloned()
+                        .unwrap_or(item_id.clone());
 
                     let toast_id = batch_id.clone();
                     fallback_toasts.write().push(FallbackToastData {
@@ -206,7 +221,9 @@ pub fn Search() -> Element {
                     });
                 }
                 AutoDownloadEvent::Failed { error, .. } => {
-                    download_states.write().insert(item_id, DownloadRowState::Failed(error));
+                    download_states
+                        .write()
+                        .insert(item_id, DownloadRowState::Failed(error));
                 }
             }
         }
@@ -225,7 +242,9 @@ pub fn Search() -> Element {
     // and the auto_download HTTP response would freeze the browser.
     use_effect(move || {
         let _trigger = batch_to_item.read().len();
-        if pending_events.peek().is_empty() { return; }
+        if pending_events.peek().is_empty() {
+            return;
+        }
 
         let events = pending_events.peek().clone();
         let mut still_pending = Vec::new();
@@ -248,7 +267,9 @@ pub fn Search() -> Element {
 
             match event {
                 AutoDownloadEvent::Searching { .. } | AutoDownloadEvent::ScoringResults { .. } => {
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Searching);
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Searching);
                     // D-09: propagate to expanded track rows
                     if let Some(cached) = album_cache.peek().get(&item_id) {
                         let mut states = download_states.write();
@@ -259,7 +280,9 @@ pub fn Search() -> Element {
                 }
                 AutoDownloadEvent::PickedSource { .. } | AutoDownloadEvent::Downloading { .. } => {
                     let item_id_timer = item_id.clone();
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Done);
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Done);
                     // D-09: propagate to expanded track rows
                     if let Some(cached) = album_cache.peek().get(&item_id) {
                         let mut states = download_states.write();
@@ -271,13 +294,23 @@ pub fn Search() -> Element {
                         gloo_timers::future::TimeoutFuture::new(5000).await;
                         let current = download_states.peek().get(&item_id_timer).cloned();
                         if matches!(current, Some(DownloadRowState::Done)) {
-                            download_states.write().insert(item_id_timer, DownloadRowState::Idle);
+                            download_states
+                                .write()
+                                .insert(item_id_timer, DownloadRowState::Idle);
                         }
                     });
                 }
-                AutoDownloadEvent::FallbackToManual { batch_id, results, .. } => {
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Idle);
-                    let track_name = batch_to_name.peek().get(&batch_id).cloned().unwrap_or(item_id.clone());
+                AutoDownloadEvent::FallbackToManual {
+                    batch_id, results, ..
+                } => {
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Idle);
+                    let track_name = batch_to_name
+                        .peek()
+                        .get(&batch_id)
+                        .cloned()
+                        .unwrap_or(item_id.clone());
                     let toast_id = batch_id.clone();
                     fallback_toasts.write().push(FallbackToastData {
                         id: batch_id,
@@ -290,7 +323,9 @@ pub fn Search() -> Element {
                     });
                 }
                 AutoDownloadEvent::Failed { error, .. } => {
-                    download_states.write().insert(item_id, DownloadRowState::Failed(error));
+                    download_states
+                        .write()
+                        .insert(item_id, DownloadRowState::Failed(error));
                 }
             }
         }
@@ -305,7 +340,9 @@ pub fn Search() -> Element {
 
     // Start an auto_download for a specific folder
     let mut start_auto_download = move |item_id: String, query: DownloadQuery, folder: Folder| {
-        download_states.write().insert(item_id.clone(), DownloadRowState::Searching);
+        download_states
+            .write()
+            .insert(item_id.clone(), DownloadRowState::Searching);
 
         // Propagate to expanded track rows (D-09)
         if expanded_albums.read().contains(&item_id) {
@@ -318,8 +355,16 @@ pub fn Search() -> Element {
         }
 
         // Extract display name before query is moved into the request
-        let display_name = query.album.as_ref().map(|a| a.title.clone())
-            .or_else(|| query.tracks.first().map(|t| format!("{} - {}", t.artist, t.title)))
+        let display_name = query
+            .album
+            .as_ref()
+            .map(|a| a.title.clone())
+            .or_else(|| {
+                query
+                    .tracks
+                    .first()
+                    .map(|t| format!("{} - {}", t.artist, t.title))
+            })
             .unwrap_or_else(|| "Unknown".to_string());
 
         spawn(async move {
@@ -385,6 +430,7 @@ pub fn Search() -> Element {
 
     let download = move |query: DownloadQuery| async move {
         loading.set(true);
+        download_error.set(String::new());
         download_options.set(Some(vec![]));
 
         let search_id = match auth.call(api::start_download_search(query)).await {
@@ -441,6 +487,7 @@ pub fn Search() -> Element {
     };
 
     let download_tracks = move |(items, folder): (Vec<DownloadableItem>, String)| async move {
+        download_error.set(String::new());
         match auth
             .call(api::download(api::DownloadRequest {
                 items,
@@ -450,13 +497,17 @@ pub fn Search() -> Element {
             .await
         {
             Ok(_res) => info!("Downloads started"),
-            Err(e) => warn!("Failed to start downloads: {:?}", e),
+            Err(e) => {
+                warn!("Failed to start downloads: {:?}", e);
+                download_error.set(crate::friendly_error(&e));
+            }
         }
         is_downloading.set(false);
     };
 
     let perform_search = move || async move {
         loading.set(true);
+        download_error.set(String::new());
         download_options.set(None);
 
         let provider = Some(settings.default_provider());
@@ -663,6 +714,10 @@ pub fn Search() -> Element {
 
         SystemStatus { health: system_health.get(), navidrome_status: auth.navidrome_status() }
 
+        if !download_error().is_empty() {
+          p { class: "text-sm font-mono text-red-400 mt-4", "{download_error}" }
+        }
+
         // Results
         if let Some(results) = download_options.read().clone() {
           DownloadResults {
@@ -674,6 +729,7 @@ pub fn Search() -> Element {
             },
             on_back: move |_| {
                 download_options.set(None);
+                download_error.set(String::new());
                 loading.set(false);
             },
           }
