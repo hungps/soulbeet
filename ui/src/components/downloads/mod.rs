@@ -234,7 +234,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
       div { class: "fixed inset-0 z-50 flex justify-end transition-opacity duration-200 ease-out {modal_opacity} {pointer_events}",
         // Backdrop
         div {
-          class: "absolute inset-0 bg-black/60 backdrop-blur-sm cursor-pointer",
+          class: "absolute inset-0 bg-black/70 cursor-pointer",
           onclick: close_modal,
         }
 
@@ -270,7 +270,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
           }
 
           // Content
-          div { class: "flex-1 overflow-y-auto p-6 no-scrollbar space-y-3",
+          div { class: "flex-1 min-h-0 overflow-y-auto overscroll-contain p-6 no-scrollbar space-y-3",
             if groups.is_empty() {
               div { class: "text-center text-gray-500 py-10 font-mono text-sm",
                 "No active transfers in the queue."
@@ -466,7 +466,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                       }
                       div { class: "mt-2 h-1.5 w-full bg-gray-800 rounded-full overflow-hidden",
                         div {
-                          class: "h-full bg-beet-accent transition-all duration-300",
+                          class: "h-full bg-beet-accent transition-[width] duration-300",
                           style: "width: {percent}%",
                         }
                       }

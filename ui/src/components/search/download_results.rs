@@ -69,6 +69,8 @@ pub struct Props {
     pub is_searching: bool,
     pub is_downloading: Signal<bool>,
     pub request: DownloadRequestContext,
+    #[props(default)]
+    pub selected_folder_id: Option<String>,
     #[props(into)]
     pub on_download: EventHandler<(Vec<DownloadableItem>, String, DownloadRequestContext)>,
     #[props(into)]
@@ -96,6 +98,68 @@ struct TrackItemProps {
 
 fn get_track_id(track: &DownloadableItem) -> String {
     format!("{}{}", track.id, track.source)
+}
+
+fn normalized_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn matches_selected_release(group: &DownloadableGroup, request: &DownloadRequestContext) -> bool {
+    let label = normalized_label(&request.label);
+    let title = normalized_label(&group.title);
+    label.chars().count() >= 4
+        && title.chars().count() >= 4
+        && (title == label || title.contains(&label) || label.contains(&title))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(title: &str) -> DownloadableGroup {
+        DownloadableGroup {
+            source: "peer".to_string(),
+            group_id: "/music/peer".to_string(),
+            title: title.to_string(),
+            artist: None,
+            item_count: 1,
+            total_size: 0,
+            items: Vec::new(),
+            quality: "flac".to_string(),
+            score: 0.5,
+        }
+    }
+
+    fn request(label: &str) -> DownloadRequestContext {
+        DownloadRequestContext {
+            key: "album:1".to_string(),
+            label: label.to_string(),
+            artist: None,
+        }
+    }
+
+    #[test]
+    fn matches_peer_folders_named_after_the_release() {
+        let request = request("Metaphor: ReFantazio Original Soundtrack");
+        assert!(matches_selected_release(
+            &group("Metaphor ReFantazio Original Soundtrack (FLAC)"),
+            &request
+        ));
+        assert!(!matches_selected_release(
+            &group("Unrelated Album"),
+            &request
+        ));
+    }
+
+    #[test]
+    fn ignores_labels_too_short_to_be_specific() {
+        let request = request("OST");
+        assert!(!matches_selected_release(&group("OST"), &request));
+    }
 }
 
 #[component]
@@ -215,23 +279,39 @@ fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
 #[component]
 pub fn DownloadResults(props: Props) -> Element {
     let mut selected_tracks = use_signal(HashSet::<String>::new);
-    let results = props.results.clone();
+    let mut sorted_results = props.results.clone();
+    let best_group_id = sorted_results.first().map(|group| group.group_id.clone());
+    sorted_results.sort_by_key(|group| !matches_selected_release(group, &props.request));
+    let results = sorted_results;
+    let selected_release = props.request.clone();
+    let preferred_folder_id = props.selected_folder_id.clone();
     let mut folders = use_signal(std::vec::Vec::new);
-    let mut selected_folder = use_signal(|| "".to_string());
+    let mut selected_folder = use_signal(String::new);
     let mut is_downloading = props.is_downloading;
     let auth = use_auth();
 
     use_future(move || async move {
         if let Ok(user_folders) = auth.call(api::get_user_folders()).await {
             info!("Fetched {} user folders", user_folders.len());
-
-            // Only select if the user has exactly one folder
-            // It could be error prone to auto-select if there are multiple folders
-            // (I failed multiple times because of this)
-            if user_folders.len() == 1 {
-                selected_folder.set(user_folders[0].path.clone());
-            }
             folders.set(user_folders);
+        }
+    });
+
+    use_effect(move || {
+        let folder_list = folders.read();
+        if folder_list.is_empty() {
+            return;
+        }
+        let preferred = preferred_folder_id
+            .as_ref()
+            .and_then(|id| folder_list.iter().find(|folder| &folder.id == id))
+            .or_else(|| (folder_list.len() == 1).then(|| &folder_list[0]));
+        let Some(folder) = preferred else {
+            return;
+        };
+        let already_selected = !selected_folder.peek().is_empty();
+        if !already_selected {
+            selected_folder.set(folder.path.clone());
         }
     });
 
@@ -349,6 +429,19 @@ pub fn DownloadResults(props: Props) -> Element {
             }
 
             div { class: "space-y-4",
+                if !selected_release.label.is_empty() {
+                    div { class: "bg-beet-accent/10 border border-beet-accent/40 rounded-md p-3",
+                        span { class: "text-[10px] font-mono uppercase tracking-widest text-beet-accent",
+                            "Selected release"
+                        }
+                        h4 { class: "text-md font-bold text-white truncate", "{selected_release.label}" }
+                        if let Some(artist) = selected_release.artist.as_ref() {
+                            if !artist.is_empty() {
+                                p { class: "text-xs text-gray-400 font-mono truncate", "{artist}" }
+                            }
+                        }
+                    }
+                }
                 if props.is_searching {
                     div { class: "flex flex-col items-center justify-center p-4 bg-white/5 rounded-lg",
                         div { class: "animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-beet-accent mb-2" }
@@ -367,7 +460,7 @@ pub fn DownloadResults(props: Props) -> Element {
                         on_track_toggle: handle_track_toggle,
                         on_download_group: handle_download_group,
                         can_download: !selected_folder.read().is_empty() && !*is_downloading.read(),
-                        is_best: idx == 0,
+                        is_best: best_group_id.as_deref() == Some(album.group_id.as_str()),
                         starts_expanded: idx == 0,
                     }
                 }

@@ -2,7 +2,7 @@ pub mod album;
 pub mod context;
 pub mod track;
 
-pub use context::{AutoDownloadSignal, SearchPrefill, SearchReset};
+pub use context::{AutoDownloadSignal, SearchPrefill, SearchReset, SearchUrlState, SearchUrlSync};
 
 mod download_icon;
 pub use download_icon::{DownloadIcon, DownloadRowState};
@@ -50,12 +50,19 @@ mod filter_chips;
 use filter_chips::FilterChips;
 
 #[component]
-pub fn Search() -> Element {
+pub fn Search(
+    #[props(default)] initial_query: Option<String>,
+    #[props(default)] initial_artist: Option<String>,
+    #[props(default)] initial_release: Option<String>,
+) -> Element {
     let auth = use_auth();
     let mut settings = use_settings();
+    let restore_query = initial_query.filter(|value| !value.trim().is_empty());
+    let restore_artist = initial_artist.filter(|value| !value.trim().is_empty());
+    let restore_release = initial_release.filter(|value| !value.trim().is_empty());
     let mut search_results = use_signal::<Option<SearchResults>>(|| None);
-    let mut search = use_signal(String::new);
-    let mut artist = use_signal::<Option<String>>(|| None);
+    let mut search = use_signal(|| restore_query.clone().unwrap_or_default());
+    let mut artist = use_signal::<Option<String>>(|| restore_artist.clone());
     let mut search_type = use_signal(|| settings.last_search_type());
     let mut loading = use_signal(|| false);
     let mut expanded_albums = use_signal::<HashSet<String>>(HashSet::new);
@@ -64,6 +71,7 @@ pub fn Search() -> Element {
     let mut is_downloading = use_signal(|| false);
     let search_reset = try_use_context::<SearchReset>();
     let search_prefill = try_use_context::<SearchPrefill>();
+    let search_url = try_use_context::<SearchUrlSync>();
 
     let system_health = use_system_health();
 
@@ -82,6 +90,18 @@ pub fn Search() -> Element {
     let mut download_request_context = use_signal::<Option<DownloadRequestContext>>(|| None);
     let mut selected_provider = use_signal(|| settings.default_provider());
     let mut provider_synced = use_signal(|| false);
+
+    let sync_url = move |release: Option<String>| {
+        let Some(sync) = search_url else { return };
+        sync.0.call(SearchUrlState {
+            query: search.peek().clone(),
+            artist: artist.peek().clone(),
+            release,
+        });
+    };
+
+    let has_restore = restore_query.is_some() || restore_release.is_some();
+    let mut restored = use_signal(|| !has_restore);
 
     use_effect(move || {
         if settings.is_loaded() && !provider_synced() {
@@ -177,6 +197,7 @@ pub fn Search() -> Element {
                 artist.set(None);
                 expanded_albums.write().clear();
                 album_cache.write().clear();
+                download_options.set(None);
                 loading.set(false);
             }
         }
@@ -446,6 +467,7 @@ pub fn Search() -> Element {
 
     let download = move |query: DownloadQuery| async move {
         download_request_context.set(Some(query.request_context()));
+        sync_url(query.album.as_ref().map(|album| album.id.clone()));
         loading.set(true);
         download_options.set(Some(vec![]));
 
@@ -523,6 +545,7 @@ pub fn Search() -> Element {
     };
 
     let perform_search = move || async move {
+        sync_url(None);
         loading.set(true);
         download_options.set(None);
 
@@ -555,6 +578,34 @@ pub fn Search() -> Element {
                 spawn(perform_search());
             }
         }
+    });
+
+    use_effect(move || {
+        if *restored.peek() {
+            return;
+        }
+        restored.set(true);
+
+        if restore_query.is_some() {
+            spawn(perform_search());
+        }
+
+        let Some(release_id) = restore_release.clone() else {
+            return;
+        };
+        let provider = selected_provider().parse::<Provider>().ok();
+        spawn(async move {
+            match auth
+                .call(api::find_album(api::AlbumQuery {
+                    id: release_id,
+                    provider,
+                }))
+                .await
+            {
+                Ok(data) => download(DownloadQuery::new(vec![]).album(data.album)).await,
+                Err(e) => info!("Failed to restore release from url: {:?}", e),
+            }
+        });
     });
 
     let mut toggle_expand = move |album_id: String, provider: Provider| {
@@ -823,10 +874,12 @@ pub fn Search() -> Element {
             is_searching: loading(),
             is_downloading,
             request: download_request_context.read().clone().unwrap_or_default(),
+            selected_folder_id: selected_folder_id(),
             on_download: move |data| {
                 spawn(download_tracks(data));
             },
             on_back: move |_| {
+                sync_url(None);
                 download_options.set(None);
                 loading.set(false);
             },

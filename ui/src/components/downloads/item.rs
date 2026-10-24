@@ -124,13 +124,8 @@ pub fn DownloadItem(file: DownloadProgress, on_cancel: EventHandler<DownloadProg
         if matches!(state, DownloadState::InProgress | DownloadState::Importing) {
           div { class: "h-2 w-full bg-gray-800 rounded-full overflow-hidden relative",
             div {
-              class: "h-full bg-beet-accent absolute top-0 left-0 transition-all duration-300",
+              class: "h-full bg-beet-accent absolute top-0 left-0 transition-[width] duration-300",
               style: "width: {percent}%",
-            }
-            // Striped animation overlay (using inline SVG for pattern)
-            div {
-              class: "h-full w-full absolute top-0 left-0 opacity-30",
-              style: "background-image: repeating-linear-gradient(45deg, transparent, transparent 5px, rgba(255,255,255,0.5) 5px, rgba(255,255,255,0.5) 10px);",
             }
           }
         } else if matches!(state, DownloadState::Queued) {

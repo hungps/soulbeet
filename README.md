@@ -6,6 +6,7 @@
 > - Filter album by release type and medium
 > - Able to pick album releases
 > - Plex integration
+> - Selfhosted MusicBrainz support
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet)
 [![Docker Image Size](https://img.shields.io/docker/image-size/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet/tags)

@@ -554,6 +554,9 @@
   .max-h-\[400px\] {
     max-height: 400px;
   }
+  .min-h-0 {
+    min-height: 0px;
+  }
   .min-h-screen {
     min-height: 100vh;
   }
@@ -878,6 +881,9 @@
   .overflow-y-auto {
     overflow-y: auto;
   }
+  .overscroll-contain {
+    overscroll-behavior: contain;
+  }
   .overscroll-y-contain {
     overscroll-behavior-y: contain;
   }
@@ -973,6 +979,12 @@
     border-color: color-mix(in srgb, #00ff9d 30%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
       border-color: color-mix(in oklab, var(--color-beet-leaf) 30%, transparent);
+    }
+  }
+  .border-beet-leaf\/40 {
+    border-color: color-mix(in srgb, #00ff9d 40%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      border-color: color-mix(in oklab, var(--color-beet-leaf) 40%, transparent);
     }
   }
   .border-beet-leaf\/50 {
@@ -1168,6 +1180,12 @@
     background-color: color-mix(in srgb, #000 60%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--color-black) 60%, transparent);
+    }
+  }
+  .bg-black\/70 {
+    background-color: color-mix(in srgb, #000 70%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-black) 70%, transparent);
     }
   }
   .bg-blue-400 {
@@ -1805,6 +1823,11 @@
   }
   .transition-\[grid-template-rows\] {
     transition-property: grid-template-rows;
+    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-duration: var(--tw-duration, var(--default-transition-duration));
+  }
+  .transition-\[width\] {
+    transition-property: width;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
     transition-duration: var(--tw-duration, var(--default-transition-duration));
   }

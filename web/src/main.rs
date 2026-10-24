@@ -180,12 +180,18 @@ fn WebNavbar() -> Element {
         });
     };
 
+    let search_link_active = matches!(use_route::<Route>(), Route::SearchPage { .. });
+    let search_link_class = if search_link_active {
+        "nav-link text-white font-medium border-b-2 border-beet-accent pb-0.5"
+    } else {
+        "nav-link text-white font-medium border-b-2 border-transparent hover:border-beet-accent pb-0.5"
+    };
+
     rsx! {
         Layout {
             Navbar {
                 Link {
-                    class: "nav-link text-white font-medium border-b-2 border-transparent hover:border-beet-accent pb-0.5",
-                    active_class: "border-beet-accent",
+                    class: "{search_link_class}",
                     to: Route::SearchPage {},
                     onclick: move |_| search_reset += 1,
                     span { class: "hidden md:block", "Search" }
