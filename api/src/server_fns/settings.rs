@@ -131,13 +131,13 @@ pub async fn get_metadata_providers() -> Result<Vec<ProviderInfo>, ServerFnError
 
     let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
     let mut providers = Vec::new();
-    for (id, name) in available_metadata_providers() {
-        let available = metadata_provider(Some(id), user_settings.lastfm_api_key.as_deref())
+    for (id, name) in available_metadata_providers().await {
+        let available = metadata_provider(Some(&id), user_settings.lastfm_api_key.as_deref())
             .await
             .is_ok();
         providers.push(ProviderInfo {
-            id: id.to_string(),
-            name: name.to_string(),
+            id,
+            name,
             available,
         });
     }
@@ -154,8 +154,18 @@ pub struct ProviderInfo {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct AppConfigValues {
+    #[serde(default)]
     pub slskd_url: Option<String>,
+    #[serde(default)]
     pub slskd_api_key: Option<String>,
+    #[serde(default)]
+    pub slskd_download_path: Option<String>,
+    #[serde(default)]
+    pub download_path: Option<String>,
+    #[serde(default)]
+    pub beets_album_mode: Option<bool>,
+    #[serde(default)]
+    pub musicbrainz_servers: Option<Vec<shared::metadata::MusicBrainzServer>>,
 }
 
 #[get("/api/config", _: AuthSession)]
@@ -168,10 +178,22 @@ pub async fn get_app_config() -> Result<AppConfigValues, ServerFnError> {
     let slskd_api_key = AppConfig::get(keys::SLSKD_API_KEY)
         .await
         .map_err(server_error)?;
+    let slskd_download_path = AppConfig::get(keys::SLSKD_DOWNLOADS_DIR)
+        .await
+        .map_err(server_error)?;
+    let download_path = AppConfig::get(keys::DOWNLOAD_DIR)
+        .await
+        .map_err(server_error)?;
+    let beets_album_mode = AppConfig::is_album_mode().await;
+    let musicbrainz_servers = AppConfig::musicbrainz_servers().await;
 
     Ok(AppConfigValues {
         slskd_url,
         slskd_api_key,
+        slskd_download_path,
+        download_path,
+        beets_album_mode: Some(beets_album_mode),
+        musicbrainz_servers: Some(musicbrainz_servers),
     })
 }
 
@@ -193,6 +215,47 @@ pub async fn update_app_config(config: AppConfigValues) -> Result<AppConfigValue
 
     set_or_delete(keys::SLSKD_URL, &config.slskd_url).await?;
     set_or_delete(keys::SLSKD_API_KEY, &config.slskd_api_key).await?;
+    set_or_delete(keys::SLSKD_DOWNLOADS_DIR, &config.slskd_download_path).await?;
+    set_or_delete(keys::DOWNLOAD_DIR, &config.download_path).await?;
+
+    if let Some(album_mode) = config.beets_album_mode {
+        AppConfig::set(
+            keys::ALBUM_MODE,
+            if album_mode { "true" } else { "false" },
+        )
+        .await
+        .map_err(server_error)?;
+    }
+
+    if let Some(servers) = &config.musicbrainz_servers {
+        let normalized: Vec<shared::metadata::MusicBrainzServer> = servers
+            .iter()
+            .filter_map(|server| {
+                let host = server.host.trim();
+                if host.is_empty() {
+                    return None;
+                }
+                let name = if server.name.trim().is_empty() {
+                    host.to_string()
+                } else {
+                    server.name.trim().to_string()
+                };
+                let id = match server.id.trim() {
+                    "" => format!("mb:{}", uuid::Uuid::new_v4()),
+                    id => id.to_string(),
+                };
+                Some(shared::metadata::MusicBrainzServer {
+                    id,
+                    name,
+                    host: host.to_string(),
+                })
+            })
+            .collect();
+        let json = serde_json::to_string(&normalized).map_err(server_error)?;
+        AppConfig::set(keys::MUSICBRAINZ_SERVERS, &json)
+            .await
+            .map_err(server_error)?;
+    }
 
     reload_providers().await;
 

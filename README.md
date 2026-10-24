@@ -26,7 +26,7 @@ Screenshots: [here](./screenshots)
 - **Three Discovery Profiles**: Conservative (close to what you know), Balanced, or Adventurous (unfamiliar territory). Run one or all three, each with its own playlist.
 - **Rate & Keep**: Listen in Navidrome or Plex. 3+ stars promotes a track to your permanent library, 1 star deletes it. Unrated tracks expire and get replaced with fresh picks.
 - **Multi-user**: Private or shared folders. Each user gets their own discovery profiles, scrobble credentials, and preferences.
-- **Multiple Metadata Providers**: MusicBrainz, BrainzMash (a community MusicBrainz mirror pool) or Last.fm (single tracks), selectable per user. MusicBrainz searches expose release type and medium filters.
+- **Multiple Metadata Providers**: MusicBrainz, any alternative MusicBrainz-compatible servers configured in Settings > Config (BrainzMash is shipped as a preset), or Last.fm (single tracks), selectable from the search page. MusicBrainz searches expose release type and medium filters.
 
 ## How It Works
 
@@ -59,7 +59,6 @@ services:
       - 9765:9765
     environment:
       - DATABASE_URL=sqlite:/data/soulbeet.db
-      - DOWNLOAD_PATH=/downloads
       - SECRET_KEY=change-me-in-production
       # Optional
       - BEETS_CONFIG=/config/config.yaml
@@ -97,17 +96,13 @@ For discovery (optional): add your Last.fm API key and/or ListenBrainz token in 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DATABASE_URL` | Connection string for SQLite | `sqlite:soulbeet.db` |
-| `DOWNLOAD_PATH` | Path where slskd saves downloads | `/downloads` |
 | `SECRET_KEY` | Encryption key for tokens and credentials | |
 | `BEETS_CONFIG` | Path to custom beets config file | `beets_config.yaml` |
-| `BEETS_ALBUM_MODE` | Enable album import mode (see below) | `false` |
-| `MUSICBRAINZ_HOST` | MusicBrainz mirror (host[:port], no scheme) | `musicbrainz.org` |
-| `BRAINZMASH_HOST` | BrainzMash endpoint (host[:port], no scheme) | `api.brainzmash.cc` |
 
 
-**Note**: slskd URL and API key are configured through the web UI (Settings > Config) and stored in the database. Scrobble credentials (Last.fm API key, ListenBrainz token) are configured per-user in Settings > Library. Navidrome and Plex URLs and credentials are configured per-user in Settings > Media Server.
+**Note**: slskd URL, API key, download paths, album mode and alternative MusicBrainz servers are configured through the web UI (Settings > Config) and stored in the database. Scrobble credentials (Last.fm API key, ListenBrainz token) are configured per-user in Settings > Library. Navidrome and Plex URLs and credentials are configured per-user in Settings > Media Server.
 
-**Note**: BrainzMash (`api.brainzmash.cc`) is a community pool of MusicBrainz mirrors. The public endpoint is gated by the pool operators, so set `BRAINZMASH_HOST` to an approved endpoint or your own MusicBrainz mirror if searches fail with HTTP 403.
+**Note**: Alternative MusicBrainz servers are configured in Settings > Config. The shipped BrainzMash entry (`api.brainzmash.cc`) is a community pool of MusicBrainz mirrors; the public endpoint is gated by the pool operators. Replace it with an approved endpoint or your own MusicBrainz mirror if searches fail with HTTP 403.
 
 ### Beets Configuration
 
@@ -115,7 +110,7 @@ Soulbeet uses `beets` to import music. You can mount a custom `config.yaml` to `
 
 Default `beet import` flags used:
 -   `-q`: Quiet mode (no user interaction)
--   `-s`: Singleton mode (Default behavior unless `BEETS_ALBUM_MODE` is set)
+-   `-s`: Singleton mode (default behaviour unless Album mode is enabled in Settings > Config)
 -   `-l [library_path]`: Library database path (per-folder)
 -   `-d [target_path]`: Import to the specific folder selected in the web UI.
 
@@ -151,9 +146,9 @@ docker exec -it <container_name> beet -l /music/Person1/.beets_library.db ls
 
 For more beets commands, see the [beets documentation](https://beets.readthedocs.io/en/stable/reference/cli.html).
 
-#### Album Mode (`BEETS_ALBUM_MODE`)
+#### Album Mode
 
-By setting `BEETS_ALBUM_MODE=true`, Soulbeet will attempt to group downloaded files by their parent directory and import them as an album instead of singletons.
+Enable **Album mode** in Settings > Config. Soulbeet then groups downloaded files by their parent directory and imports them as an album instead of singletons.
 
 This flag is only needed when you want album tags on your tracks. E.g: `albumartist` `mb_albumid` and so on..
 

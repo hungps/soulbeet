@@ -31,8 +31,6 @@ use tokio::sync::{broadcast, RwLock};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "server")]
-use crate::config::CONFIG;
-#[cfg(feature = "server")]
 use crate::globals::{get_or_create_user_channel, register_user_task, unregister_user_task};
 #[cfg(feature = "server")]
 use crate::models::download_request::{
@@ -48,7 +46,7 @@ use crate::AuthSession;
 #[cfg(feature = "server")]
 use super::monitor::DownloadMonitor;
 #[cfg(feature = "server")]
-use super::utils::resolve_download_path;
+use super::utils::resolve_download_path_mapped;
 
 #[cfg(feature = "server")]
 static REQUEST_TOKENS: LazyLock<RwLock<HashMap<String, CancellationToken>>> =
@@ -227,6 +225,7 @@ pub async fn start_monitor(
     let batch_label = Some(request.label.clone());
     let username = username.to_string();
     let user_id = user_id.to_string();
+    let album_mode = crate::models::app_config::AppConfig::is_album_mode().await;
 
     let mut monitor = DownloadMonitor::new(
         sources,
@@ -238,6 +237,7 @@ pub async fn start_monitor(
         user_id,
         batch_id,
         batch_label,
+        album_mode,
     );
 
     tokio::spawn(async move {
@@ -451,9 +451,14 @@ pub async fn remove_download_request(action: RequestAction) -> Result<(), Server
         .await
         .map_err(server_error)?;
 
-    let download_base = CONFIG.download_path().clone();
+    let download_base = crate::models::app_config::AppConfig::download_path().await;
+    let slskd_download_base = crate::models::app_config::AppConfig::slskd_download_path().await;
     for track in &tracks {
-        if let Some(path) = resolve_download_path(&track.item_key, &download_base) {
+        if let Some(path) = resolve_download_path_mapped(
+            &track.item_key,
+            &download_base,
+            slskd_download_base.as_deref(),
+        ) {
             if let Err(e) = tokio::fs::remove_file(&path).await {
                 warn!("Could not remove downloaded file {}: {}", path, e);
             }

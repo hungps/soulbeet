@@ -7,8 +7,6 @@ services:
       - 9765:9765
     environment:
       - DATABASE_URL=sqlite:/data/soulbeet.db
-      # This path must match the volume mapping for downloads inside the container
-      - DOWNLOAD_PATH=/downloads
       - SECRET_KEY=a_secret_key # Change this to a secure random key
     volumes:
       - soulbeet_data:/data

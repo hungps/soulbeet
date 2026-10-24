@@ -425,6 +425,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             task_cancellation
         };
 
+        let album_mode = crate::models::app_config::AppConfig::is_album_mode().await;
         let mut monitor = DownloadMonitor::new(
             download_sources,
             download_filenames,
@@ -435,6 +436,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             task_user_id,
             Some(batch_id),
             Some(batch_label),
+            album_mode,
         )
         .with_failover(pool);
         monitor.run().await;

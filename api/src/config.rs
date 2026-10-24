@@ -9,30 +9,6 @@ use std::path::PathBuf;
 #[cfg(feature = "server")]
 const DEFAULT_SECRET_KEY: &str = "secret";
 
-/// Parse a boolean from an environment variable.
-///
-/// Accepts: "true", "1", "yes" (case-insensitive) as true.
-/// Accepts: "false", "0", "no" (case-insensitive) as false.
-/// Returns the default for missing or invalid values.
-#[cfg(feature = "server")]
-fn parse_bool_env(key: &str, default: bool) -> bool {
-    std::env::var(key)
-        .map(|v| match v.to_lowercase().as_str() {
-            "true" | "1" | "yes" => true,
-            "false" | "0" | "no" => false,
-            _ => {
-                tracing::warn!(
-                    "Invalid boolean value '{}' for {}, using default: {}",
-                    v,
-                    key,
-                    default
-                );
-                default
-            }
-        })
-        .unwrap_or(default)
-}
-
 /// Application configuration loaded from environment variables.
 #[cfg(feature = "server")]
 #[derive(Debug, Clone)]
@@ -41,12 +17,8 @@ pub struct AppConfig {
     database_url: String,
     /// JWT signing secret (MUST be set in production)
     secret_key: String,
-    /// Directory where downloads are saved (default: "/downloads")
-    download_path: PathBuf,
     /// Path to beets configuration file (default: "beets_config.yaml")
     beets_config: PathBuf,
-    /// Enable album mode for beets import (groups tracks by folder)
-    beets_album_mode: bool,
     /// HTTP server port (default: 9765)
     pub port: u16,
     /// HTTP server bind address (default: "0.0.0.0")
@@ -79,13 +51,9 @@ impl AppConfig {
             database_url: std::env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "sqlite:soulbeet.db".to_string()),
             secret_key,
-            download_path: PathBuf::from(
-                std::env::var("DOWNLOAD_PATH").unwrap_or_else(|_| "/downloads".to_string()),
-            ),
             beets_config: PathBuf::from(
                 std::env::var("BEETS_CONFIG").unwrap_or_else(|_| "beets_config.yaml".to_string()),
             ),
-            beets_album_mode: parse_bool_env("BEETS_ALBUM_MODE", false),
             port: std::env::var("PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
@@ -104,19 +72,9 @@ impl AppConfig {
         &self.secret_key
     }
 
-    /// Get the download path.
-    pub fn download_path(&self) -> &PathBuf {
-        &self.download_path
-    }
-
     /// Get the beets config path.
     pub fn beets_config(&self) -> &PathBuf {
         &self.beets_config
-    }
-
-    /// Check if album mode is enabled.
-    pub fn is_album_mode(&self) -> bool {
-        self.beets_album_mode
     }
 }
 

@@ -12,9 +12,7 @@ use tokio::sync::broadcast;
 #[cfg(feature = "server")]
 use super::import::import_group;
 #[cfg(feature = "server")]
-use super::utils::resolve_download_path;
-#[cfg(feature = "server")]
-use crate::config::CONFIG;
+use super::utils::resolve_download_path_mapped;
 
 /// Maximum number of retries when waiting for a downloaded file to appear on disk.
 /// With exponential backoff (500ms, 1s, 2s, 4s, 8s), this covers ~15.5s total.
@@ -30,8 +28,12 @@ const FILE_RESOLVE_INITIAL_DELAY_MS: u64 = 500;
 /// the file is visible on disk via shared volume mounts. This retries with
 /// exponential backoff to handle that lag.
 #[cfg(feature = "server")]
-async fn resolve_download_path_with_retry(filename: &str, download_base: &Path) -> Option<String> {
-    if let Some(path) = resolve_download_path(filename, download_base) {
+async fn resolve_download_path_with_retry(
+    filename: &str,
+    download_base: &Path,
+    slskd_base: Option<&Path>,
+) -> Option<String> {
+    if let Some(path) = resolve_download_path_mapped(filename, download_base, slskd_base) {
         return Some(path);
     }
 
@@ -43,7 +45,7 @@ async fn resolve_download_path_with_retry(filename: &str, download_base: &Path) 
         );
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
 
-        if let Some(path) = resolve_download_path(filename, download_base) {
+        if let Some(path) = resolve_download_path_mapped(filename, download_base, slskd_base) {
             info!(
                 "File appeared on disk after {}ms wait: {}",
                 delay_ms, filename
@@ -71,8 +73,9 @@ pub async fn process_downloads(
             target_path
         );
 
-        let download_path_buf = CONFIG.download_path().clone();
-        let album_mode = CONFIG.is_album_mode();
+        let download_path_buf = crate::models::app_config::AppConfig::download_path().await;
+        let slskd_download_path = crate::models::app_config::AppConfig::slskd_download_path().await;
+        let album_mode = crate::models::app_config::AppConfig::is_album_mode().await;
 
         if album_mode {
             let mut pending_imports: HashMap<String, Vec<DownloadProgress>> = HashMap::new();
@@ -80,8 +83,12 @@ pub async fn process_downloads(
             let mut singletons: Vec<DownloadProgress> = Vec::new();
 
             for download in successful_downloads {
-                if let Some(path) =
-                    resolve_download_path_with_retry(&download.item, &download_path_buf).await
+                if let Some(path) = resolve_download_path_with_retry(
+                    &download.item,
+                    &download_path_buf,
+                    slskd_download_path.as_deref(),
+                )
+                .await
                 {
                     let p = std::path::Path::new(&path);
                     // group by parent directory (album or release)
@@ -122,8 +129,12 @@ pub async fn process_downloads(
             }
 
             for download in singletons {
-                if let Some(path) =
-                    resolve_download_path_with_retry(&download.item, &download_path_buf).await
+                if let Some(path) = resolve_download_path_with_retry(
+                    &download.item,
+                    &download_path_buf,
+                    slskd_download_path.as_deref(),
+                )
+                .await
                 {
                     import_group(
                         vec![download],
@@ -139,8 +150,12 @@ pub async fn process_downloads(
         } else {
             // singleton mode
             for download in successful_downloads {
-                if let Some(path) =
-                    resolve_download_path_with_retry(&download.item, &download_path_buf).await
+                if let Some(path) = resolve_download_path_with_retry(
+                    &download.item,
+                    &download_path_buf,
+                    slskd_download_path.as_deref(),
+                )
+                .await
                 {
                     import_group(
                         vec![download],

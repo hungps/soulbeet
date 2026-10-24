@@ -2,7 +2,7 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [ "master" ]
+    branches: ["develop"]
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -17,7 +17,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: docccccc/soulbeet
+  IMAGE_NAME: hungps/soulbeet
 
 jobs:
   metadata:
@@ -93,7 +93,7 @@ jobs:
           # Rolling per-tier per-arch tag (e.g. light-amd64). The merge job
           # uses these to compose the rolling :light/:medium/:full multi-arch
           # manifests; that step guards itself against feature-branch refs so
-          # the rolling image is only re-published on master / v* tags.
+          # the rolling image is only re-published on develop / v* tags.
           SUFFIXED_TAGS="${SUFFIXED_TAGS},${{ env.IMAGE_NAME }}:${TIER}-${SUFFIX}"
           SUFFIXED_TAGS="${SUFFIXED_TAGS#,}"
           echo "tags=$SUFFIXED_TAGS" >> $GITHUB_OUTPUT
@@ -223,15 +223,15 @@ jobs:
           unset IFS
 
           # Rolling per-tier multi-arch manifests (:light, :medium, :full).
-          # Only re-publish on master pushes or semver tag pushes so feature
+          # Only re-publish on develop pushes or semver tag pushes so feature
           # branches do not silently re-point the rolling :light/:medium/:full
           # tags on Docker Hub.
-          if [[ "$GITHUB_REF" == "refs/heads/master" || "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [[ "$GITHUB_REF" == "refs/heads/develop" || "$GITHUB_REF" == refs/tags/v* ]]; then
             for TIER in "${TIERS[@]}"; do
               docker buildx imagetools create -t ${{ env.IMAGE_NAME }}:${TIER} ${{ env.IMAGE_NAME }}:${TIER}-amd64 ${{ env.IMAGE_NAME }}:${TIER}-arm64
             done
           else
-            echo "::notice::Skipping rolling per-tier manifests (ref=$GITHUB_REF is not master or a v* tag)"
+            echo "::notice::Skipping rolling per-tier manifests (ref=$GITHUB_REF is not master, develop or a v* tag)"
           fi
 
   # NFR-16-01 size guard: warn (but do not block, per D-CI-03) if the new

@@ -90,9 +90,7 @@ up() {
   (cd "$SERVER_DIR" && \
     DATABASE_URL="sqlite:$RUNTIME/data/soulbeet.db" \
     SECRET_KEY="e2e-secret-key" \
-    DOWNLOAD_PATH="$RUNTIME/downloads" \
     BEETS_CONFIG="$E2E_DIR/.fixtures/beets-e2e.yaml" \
-    MUSICBRAINZ_HOST="127.0.0.1:5050" \
     PORT=9765 IP=127.0.0.1 \
     setsid ./server >"$LOG_DIR/soulbeet.log" 2>&1 </dev/null &
    echo $! >"$PID_DIR/soulbeet.pid")

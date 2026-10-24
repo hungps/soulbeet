@@ -1,12 +1,9 @@
 use dioxus::prelude::*;
-use ui::settings::{
-    AppConfigManager, FolderManager, MediaServerManager, PreferencesManager, UserManager,
-};
+use ui::settings::{AppConfigManager, FolderManager, MediaServerManager, UserManager};
 
 #[derive(PartialEq, Clone, Copy, Default)]
 enum SettingsTab {
     #[default]
-    Search,
     Library,
     MediaServer,
     Users,
@@ -30,12 +27,6 @@ pub fn SettingsPage() -> Element {
 
             // Tab navigation - pill style matching navbar
             nav { class: "flex items-center justify-center gap-1 bg-beet-panel/50 p-1.5 rounded-full border border-white/5 backdrop-blur-sm w-fit mx-auto",
-                TabButton {
-                    label: "Search",
-                    icon_path: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z",
-                    active: active_tab() == SettingsTab::Search,
-                    onclick: move |_| active_tab.set(SettingsTab::Search),
-                }
                 TabButton {
                     label: "Library",
                     icon_path: "M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z",
@@ -65,7 +56,6 @@ pub fn SettingsPage() -> Element {
             // Tab content
             div { class: "pt-8",
                 match active_tab() {
-                    SettingsTab::Search => rsx! { PreferencesManager {} },
                     SettingsTab::Library => rsx! { FolderManager {} },
                     SettingsTab::MediaServer => rsx! { MediaServerManager {} },
                     SettingsTab::Users => rsx! { UserManager {} },

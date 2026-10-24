@@ -1,10 +1,16 @@
 // Global app configuration, done once before every other project: points the
-// app at the slskd stub through the real settings UI. slskd config is
-// app-wide (app_config table), not per-user.
+// app at the slskd stub and an alternative MusicBrainz server through the real
+// settings UI. Both are app-wide (app_config table), not per-user.
 
 import { expect, test } from '@playwright/test';
 import { loginViaUi, openSettings } from '../helpers/app.js';
-import { slskdApiKey, slskdUrlForApp } from '../helpers/env.js';
+import {
+  downloadsDirForApp,
+  metadataServerHost,
+  metadataServerName,
+  slskdApiKey,
+  slskdUrlForApp,
+} from '../helpers/env.js';
 
 test('configure slskd connection', async ({ page }) => {
   // The migration seeds a local admin/admin user.
@@ -15,6 +21,15 @@ test('configure slskd connection', async ({ page }) => {
 
   await page.getByPlaceholder('http://localhost:5030').fill(slskdUrlForApp);
   await page.getByPlaceholder('Enter slskd API key').fill(slskdApiKey);
+  await page.getByLabel('Soulbeet downloads path').fill(downloadsDirForApp);
+
+  await page.getByRole('button', { name: '+ Add server' }).click();
+  await page.getByPlaceholder('Name (e.g. BrainzMash)').last().fill(metadataServerName);
+  await page
+    .getByPlaceholder('musicbrainz.example.com:8080')
+    .last()
+    .fill(metadataServerHost);
+
   await page.getByRole('button', { name: 'Save Configuration' }).click();
 
   await expect(page.getByText('Configuration saved')).toBeVisible();

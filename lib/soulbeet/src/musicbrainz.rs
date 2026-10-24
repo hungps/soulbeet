@@ -36,34 +36,26 @@ const MAX_BACKOFF_MS: u64 = 5000;
 /// so this needs to be well above the number of groups we return.
 const ALBUM_FETCH_LIMIT: u8 = 100;
 
-fn build_client(env_var: &str, default_host: &str) -> MusicBrainzClient {
-    let version = env!("CARGO_PKG_VERSION");
-    let mut client = MusicBrainzClient::new(&format!(
-        "Lidarr/3.1.6.5078"
-    ))
-    .expect("Failed to create MusicBrainz client - invalid user agent format");
-    let configured = std::env::var(env_var).ok();
-    let host = configured
-        .as_deref()
-        .map(str::trim)
-        .filter(|host| !host.is_empty())
-        .unwrap_or(default_host);
-    client.musicbrainz_domain = host.to_string();
+fn normalize_host(host: &str) -> String {
+    host.trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn build_client(host: &str) -> MusicBrainzClient {
+    let mut client = MusicBrainzClient::new("Lidarr/3.1.6.5078")
+        .expect("Failed to create MusicBrainz client - invalid user agent format");
+    client.musicbrainz_domain = normalize_host(host);
     client
 }
 
-/// Official MusicBrainz server. `MUSICBRAINZ_HOST` points it at a mirror
-/// (host[:port], no scheme), mirroring the `musicbrainz.host` beets option.
+/// Official MusicBrainz server. Alternate servers are configured in the
+/// Config tab and built per provider instance.
 fn musicbrainz_client() -> &'static MusicBrainzClient {
     static CLIENT: OnceLock<MusicBrainzClient> = OnceLock::new();
-    CLIENT.get_or_init(|| build_client("MUSICBRAINZ_HOST", "musicbrainz.org"))
-}
-
-/// BrainzMash is a load-balanced pool of read-only MusicBrainz mirrors that
-/// speaks the same ws/2 API. `BRAINZMASH_HOST` overrides the endpoint.
-fn brainzmash_client() -> &'static MusicBrainzClient {
-    static CLIENT: OnceLock<MusicBrainzClient> = OnceLock::new();
-    CLIENT.get_or_init(|| build_client("BRAINZMASH_HOST", "api.brainzmash.cc"))
+    CLIENT.get_or_init(|| build_client("musicbrainz.org"))
 }
 
 /// Formats the artist credits into a single, comma-separated string.
@@ -441,7 +433,7 @@ struct GroupAccum {
 pub struct MusicBrainzProvider {
     id: &'static str,
     name: &'static str,
-    client: &'static MusicBrainzClient,
+    client: MusicBrainzClient,
 }
 
 impl MusicBrainzProvider {
@@ -449,15 +441,18 @@ impl MusicBrainzProvider {
         Self {
             id: "musicbrainz",
             name: "MusicBrainz",
-            client: musicbrainz_client(),
+            client: musicbrainz_client().clone(),
         }
     }
 
-    pub fn brainzmash() -> Self {
+    /// A MusicBrainz-compatible server configured in the Config tab. It keeps
+    /// the MusicBrainz identity because the ws/2 data model is identical; the
+    /// configured name is only used by the provider picker.
+    pub fn from_host(host: &str) -> Self {
         Self {
-            id: "brainzmash",
-            name: "BrainzMash",
-            client: brainzmash_client(),
+            id: "musicbrainz",
+            name: "MusicBrainz",
+            client: build_client(host),
         }
     }
 
@@ -469,7 +464,7 @@ impl MusicBrainzProvider {
         filters: &SearchFilters,
         limit: usize,
     ) -> Result<Vec<SearchResult>, musicbrainz_rs::Error> {
-        let client = self.client;
+        let client = &self.client;
         let mut results = Vec::new();
 
         info!(
@@ -662,7 +657,7 @@ impl MusicBrainzProvider {
         &self,
         release_id: &str,
     ) -> Result<AlbumWithTracks, musicbrainz_rs::Error> {
-        let client = self.client;
+        let client = &self.client;
 
         // Fetch the release with recordings (tracks) and artist credits for the tracks.
         let release = with_retry("MusicBrainz album fetch", || async {

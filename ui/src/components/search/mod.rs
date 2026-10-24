@@ -80,9 +80,31 @@ pub fn Search() -> Element {
     let mut filter_provider = use_signal(String::new);
     let mut selected_edition = use_signal::<HashMap<String, usize>>(HashMap::new);
     let mut download_request_context = use_signal::<Option<DownloadRequestContext>>(|| None);
+    let mut selected_provider = use_signal(|| settings.default_provider());
+    let mut provider_synced = use_signal(|| false);
 
     use_effect(move || {
-        let provider = settings.default_provider();
+        if settings.is_loaded() && !provider_synced() {
+            selected_provider.set(settings.default_provider());
+            provider_synced.set(true);
+        }
+    });
+
+    use_effect(move || {
+        let providers = settings.providers();
+        if providers.is_empty() {
+            return;
+        }
+        if !providers
+            .iter()
+            .any(|provider| provider.id == selected_provider())
+        {
+            selected_provider.set("musicbrainz".to_string());
+        }
+    });
+
+    use_effect(move || {
+        let provider = selected_provider();
         if *filter_provider.peek() == provider {
             return;
         }
@@ -504,7 +526,7 @@ pub fn Search() -> Element {
         loading.set(true);
         download_options.set(None);
 
-        let provider = Some(settings.default_provider());
+        let provider = Some(selected_provider());
 
         let query_data = api::SearchQuery {
             artist: artist(),
@@ -599,6 +621,19 @@ pub fn Search() -> Element {
 
     let mut handle_track_override_download = move |(track, folder): (Track, Folder)| {
         start_auto_download(track.id.clone(), DownloadQuery::from(track), folder);
+    };
+
+    let mut handle_provider_change = move |value: String| {
+        selected_provider.set(value.clone());
+        let mut settings = settings;
+        spawn(async move {
+            let _ = settings
+                .update(api::UpdateUserSettings {
+                    default_metadata_provider: Some(value),
+                    ..Default::default()
+                })
+                .await;
+        });
     };
 
     rsx! {
@@ -725,25 +760,51 @@ pub fn Search() -> Element {
           }
         }
 
-        if search_type() == SearchType::Album && filter_options.read().is_supported() {
-          div { class: "w-full -mt-4 space-y-2.5 bg-beet-panel/30 border border-white/5 rounded-lg p-3",
-            FilterChips {
-              label: "Type".to_string(),
-              values: filter_options.read().release_types.clone(),
-              selected: filters.read().release_types.clone(),
-              on_toggle: move |value| toggle_filter((0, value)),
+        div { class: "w-full -mt-4 space-y-3",
+          div { class: "flex items-center justify-between gap-3 bg-beet-panel/30 border border-white/5 rounded-lg px-3 py-2",
+            span { class: "text-[10px] font-mono uppercase tracking-widest text-gray-500 shrink-0",
+              "Metadata Provider"
             }
-            FilterChips {
-              label: "Secondary".to_string(),
-              values: filter_options.read().secondary_types.clone(),
-              selected: filters.read().secondary_types.clone(),
-              on_toggle: move |value| toggle_filter((1, value)),
+            select {
+              class: "flex-grow min-w-0 bg-beet-dark border border-white/10 rounded px-2 py-1 text-xs font-mono text-gray-300 focus:border-beet-accent focus:outline-none",
+              aria_label: "Metadata Provider",
+              value: "{selected_provider}",
+              onchange: move |event| handle_provider_change(event.value()),
+              for provider in settings.providers().iter() {
+                option {
+                  value: "{provider.id}",
+                  selected: provider.id == selected_provider(),
+                  disabled: !provider.available,
+                  if provider.available {
+                    "{provider.name}"
+                  } else {
+                    "{provider.name} (not configured)"
+                  }
+                }
+              }
             }
-            FilterChips {
-              label: "Medium".to_string(),
-              values: filter_options.read().media_formats.clone(),
-              selected: filters.read().media_formats.clone(),
-              on_toggle: move |value| toggle_filter((2, value)),
+          }
+
+          if search_type() == SearchType::Album && filter_options.read().is_supported() {
+            div { class: "w-full space-y-2.5 bg-beet-panel/30 border border-white/5 rounded-lg p-3",
+              FilterChips {
+                label: "Type".to_string(),
+                values: filter_options.read().release_types.clone(),
+                selected: filters.read().release_types.clone(),
+                on_toggle: move |value| toggle_filter((0, value)),
+              }
+              FilterChips {
+                label: "Secondary".to_string(),
+                values: filter_options.read().secondary_types.clone(),
+                selected: filters.read().secondary_types.clone(),
+                on_toggle: move |value| toggle_filter((1, value)),
+              }
+              FilterChips {
+                label: "Medium".to_string(),
+                values: filter_options.read().media_formats.clone(),
+                selected: filters.read().media_formats.clone(),
+                on_toggle: move |value| toggle_filter((2, value)),
+              }
             }
           }
         }

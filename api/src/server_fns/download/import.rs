@@ -159,8 +159,7 @@ pub async fn import_group(
         source.parent()
     };
     if let Some(dir) = source_dir {
-        let _ =
-            crate::server_fns::cleanup_empty_ancestors(dir, crate::config::CONFIG.download_path())
-                .await;
+        let download_base = crate::models::app_config::AppConfig::download_path().await;
+        let _ = crate::server_fns::cleanup_empty_ancestors(dir, &download_base).await;
     }
 }

@@ -23,6 +23,14 @@ export const musicDirForApp = process.env.E2E_MUSIC_DIR ?? join(e2eRoot, '.runti
 /** The same music library root on the host, for file assertions. */
 export const musicDirOnHost = join(e2eRoot, '.runtime', 'music');
 
+/** Downloads root as the APP sees it (mount point in compose, runtime dir natively). */
+export const downloadsDirForApp =
+  process.env.E2E_DOWNLOADS_DIR ?? join(e2eRoot, '.runtime', 'downloads');
+
+/** Alternative MusicBrainz server configured in the setup project. */
+export const metadataServerName = 'E2E MusicBrainz';
+export const metadataServerHost = process.env.E2E_MB_HOST ?? '127.0.0.1:5050';
+
 /** The shared downloads directory on the host. */
 export const downloadsDirOnHost = join(e2eRoot, '.runtime', 'downloads');
 

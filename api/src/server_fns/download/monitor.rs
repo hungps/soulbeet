@@ -16,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::failover::{SourcePool, MAX_SOURCES_PER_TRACK};
 use super::process::process_downloads;
-use crate::config::CONFIG;
 use crate::models::download_request::DownloadRequestTrackRow;
 use crate::services::download_backend;
 
@@ -150,6 +149,7 @@ impl DownloadMonitor {
         user_id: String,
         batch_id: Option<String>,
         batch_label: Option<String>,
+        album_mode: bool,
     ) -> Self {
         let tracked_files: Vec<TrackedFile> = sources
             .into_iter()
@@ -167,7 +167,7 @@ impl DownloadMonitor {
             tx,
             track_states,
             pool: None,
-            album_mode: CONFIG.is_album_mode(),
+            album_mode,
             cancellation_token,
             username,
             user_id,
@@ -1118,6 +1118,7 @@ mod tests {
             "tester".to_string(),
             None,
             None,
+            false,
         )
     }
 

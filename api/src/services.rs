@@ -24,7 +24,6 @@ use crate::models::app_config::{keys, AppConfig};
 
 pub mod providers {
     pub const MUSICBRAINZ: &str = "musicbrainz";
-    pub const BRAINZMASH: &str = "brainzmash";
     pub const LASTFM: &str = "lastfm";
 }
 
@@ -53,12 +52,24 @@ static MEDIA_SERVERS: LazyLock<RwLock<HashMap<String, Arc<dyn MediaServer>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[cfg(feature = "server")]
-pub fn available_metadata_providers() -> Vec<(&'static str, &'static str)> {
-    vec![
-        (providers::MUSICBRAINZ, "MusicBrainz"),
-        (providers::BRAINZMASH, "BrainzMash"),
-        (providers::LASTFM, "Last.fm"),
-    ]
+pub async fn available_metadata_providers() -> Vec<(String, String)> {
+    let mut providers = vec![(
+        providers::MUSICBRAINZ.to_string(),
+        "MusicBrainz".to_string(),
+    )];
+
+    for server in AppConfig::musicbrainz_servers().await {
+        if server.id.trim().is_empty()
+            || server.name.trim().is_empty()
+            || server.host.trim().is_empty()
+        {
+            continue;
+        }
+        providers.push((server.id, server.name));
+    }
+
+    providers.push((providers::LASTFM.to_string(), "Last.fm".to_string()));
+    providers
 }
 
 #[cfg(feature = "server")]
@@ -76,16 +87,25 @@ async fn init_metadata_provider(
     id: &str,
     lastfm_api_key: Option<&str>,
 ) -> Result<Arc<dyn MetadataProvider>, String> {
-    match id {
-        providers::BRAINZMASH => Ok(Arc::new(MusicBrainzProvider::brainzmash())),
-        providers::LASTFM => {
-            let api_key = lastfm_api_key
-                .filter(|k| !k.is_empty())
-                .ok_or("Last.fm API key not configured")?;
-            Ok(Arc::new(LastFmProvider::new(api_key.to_string())))
-        }
-        _ => Ok(Arc::new(MusicBrainzProvider::new())),
+    if id == providers::MUSICBRAINZ {
+        return Ok(Arc::new(MusicBrainzProvider::new()));
     }
+    if id == providers::LASTFM {
+        let api_key = lastfm_api_key
+            .filter(|k| !k.is_empty())
+            .ok_or("Last.fm API key not configured")?;
+        return Ok(Arc::new(LastFmProvider::new(api_key.to_string())));
+    }
+
+    let servers = AppConfig::musicbrainz_servers().await;
+    let server = servers
+        .iter()
+        .find(|server| server.id == id)
+        .ok_or_else(|| format!("Unknown metadata provider: {id}"))?;
+    if server.host.trim().is_empty() {
+        return Err(format!("Metadata server '{}' has no host", server.name));
+    }
+    Ok(Arc::new(MusicBrainzProvider::from_host(&server.host)))
 }
 
 #[cfg(feature = "server")]

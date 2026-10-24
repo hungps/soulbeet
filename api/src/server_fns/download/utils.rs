@@ -110,6 +110,41 @@ pub fn resolve_download_path(filename: &str, download_base: &Path) -> Option<Str
     None
 }
 
+/// Translate a path reported against slskd's downloads directory into the
+/// path Soulbeet has mounted locally. Returns `None` when the input is not
+/// under the slskd root.
+#[cfg(feature = "server")]
+pub fn map_slskd_path(
+    filename: &str,
+    slskd_base: Option<&Path>,
+    local_base: &Path,
+) -> Option<PathBuf> {
+    let slskd_base = slskd_base?;
+    let normalized = filename.replace('\\', "/");
+    let input = Path::new(&normalized);
+    let slskd_normalized = slskd_base.to_string_lossy().replace('\\', "/");
+    let slskd_root = Path::new(&slskd_normalized);
+    let relative = input.strip_prefix(slskd_root).ok()?;
+    Some(local_base.join(relative))
+}
+
+/// Resolve a download path, first translating an absolute slskd-side path
+/// through the configured mapping, then falling back to the regular remote
+/// filename strategies.
+#[cfg(feature = "server")]
+pub fn resolve_download_path_mapped(
+    filename: &str,
+    local_base: &Path,
+    slskd_base: Option<&Path>,
+) -> Option<String> {
+    if let Some(mapped) = map_slskd_path(filename, slskd_base, local_base) {
+        if mapped.exists() {
+            return Some(mapped.to_string_lossy().to_string());
+        }
+    }
+    resolve_download_path(filename, local_base)
+}
+
 /// The on-disk basename variants slskd may have produced for a remote
 /// filename: sanitized with the Windows-invalid set (slskd on Windows, and
 /// what Soulful's own destinations use) or with the Unix set (slskd on
@@ -283,6 +318,42 @@ mod tests {
 
         let resolved = resolve_download_path(r"music\Album\track.mp3", &base).unwrap();
         assert!(resolved.ends_with("track_639097129778484198.mp3"));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn maps_an_absolute_slskd_path_to_the_local_mount() {
+        let base = temp_base("mapped");
+        let album = base.join("Album");
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(album.join("track.mp3"), b"x").unwrap();
+
+        let resolved = resolve_download_path_mapped(
+            "/slskd/Album/track.mp3",
+            &base,
+            Some(Path::new("/slskd")),
+        )
+        .unwrap();
+        assert!(resolved.ends_with("Album/track.mp3"));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn mapping_ignores_paths_outside_the_slskd_root() {
+        let base = temp_base("unmapped");
+        let album = base.join("Album");
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(album.join("track.mp3"), b"x").unwrap();
+
+        let resolved = resolve_download_path_mapped(
+            r"music\Album\track.mp3",
+            &base,
+            Some(Path::new("/slskd")),
+        )
+        .unwrap();
+        assert!(resolved.ends_with("Album/track.mp3"));
 
         std::fs::remove_dir_all(&base).unwrap();
     }

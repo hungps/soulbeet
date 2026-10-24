@@ -2,7 +2,7 @@ name: End-to-End Tests
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "develop" ]
   pull_request:
   workflow_dispatch:
 
@@ -75,6 +75,8 @@ jobs:
           CI: "true"
           E2E_SLSKD_URL: http://stubs:5030
           E2E_MUSIC_DIR: /music
+          E2E_DOWNLOADS_DIR: /downloads
+          E2E_MB_HOST: stubs:5050
           E2E_NAVIDROME: "1"
         run: npx playwright test
 

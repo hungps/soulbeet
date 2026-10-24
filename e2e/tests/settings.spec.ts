@@ -1,4 +1,4 @@
-// Settings flows: folder management, user management, search preferences.
+// Settings flows: folder management, user management, default metadata provider.
 // The Config tab (slskd connection) is covered by the setup project.
 
 import { expect, test } from '@playwright/test';
@@ -42,17 +42,13 @@ test('creates another user account', async ({ page }) => {
 });
 
 test('persists the default metadata provider', async ({ page }) => {
-  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await page.goto('/');
 
-  const select = page.locator('select').first();
+  const select = page.getByLabel('Metadata Provider');
   await select.selectOption({ label: 'MusicBrainz' });
-  await page.getByRole('button', { name: 'Save Preferences' }).click();
-
-  await expect(page.getByText('Settings saved successfully')).toBeVisible();
 
   // Leave and come back (client-side), then check the choice stuck.
   await page.getByRole('link', { name: 'Dashboard' }).click();
-  await openSettings(page);
-  await page.getByRole('button', { name: 'Search', exact: true }).click();
-  await expect(page.locator('select').first()).toHaveValue('musicbrainz');
+  await page.goto('/');
+  await expect(page.getByLabel('Metadata Provider')).toHaveValue('musicbrainz');
 });

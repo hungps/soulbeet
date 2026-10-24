@@ -62,11 +62,9 @@ pub async fn get_backends() -> Result<AvailableBackends, ServerFnError> {
     {
         Ok(AvailableBackends {
             metadata: available_metadata_providers()
+                .await
                 .into_iter()
-                .map(|(id, name)| BackendInfo {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                })
+                .map(|(id, name)| BackendInfo { id, name })
                 .collect(),
             download: available_download_backends()
                 .into_iter()

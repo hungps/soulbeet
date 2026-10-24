@@ -50,6 +50,30 @@ pub enum SearchResult {
     AlbumGroup(AlbumGroup),
 }
 
+/// A MusicBrainz-compatible server configured in the Config tab. Custom
+/// servers are exposed as selectable metadata providers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MusicBrainzServer {
+    /// Stable provider identifier (`mb:<uuid>` for user-added rows).
+    pub id: String,
+    /// Display name shown in the provider picker.
+    pub name: String,
+    /// MusicBrainz ws/2 host, optionally with a port (`musicbrainz.example.com:8080`).
+    pub host: String,
+}
+
+impl MusicBrainzServer {
+    /// The pool entry shipped by default. Users can edit or remove it in the
+    /// Config tab.
+    pub fn defaults() -> Vec<Self> {
+        vec![Self {
+            id: "brainzmash".to_string(),
+            name: "BrainzMash".to_string(),
+            host: "api.brainzmash.cc".to_string(),
+        }]
+    }
+}
+
 /// A track from a metadata provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {

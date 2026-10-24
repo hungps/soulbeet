@@ -145,14 +145,13 @@ and the runtime serves `target/dx/web/release/web`.
 | Variable | Meaning | Default |
 |---|---|---|
 | `DATABASE_URL` | SQLite connection string | `sqlite:soulbeet.db` |
-| `DOWNLOAD_PATH` | Where slskd writes downloads | `/downloads` |
 | `SECRET_KEY` | JWT signing + credential encryption | insecure `secret` (warns) |
 | `BEETS_CONFIG` | beets config path | `beets_config.yaml` |
-| `BEETS_ALBUM_MODE` | Group downloads into album imports | `false` |
 | `PORT`, `IP` | HTTP bind | `9765`, `0.0.0.0` |
 
-slskd URL/API key live in the DB (`app_config`, key constants in
-`api/src/models/app_config.rs`) and are set through the UI, not env. Scrobble credentials are
+slskd URL/API key, download paths, album mode and alternative MusicBrainz servers live in the
+DB (`app_config`, key constants in `api/src/models/app_config.rs`) and are set through the UI,
+not env. Scrobble credentials are
 per-user in `user_settings`.
 
 ## Gotchas

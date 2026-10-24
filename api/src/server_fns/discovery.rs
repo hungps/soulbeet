@@ -781,7 +781,9 @@ pub async fn generate_discovery_playlist_internal(
                 queued.len(),
                 _attempt + 1,
             );
-            let download_base = crate::config::CONFIG.download_path().clone();
+            let download_base = crate::models::app_config::AppConfig::download_path().await;
+            let slskd_download_base =
+                crate::models::app_config::AppConfig::slskd_download_path().await;
 
             // Poll slskd until all queued downloads are complete (or timeout after 10 min).
             // Note: This 10-minute timeout starts from enqueue, not from transfer start.
@@ -883,9 +885,10 @@ pub async fn generate_discovery_playlist_internal(
                 )
                 .await;
 
-                let resolved = crate::server_fns::download::utils::resolve_download_path(
+                let resolved = crate::server_fns::download::utils::resolve_download_path_mapped(
                     &qt.slskd_filename,
                     &download_base,
+                    slskd_download_base.as_deref(),
                 );
                 let src_path = match resolved {
                     Some(p) => p,

@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import type { APIRequestContext, BrowserContext, Page } from '@playwright/test';
 import { expect } from '@playwright/test';
-import { baseUrl, musicDirForApp } from './env.js';
+import { baseUrl, metadataServerName, musicDirForApp } from './env.js';
 
 export interface TestUser {
   username: string;
@@ -77,6 +77,9 @@ export async function performSearch(
   query: string,
   type: 'ALBUM' | 'TRACK',
 ): Promise<void> {
+  await page
+    .getByLabel('Metadata Provider')
+    .selectOption({ label: metadataServerName });
   await page.getByRole('button', { name: type, exact: true }).filter({ visible: true }).click();
   await page.getByPlaceholder('Search artist, album or track...').fill(query);
   await page.getByRole('button', { name: 'SEARCH' }).filter({ visible: true }).click();

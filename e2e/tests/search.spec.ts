@@ -3,9 +3,13 @@
 import type { Page } from '@playwright/test';
 import { expect, test } from '@playwright/test';
 import { freshSession } from '../helpers/app.js';
+import { metadataServerName } from '../helpers/env.js';
 import { glassAtlas, maritime } from '../fixtures/dataset.js';
 
 async function search(page: Page, query: string, type?: 'ALBUM' | 'TRACK') {
+  await page
+    .getByLabel('Metadata Provider')
+    .selectOption({ label: metadataServerName });
   if (type) {
     await page.getByRole('button', { name: type, exact: true }).filter({ visible: true }).click();
   }
