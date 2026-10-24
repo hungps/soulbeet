@@ -18,7 +18,7 @@ on:
 jobs:
   bump-version:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tag: v${{ steps.bump.outputs.new_version }}
     permissions:
@@ -53,7 +53,7 @@ jobs:
   create-release:
     needs: bump-version
     if: always() && (needs.bump-version.result == 'success' || github.event_name == 'push')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

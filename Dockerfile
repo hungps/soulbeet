@@ -115,7 +115,7 @@ FROM docker.io/mwader/static-ffmpeg:8.0.1 AS ffmpeg-stage
 # --- Chroma native deps (libchromaprint + libav* shared libs) ---
 # Empty for TIER=light (APT_EXTRAS=""); populated for medium/full.
 # Triplet derived from TARGETARCH (avoids needing dpkg-dev in the slim base).
-FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS chroma-native
+FROM debian:bookworm-slim AS chroma-native
 ARG TIER
 ARG TARGETARCH
 COPY build/tiers/${TIER}.env /tmp/tier.env
