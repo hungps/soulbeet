@@ -83,6 +83,22 @@ fn extract_track_title(stem: &str) -> String {
     }
 }
 
+fn identity_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+pub fn path_names_artist(filename: &str, artist: &str) -> bool {
+    let artist = identity_text(artist);
+    if artist.len() < 3 {
+        return true;
+    }
+    identity_text(filename).contains(&artist)
+}
+
 #[derive(Debug)]
 struct PathInfo {
     parent_folders: Vec<String>,

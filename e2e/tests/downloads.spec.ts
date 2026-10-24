@@ -2,25 +2,14 @@
 // slskd stub delivers real FLACs -> the monitor picks them up -> real beets
 // autotags against the MusicBrainz stub -> files land in the library tree.
 
-import type { Page } from '@playwright/test';
 import { expect, test } from '@playwright/test';
-import { freshSession, performSearch } from '../helpers/app.js';
+import { freshSession, openDownloadsPanel, performSearch, waitForTransferRow } from '../helpers/app.js';
 import { expectFileAppears, fileExists, importedTrackPath } from '../helpers/files.js';
 import { glassAtlas, senders } from '../fixtures/dataset.js';
 import { join } from 'node:path';
 import { downloadsDirOnHost } from '../helpers/env.js';
 
 test.describe.configure({ timeout: 180_000 });
-
-async function openDownloadsPanel(page: Page) {
-  await page.getByRole('button', { name: 'Downloads', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Active Transfers' })).toBeVisible();
-}
-
-/** The transfer row in the downloads panel, located by its remote path. */
-function transferRow(page: Page, remotePath: string) {
-  return page.locator('div.group').filter({ has: page.getByTitle(remotePath, { exact: true }) });
-}
 
 test('downloads and imports a single track', async ({ context, page }) => {
   const { folder } = await freshSession(context, page, 'happy-track');
@@ -31,14 +20,13 @@ test('downloads and imports a single track', async ({ context, page }) => {
   await row.getByRole('button', { name: 'Download' }).click();
 
   await openDownloadsPanel(page);
-  const item = transferRow(
+  const item = await waitForTransferRow(
     page,
     'Music\\FLAC\\Static Harbor\\Glass Atlas\\01 - Northern Line.flac',
   );
-  await expect(item).toBeVisible({ timeout: 60_000 });
 
-  // Badge walks the pipeline and ends at LIB (imported into the library).
-  await expect(item.getByText('LIB', { exact: true })).toBeVisible({ timeout: 120_000 });
+  // Badge walks the pipeline and ends at TAGGED (imported into the library).
+  await expect(item.getByText('TAGGED', { exact: true })).toBeVisible({ timeout: 120_000 });
 
   const imported = importedTrackPath(
     folder.name,

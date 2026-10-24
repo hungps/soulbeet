@@ -99,3 +99,44 @@ export async function freshSession(
   await page.goto('/');
   return { user, folder };
 }
+
+/** Opens the downloads drawer and waits for it to render. */
+export async function openDownloadsPanel(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Downloads', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Active Transfers' })).toBeVisible();
+}
+
+/**
+ * Expands every collapsed transfer group. Per-file rows only exist in the DOM
+ * while their group is open, so assertions on a file need this first.
+ */
+export async function expandTransferGroups(page: Page): Promise<void> {
+  const collapsed = page.locator('[aria-expanded="false"]');
+  for (const header of await collapsed.all()) {
+    await header.click();
+  }
+}
+
+/** The transfer row in the downloads panel, located by its remote path. */
+export function transferRow(page: Page, remotePath: string) {
+  return page.locator('div.group').filter({ has: page.getByTitle(remotePath, { exact: true }) });
+}
+
+/**
+ * Expands transfer groups until the row for `remotePath` shows up, then
+ * returns it. Groups appear asynchronously as the search resolves.
+ */
+export async function waitForTransferRow(
+  page: Page,
+  remotePath: string,
+  timeout = 60_000,
+) {
+  const row = transferRow(page, remotePath);
+  await expect(async () => {
+    if ((await row.count()) === 0) {
+      await expandTransferGroups(page);
+    }
+    expect(await row.count()).toBeGreaterThan(0);
+  }).toPass({ timeout, intervals: [500] });
+  return row;
+}

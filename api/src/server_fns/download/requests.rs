@@ -3,11 +3,17 @@
 //! release attach to it.
 
 use serde::{Deserialize, Serialize};
-use shared::download::DownloadRequestSummary;
+use shared::download::{DownloadRequestSummary, PendingRequestSummary};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestAction {
     pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadRequestsOverview {
+    pub requests: Vec<DownloadRequestSummary>,
+    pub pending: Vec<PendingRequestSummary>,
 }
 
 #[cfg(feature = "server")]
@@ -36,6 +42,8 @@ use crate::globals::{get_or_create_user_channel, register_user_task, unregister_
 use crate::models::download_request::{
     state_is_terminal_key, DownloadRequestRow, DownloadRequestTrackRow,
 };
+#[cfg(feature = "server")]
+use crate::models::request_queue::LibraryRequestRow;
 #[cfg(feature = "server")]
 use crate::server_fns::server_error;
 #[cfg(feature = "server")]
@@ -359,7 +367,7 @@ pub(crate) async fn requeue(
 }
 
 #[get("/api/downloads/requests", auth: AuthSession)]
-pub async fn list_download_requests() -> Result<Vec<DownloadRequestSummary>, ServerFnError> {
+pub async fn list_download_requests() -> Result<DownloadRequestsOverview, ServerFnError> {
     let requests = DownloadRequestRow::list_for_user(&auth.0.sub)
         .await
         .map_err(server_error)?;
@@ -370,7 +378,67 @@ pub async fn list_download_requests() -> Result<Vec<DownloadRequestSummary>, Ser
             .map_err(server_error)?;
         summaries.push(request.to_summary(tracks));
     }
-    Ok(summaries)
+
+    let mut pending = crate::globals::pending_requests_for(&auth.0.username);
+    if let Ok(queued) = LibraryRequestRow::list_for_user(&auth.0.sub).await {
+        pending.extend(queued.into_iter().map(|row| {
+            let track_count = row.query().map(|query| query.tracks.len()).unwrap_or(0);
+            PendingRequestSummary {
+                id: row.id,
+                label: row.label,
+                artist: row.artist,
+                state: "requested".to_string(),
+                track_count,
+                attempts: row.attempts.max(0) as u32,
+            }
+        }));
+    }
+
+    pending.retain(|entry| {
+        !summaries.iter().any(|request| {
+            same_release(
+                &request.label,
+                request.artist.as_deref(),
+                &entry.label,
+                entry.artist.as_deref(),
+            )
+        })
+    });
+
+    let mut deduped: Vec<PendingRequestSummary> = Vec::with_capacity(pending.len());
+    for entry in pending {
+        match deduped.iter_mut().find(|existing| {
+            same_release(
+                &existing.label,
+                existing.artist.as_deref(),
+                &entry.label,
+                entry.artist.as_deref(),
+            )
+        }) {
+            Some(existing) => {
+                if entry.state == "searching" {
+                    *existing = entry;
+                }
+            }
+            None => deduped.push(entry),
+        }
+    }
+
+    Ok(DownloadRequestsOverview {
+        requests: summaries,
+        pending: deduped,
+    })
+}
+
+#[cfg(feature = "server")]
+fn same_release(
+    left_label: &str,
+    left_artist: Option<&str>,
+    right_label: &str,
+    right_artist: Option<&str>,
+) -> bool {
+    shared::library::album_activity_key(left_artist.unwrap_or_default(), left_label)
+        == shared::library::album_activity_key(right_artist.unwrap_or_default(), right_label)
 }
 
 #[post("/api/downloads/requests/stop", auth: AuthSession)]

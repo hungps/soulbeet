@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use dioxus::logger::tracing::warn;
 use dioxus::prelude::*;
-use shared::download::{DownloadProgress, DownloadRequestSummary, DownloadState};
+use shared::download::{
+    DownloadProgress, DownloadRequestSummary, DownloadState, PendingRequestSummary,
+};
 
 mod item;
 use api::{CancelDownloadRequest, RequestAction};
@@ -216,19 +218,42 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
     let mut busy = use_signal(HashSet::<String>::new);
     let mut clearing = use_signal(|| false);
     let mut clearing_failed = use_signal(|| false);
+    let mut pending = use_signal::<Vec<PendingRequestSummary>>(Vec::new);
+    let is_open = props.is_open;
+    let mut downloads_signal = props.downloads;
 
     use_future(move || async move {
         if !auth.is_logged_in() {
             return;
         }
-        match auth.call(api::list_download_requests()).await {
-            Ok(requests) => {
-                let mut map = props.downloads.write();
-                for request in requests {
-                    seed_request_tracks(&request, &mut map);
+        loop {
+            let open = *is_open.peek();
+            if open {
+                match auth.call(api::list_download_requests()).await {
+                    Ok(overview) => {
+                        let needs_seed = {
+                            let map = downloads_signal.peek();
+                            overview.requests.iter().any(|request| {
+                                request
+                                    .tracks
+                                    .iter()
+                                    .any(|track| !map.contains_key(&track.item))
+                            })
+                        };
+                        if needs_seed {
+                            let mut map = downloads_signal.write();
+                            for request in &overview.requests {
+                                seed_request_tracks(request, &mut map);
+                            }
+                        }
+                        if *pending.peek() != overview.pending {
+                            pending.set(overview.pending);
+                        }
+                    }
+                    Err(e) => warn!("Failed to load download requests: {:?}", e),
                 }
             }
-            Err(e) => warn!("Failed to load download requests: {:?}", e),
+            gloo_timers::future::TimeoutFuture::new(if open { 3000 } else { 750 }).await;
         }
     });
 
@@ -258,6 +283,15 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
             )
         })
         .count();
+
+    let pending_count = pending.read().len();
+    let summary = if pending_count > 0 {
+        format!(
+            ":: {processing_count} PROCESSING // {pending_count} PENDING // {errored_count} ERRORED"
+        )
+    } else {
+        format!(":: {processing_count} PROCESSING // {errored_count} ERRORED")
+    };
 
     let clear_finished = move |_| {
         clearing.set(true);
@@ -344,7 +378,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                 "Active Transfers"
               }
               p { class: "text-xs text-beet-leaf font-mono mt-1",
-                ":: {processing_count} PROCESSING // {errored_count} ERRORED"
+                "{summary}"
               }
             }
             button {
@@ -368,9 +402,55 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
 
           // Content
           div { class: "flex-1 min-h-0 overflow-y-auto overscroll-contain p-6 no-scrollbar space-y-3",
-            if groups.is_empty() {
+            if groups.is_empty() && pending.read().is_empty() {
               div { class: "text-center text-gray-500 py-10 font-mono text-sm",
                 "No active transfers in the queue."
+              }
+            }
+
+            for entry in pending.read().iter() {
+              {
+                let is_searching = entry.state == "searching";
+                let (status_label, status_class) = if is_searching {
+                  ("SEARCHING", "bg-blue-500/20 text-blue-300 border-blue-500/40")
+                } else {
+                  ("REQUESTED", "bg-orange-500/20 text-orange-300 border-orange-500/40")
+                };
+                let detail = if is_searching {
+                  "Looking for sources".to_string()
+                } else if entry.attempts > 0 {
+                  format!("Waiting to retry · attempt {}", entry.attempts)
+                } else {
+                  "Waiting to retry".to_string()
+                };
+                rsx! {
+                  div { key: "{entry.id}", class: "bg-white/5 border border-white/5 rounded-lg p-3",
+                    div { class: "flex items-start justify-between gap-2",
+                      div { class: "min-w-0 flex-grow",
+                        div { class: "flex items-center gap-2 min-w-0",
+                          h4 { class: "text-sm font-bold text-beet-leaf truncate", "{entry.label}" }
+                          span {
+                            class: "text-[9px] font-mono px-1.5 py-0.5 rounded border uppercase shrink-0 {status_class}",
+                            "{status_label}"
+                          }
+                        }
+                        if let Some(artist) = entry.artist.as_ref() {
+                          p { class: "text-[10px] font-mono text-gray-500 truncate", "{artist}" }
+                        }
+                        p { class: "text-[10px] font-mono text-gray-500 uppercase tracking-widest",
+                          if entry.track_count > 0 {
+                            "{entry.track_count} tracks · {detail}"
+                          } else {
+                            "{detail}"
+                          }
+                        }
+                      }
+                      if is_searching {
+                        div { class: "w-4 h-4 mt-0.5 shrink-0 animate-spin rounded-full border-2 border-transparent border-t-beet-accent border-b-beet-accent" }
+                      }
+                    }
+                  }
+                }
               }
             }
 
@@ -403,6 +483,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                   div { key: "{key}", class: "bg-white/5 border border-white/5 rounded-lg overflow-hidden",
                     div {
                       class: "p-3 cursor-pointer hover:border-beet-accent/40 transition-colors",
+                      aria_expanded: if is_expanded { "true" } else { "false" },
                       onclick: {
                         let key = key.clone();
                         move |_| {

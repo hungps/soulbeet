@@ -111,6 +111,49 @@ pub static DISCOVERY_PROGRESS: LazyLock<
     RwLock<HashMap<String, shared::navidrome::DiscoveryProgress>>,
 > = LazyLock::new(|| RwLock::new(HashMap::new()));
 
+#[cfg(feature = "server")]
+pub static PENDING_REQUESTS: LazyLock<
+    std::sync::Mutex<HashMap<String, Vec<shared::download::PendingRequestSummary>>>,
+> = LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "server")]
+fn pending_requests(
+) -> std::sync::MutexGuard<'static, HashMap<String, Vec<shared::download::PendingRequestSummary>>> {
+    PENDING_REQUESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(feature = "server")]
+pub fn register_pending_request(username: &str, request: shared::download::PendingRequestSummary) {
+    let mut map = pending_requests();
+    let entries = map.entry(username.to_string()).or_default();
+    entries.retain(|entry| entry.id != request.id);
+    entries.push(request);
+}
+
+#[cfg(feature = "server")]
+pub fn clear_pending_request(username: &str, id: &str) {
+    let mut map = pending_requests();
+    let remove_user = if let Some(entries) = map.get_mut(username) {
+        entries.retain(|entry| entry.id != id);
+        entries.is_empty()
+    } else {
+        false
+    };
+    if remove_user {
+        map.remove(username);
+    }
+}
+
+#[cfg(feature = "server")]
+pub fn pending_requests_for(username: &str) -> Vec<shared::download::PendingRequestSummary> {
+    pending_requests()
+        .get(username)
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Get or create a user channel, returning the sender and cancellation token
 #[cfg(feature = "server")]
 pub async fn get_or_create_user_channel(

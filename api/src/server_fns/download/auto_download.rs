@@ -129,7 +129,20 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
     let queue_label = request_context.label.clone();
     let queue_artist = request_context.artist.clone();
 
+    crate::globals::register_pending_request(
+        &username,
+        shared::download::PendingRequestSummary {
+            id: batch_id.clone(),
+            label: queue_label.clone(),
+            artist: queue_artist.clone(),
+            state: "searching".to_string(),
+            track_count: tracks.len(),
+            attempts: 0,
+        },
+    );
+
     tokio::spawn(async move {
+        let _pending_request = PendingRequestGuard::new(&task_username, &batch_id);
         // Send Searching event
         let _ = tx.send(DownloadEvent::AutoDownload(AutoDownloadEvent::Searching {
             batch_id: batch_id.clone(),
@@ -428,6 +441,8 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
         )
         .await;
 
+        crate::globals::clear_pending_request(&task_username, &batch_id);
+
         // Send Downloading event
         let _ = tx.send(DownloadEvent::AutoDownload(
             AutoDownloadEvent::Downloading {
@@ -478,4 +493,27 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
     Ok(AutoDownloadResult::Accepted {
         batch_id: batch_id_for_response,
     })
+}
+
+#[cfg(feature = "server")]
+struct PendingRequestGuard {
+    username: String,
+    id: String,
+}
+
+#[cfg(feature = "server")]
+impl PendingRequestGuard {
+    fn new(username: &str, id: &str) -> Self {
+        Self {
+            username: username.to_string(),
+            id: id.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        crate::globals::clear_pending_request(&self.username, &self.id);
+    }
 }

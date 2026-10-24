@@ -9,13 +9,18 @@ use crate::{
 };
 use chrono::{DateTime, Duration, Utc};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use regex::Regex;
 use reqwest::{Client, Method, Response};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use shared::{
     metadata::{Album, Track},
     slskd::{AlbumResult, DownloadResponse, FileEntry, FlattenedFiles, SearchState, TrackResult},
 };
-use std::{collections::HashMap, sync::Arc, time::Duration as StdDuration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+    time::Duration as StdDuration,
+};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use url::Url;
@@ -49,14 +54,33 @@ impl Default for DownloadConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct SearchQuery {
+    text: String,
+    requires_artist: bool,
+}
+
 #[derive(Debug, Clone)]
-struct SearchContext {
+struct SearchSession {
     artist: String,
     album: Option<String>,
     track_titles: Vec<String>,
+    tiers: Vec<Vec<SearchQuery>>,
+    tier_index: usize,
+    query_index: usize,
+    current_search_id: String,
+    seen_response_count: usize,
+    collected: Vec<AlbumResult>,
     start_time: DateTime<Utc>,
     timeout: Duration,
-    seen_response_count: usize,
+}
+
+impl SearchSession {
+    fn current_query(&self) -> Option<&SearchQuery> {
+        self.tiers
+            .get(self.tier_index)
+            .and_then(|tier| tier.get(self.query_index))
+    }
 }
 
 #[derive(Debug)]
@@ -65,7 +89,7 @@ pub struct SoulseekClient {
     api_key: Option<String>,
     client: Client,
     search_timestamps: Arc<Mutex<Vec<DateTime<Utc>>>>,
-    active_searches: Arc<Mutex<HashMap<String, SearchContext>>>,
+    active_searches: Arc<Mutex<HashMap<String, SearchSession>>>,
     max_searches_per_window: usize,
     rate_limit_window: Duration,
     download_config: DownloadConfig,
@@ -292,22 +316,49 @@ impl SoulseekClient {
         tracks: Vec<Track>,
         timeout: Duration,
     ) -> Result<String> {
-        self.wait_for_rate_limit().await?;
-
-        let track_titles: Vec<String> = tracks.iter().map(|t| t.title.clone()).collect();
-
-        let query = match album {
-            Some(ref album) => match tracks.len() {
-                1 => format!("{} {}", album.artist.trim(), tracks[0].title.trim()),
-                _ => album_search_text(&album.title),
-            },
-            // No album, should be a single track search
-            None => format!("{} {}", tracks[0].artist.trim(), tracks[0].title.trim()),
+        let tiers = build_search_tiers(album.as_ref(), &tracks);
+        let Some(first) = tiers.first().and_then(|tier| tier.first()) else {
+            return Err(SoulseekError::Api {
+                status: 400,
+                message: "search query is empty".to_string(),
+            });
         };
 
+        self.wait_for_rate_limit().await?;
+
+        let current_search_id = self.create_search(&first.text, timeout).await?;
+        let session_id = current_search_id.clone();
+
+        let session = SearchSession {
+            artist: album
+                .as_ref()
+                .map(|a| a.artist.clone())
+                .or_else(|| tracks.first().map(|t| t.artist.clone()))
+                .unwrap_or_default(),
+            album: album.as_ref().map(|a| a.title.clone()),
+            track_titles: tracks.iter().map(|t| t.title.clone()).collect(),
+            tiers,
+            tier_index: 0,
+            query_index: 0,
+            current_search_id,
+            seen_response_count: 0,
+            collected: Vec::new(),
+            start_time: Utc::now(),
+            timeout,
+        };
+
+        info!("Search initiated with ID: {session_id}");
+        self.active_searches
+            .lock()
+            .await
+            .insert(session_id.clone(), session);
+        Ok(session_id)
+    }
+
+    async fn create_search(&self, text: &str, timeout: Duration) -> Result<String> {
         info!(
             "Starting search for: '{}' with timeout {}ms",
-            query,
+            text,
             timeout.num_milliseconds()
         );
 
@@ -320,7 +371,7 @@ impl SoulseekClient {
             minimum_peer_upload_speed: u32,
         }
         let request_body = SearchRequest {
-            search_text: &query,
+            search_text: text,
             timeout: timeout.num_milliseconds(),
             filter_responses: true,
             minimum_peer_upload_speed: 10,
@@ -333,25 +384,108 @@ impl SoulseekClient {
         let search_id_resp: SearchId = self
             .make_request(Method::POST, "searches", Some(&request_body))
             .await?;
-        let search_id = search_id_resp.id;
+        Ok(search_id_resp.id)
+    }
 
-        self.active_searches.lock().await.insert(
-            search_id.clone(),
-            SearchContext {
-                album: album.as_ref().map(|a| a.title.clone()),
-                artist: album
-                    .as_ref()
-                    .map(|a| a.artist.clone())
-                    .unwrap_or_else(|| tracks[0].artist.clone()),
-                track_titles,
-                start_time: Utc::now(),
-                timeout,
-                seen_response_count: 0,
-            },
-        );
+    fn process_responses(
+        &self,
+        session: &SearchSession,
+        responses: &[SearchResponse],
+    ) -> Vec<AlbumResult> {
+        let track_titles: Vec<&str> = session.track_titles.iter().map(|s| s.as_str()).collect();
+        let require_artist = session
+            .current_query()
+            .map(|query| query.requires_artist)
+            .unwrap_or(false);
 
-        info!("Search initiated with ID: {search_id}");
-        Ok(search_id)
+        processing::process_search_responses(
+            responses,
+            &session.artist,
+            session.album.as_deref(),
+            &track_titles,
+            require_artist,
+        )
+    }
+
+    async fn finish_query(
+        &self,
+        session_id: &str,
+        albums: Vec<AlbumResult>,
+    ) -> Result<Option<Vec<AlbumResult>>> {
+        let mut finished: Option<Vec<AlbumResult>> = None;
+        let mut next_query: Option<String> = None;
+        let timeout;
+
+        let previous_search = {
+            let mut searches = self.active_searches.lock().await;
+            let Some(session) = searches.get_mut(session_id) else {
+                return Ok(Some(Vec::new()));
+            };
+
+            append_unique(&mut session.collected, albums);
+            let previous_search = session.current_search_id.clone();
+            timeout = session.timeout;
+
+            let tier_len = session.tiers[session.tier_index].len();
+            if session.collected.len() > MAX_SEARCH_RESULTS {
+                finished = Some(std::mem::take(&mut session.collected));
+            } else if session.query_index + 1 < tier_len {
+                session.query_index += 1;
+                next_query = Some(
+                    session.tiers[session.tier_index][session.query_index]
+                        .text
+                        .clone(),
+                );
+            } else {
+                let collected = std::mem::take(&mut session.collected);
+                if !collected.is_empty() {
+                    finished = Some(collected);
+                } else if session.tier_index + 1 < session.tiers.len() {
+                    session.tier_index += 1;
+                    session.query_index = 0;
+                    next_query = Some(session.tiers[session.tier_index][0].text.clone());
+                } else {
+                    finished = Some(Vec::new());
+                }
+            }
+
+            if finished.is_some() {
+                searches.remove(session_id);
+            }
+
+            previous_search
+        };
+
+        if let Some(mut albums) = finished {
+            let _ = self.delete_search(&previous_search).await;
+            sort_albums(&mut albums);
+            albums.truncate(MAX_SEARCH_RESULTS);
+            return Ok(Some(albums));
+        }
+
+        let Some(text) = next_query else {
+            let _ = self.delete_search(&previous_search).await;
+            self.active_searches.lock().await.remove(session_id);
+            return Ok(Some(Vec::new()));
+        };
+
+        let _ = self.delete_search(&previous_search).await;
+        self.wait_for_rate_limit().await?;
+
+        match self.create_search(&text, timeout).await {
+            Ok(search_id) => {
+                if let Some(session) = self.active_searches.lock().await.get_mut(session_id) {
+                    session.current_search_id = search_id;
+                    session.seen_response_count = 0;
+                    session.start_time = Utc::now();
+                }
+                Ok(None)
+            }
+            Err(e) => {
+                self.active_searches.lock().await.remove(session_id);
+                Err(e)
+            }
+        }
     }
 
     pub async fn poll_search(
@@ -363,120 +497,82 @@ impl SoulseekClient {
         let long_poll_timeout = Duration::seconds(10);
 
         loop {
-            let context = {
+            let session = {
                 let guard = self.active_searches.lock().await;
                 guard.get(&search_id).cloned()
             };
 
-            let context = match context {
-                Some(ctx) => ctx,
-                None => return Ok((vec![], false, SearchState::NotFound)),
+            let Some(session) = session else {
+                return Ok((vec![], false, SearchState::NotFound));
             };
 
-            if (Utc::now() - context.start_time) >= context.timeout {
+            if (Utc::now() - session.start_time) >= session.timeout {
                 info!("Search timeout reached");
-                self.active_searches.lock().await.remove(&search_id);
-                let _ = self.delete_search(&search_id).await;
-                return Ok((vec![], false, SearchState::Completed));
+                return match self.finish_query(&search_id, Vec::new()).await? {
+                    Some(albums) => Ok((albums, false, SearchState::Completed)),
+                    None => continue,
+                };
             }
 
-            let endpoint = format!("searches/{}/responses", search_id);
+            let endpoint = format!("searches/{}/responses", session.current_search_id);
             match self
                 .make_request::<Vec<SearchResponse>, ()>(Method::GET, &endpoint, None)
                 .await
             {
                 Ok(current_responses) => {
                     let total_len = current_responses.len();
+                    let received_new = total_len > session.seen_response_count;
+                    let slskd_finished =
+                        !received_new && self.is_search_complete(&session.current_search_id).await;
 
-                    if total_len > context.seen_response_count {
-                        // Update seen count
-                        {
+                    if received_new || slskd_finished {
+                        if received_new {
                             let mut guard = self.active_searches.lock().await;
-                            if let Some(ctx) = guard.get_mut(&search_id) {
-                                ctx.seen_response_count = total_len;
+                            if let Some(active) = guard.get_mut(&search_id) {
+                                active.seen_response_count = total_len;
                             }
                         }
 
-                        let track_titles_ref: Vec<&str> =
-                            context.track_titles.iter().map(|s| s.as_str()).collect();
-                        let mut albums = processing::process_search_responses(
-                            &current_responses,
-                            &context.artist,
-                            context.album.as_deref(),
-                            &track_titles_ref,
-                        );
+                        let mut albums = self.process_responses(&session, &current_responses);
 
-                        albums.sort_by(|a, b| {
-                            b.score
-                                .partial_cmp(&a.score)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                                .then_with(|| {
-                                    b.availability_score
-                                        .partial_cmp(&a.availability_score)
-                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                })
-                        });
+                        if slskd_finished {
+                            info!("Search {} completed on slskd side", search_id);
+                            return match self.finish_query(&search_id, albums).await? {
+                                Some(albums) => Ok((albums, false, SearchState::Completed)),
+                                None => continue,
+                            };
+                        }
 
+                        sort_albums(&mut albums);
                         if albums.len() > MAX_SEARCH_RESULTS {
                             albums.truncate(MAX_SEARCH_RESULTS);
                             self.active_searches.lock().await.remove(&search_id);
-                            let _ = self.delete_search(&search_id).await;
-                            return Ok((albums, false, SearchState::Completed));
-                        } else {
-                            return Ok((albums, true, SearchState::InProgress));
-                        }
-                    } else {
-                        // No new data. slskd ends a search a short while after
-                        // responses stop arriving; once it reports completion
-                        // there is nothing more to wait for, so return what we
-                        // have instead of spinning until our own 120s timeout.
-                        if self.is_search_complete(&search_id).await {
-                            self.active_searches.lock().await.remove(&search_id);
-                            let _ = self.delete_search(&search_id).await;
-
-                            let track_titles_ref: Vec<&str> =
-                                context.track_titles.iter().map(|s| s.as_str()).collect();
-                            let mut albums = processing::process_search_responses(
-                                &current_responses,
-                                &context.artist,
-                                context.album.as_deref(),
-                                &track_titles_ref,
-                            );
-                            albums.sort_by(|a, b| {
-                                b.score
-                                    .partial_cmp(&a.score)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                    .then_with(|| {
-                                        b.availability_score
-                                            .partial_cmp(&a.availability_score)
-                                            .unwrap_or(std::cmp::Ordering::Equal)
-                                    })
-                            });
-                            albums.truncate(MAX_SEARCH_RESULTS);
-
-                            info!("Search {} completed on slskd side", search_id);
+                            let _ = self.delete_search(&session.current_search_id).await;
                             return Ok((albums, false, SearchState::Completed));
                         }
 
-                        if (Utc::now() - poll_start) > long_poll_timeout {
-                            // Long poll expired, return "no update" but "in progress"
-                            return Ok((vec![], true, SearchState::InProgress));
-                        }
-
-                        // Wait a bit before retrying slskd
-                        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-                        continue;
+                        return Ok((albums, true, SearchState::InProgress));
                     }
+
+                    if (Utc::now() - poll_start) > long_poll_timeout {
+                        // Long poll expired, return "no update" but "in progress"
+                        return Ok((vec![], true, SearchState::InProgress));
+                    }
+
+                    // Wait a bit before retrying slskd
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
                 }
                 Err(SoulseekError::Api { status: 404, .. }) => {
-                    self.active_searches.lock().await.remove(&search_id);
                     info!("Search 404");
-                    return Ok((vec![], false, SearchState::NotFound));
+                    return match self.finish_query(&search_id, Vec::new()).await? {
+                        Some(albums) => Ok((albums, false, SearchState::Completed)),
+                        None => continue,
+                    };
                 }
                 Err(e) => {
                     // Clean up search context on any error to prevent leaks
                     self.active_searches.lock().await.remove(&search_id);
-                    let _ = self.delete_search(&search_id).await;
+                    let _ = self.delete_search(&session.current_search_id).await;
                     warn!("Search {} failed with error, cleaning up: {}", search_id, e);
                     return Err(e);
                 }
@@ -1030,7 +1126,42 @@ impl crate::DownloadBackend for SoulseekClient {
     }
 }
 
-const ALBUM_QUERY_STOP_WORDS: &[&str] = &[
+static BRACKETED_QUALIFIER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\(\[\{][^\)\]\}]*[\)\]\}]").unwrap());
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn drop_leading_dashes(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|term| term.trim_start_matches('-'))
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn query_text(parts: &[&str]) -> String {
+    drop_leading_dashes(&collapse_whitespace(
+        &parts
+            .iter()
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+    ))
+}
+
+fn without_qualifiers(title: &str) -> String {
+    collapse_whitespace(&BRACKETED_QUALIFIER.replace_all(title, " "))
+}
+
+fn word_count(value: &str) -> usize {
+    value.split_whitespace().count()
+}
+
+const RELEASE_BOILERPLATE: &[&str] = &[
     "the",
     "a",
     "an",
@@ -1051,24 +1182,158 @@ const ALBUM_QUERY_STOP_WORDS: &[&str] = &[
     "anniversary",
 ];
 
-/// Album downloads search Soulseek by path, which ANDs every term. Keeping the
-/// credited artist and release boilerplate in the query hides peer folders that
-/// are named after the work only ("Metaphor ReFantazio OST"). Scoring still uses
-/// the artist and the full album title.
-fn album_search_text(title: &str) -> String {
+fn distinctive_title(title: &str) -> String {
     let kept: Vec<&str> = title
         .split(|c: char| !c.is_alphanumeric())
         .filter(|token| !token.is_empty())
         .filter(|token| {
             let lower = token.to_lowercase();
-            !ALBUM_QUERY_STOP_WORDS.iter().any(|word| *word == lower)
+            !RELEASE_BOILERPLATE.iter().any(|word| *word == lower)
         })
         .collect();
 
-    if kept.is_empty() {
-        title.to_string()
+    kept.join(" ")
+}
+
+fn is_various_artist(artist: &str) -> bool {
+    matches!(
+        artist.trim().to_lowercase().as_str(),
+        "" | "various artists" | "various" | "va" | "v.a." | "unknown"
+    )
+}
+
+fn build_search_tiers(album: Option<&Album>, tracks: &[Track]) -> Vec<Vec<SearchQuery>> {
+    let artist = album
+        .map(|album| collapse_whitespace(&album.artist))
+        .or_else(|| {
+            tracks
+                .first()
+                .map(|track| collapse_whitespace(&track.artist))
+        })
+        .unwrap_or_default();
+
+    let Some(album) = album else {
+        let Some(track) = tracks.first() else {
+            return Vec::new();
+        };
+        let text = query_text(&[&artist, &track.title]);
+        return if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![vec![SearchQuery {
+                text,
+                requires_artist: false,
+            }]]
+        };
+    };
+
+    let title = collapse_whitespace(&album.title);
+    let broad_title = without_qualifiers(&title);
+    let various = is_various_artist(&artist);
+    let mut primary = Vec::new();
+    let mut push_primary = |text: String| {
+        if !text.is_empty() && !primary.iter().any(|query: &SearchQuery| query.text == text) {
+            primary.push(SearchQuery {
+                text,
+                requires_artist: false,
+            });
+        }
+    };
+
+    push_primary(if various {
+        query_text(&[&title])
     } else {
-        kept.join(" ")
+        query_text(&[&artist, &title])
+    });
+    if !broad_title.eq_ignore_ascii_case(&title) {
+        push_primary(if various {
+            query_text(&[&broad_title])
+        } else {
+            query_text(&[&artist, &broad_title])
+        });
+    }
+
+    let mut tiers = Vec::new();
+    if !primary.is_empty() {
+        tiers.push(primary);
+    }
+
+    if tracks.len() > 1 {
+        if word_count(&broad_title) >= 2 {
+            let already_searched: Vec<String> = tiers
+                .iter()
+                .flatten()
+                .map(|query| query.text.clone())
+                .collect();
+            let mut fallback = Vec::new();
+            let mut push_fallback = |text: String, requires_artist: bool| {
+                if !text.is_empty()
+                    && !already_searched.contains(&text)
+                    && !fallback
+                        .iter()
+                        .any(|query: &SearchQuery| query.text == text)
+                {
+                    fallback.push(SearchQuery {
+                        text,
+                        requires_artist,
+                    });
+                }
+            };
+            if various {
+                let distinctive = distinctive_title(&title);
+                push_fallback(query_text(&[&distinctive]), false);
+            } else {
+                let distinctive = distinctive_title(&title);
+                push_fallback(query_text(&[&broad_title]), true);
+                push_fallback(query_text(&[&distinctive]), true);
+            }
+            if !fallback.is_empty() {
+                tiers.push(fallback);
+            }
+        }
+    } else if let Some(track) = tracks.first() {
+        let track_title = collapse_whitespace(&track.title);
+        if !track_title.eq_ignore_ascii_case(&title) {
+            let text = if various {
+                query_text(&[&track_title])
+            } else {
+                query_text(&[&artist, &track_title])
+            };
+            if !text.is_empty() {
+                tiers.push(vec![SearchQuery {
+                    text,
+                    requires_artist: false,
+                }]);
+            }
+        }
+    }
+
+    tiers
+        .into_iter()
+        .filter(|tier| tier.iter().any(|query| !query.text.is_empty()))
+        .collect()
+}
+
+fn sort_albums(albums: &mut [AlbumResult]) {
+    albums.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.availability_score
+                    .partial_cmp(&a.availability_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+}
+
+fn append_unique(collected: &mut Vec<AlbumResult>, albums: Vec<AlbumResult>) {
+    for album in albums {
+        if !collected.iter().any(|existing| {
+            existing.username == album.username && existing.album_path == album.album_path
+        }) {
+            collected.push(album);
+        }
     }
 }
 
@@ -1195,17 +1460,136 @@ mod tests {
         assert!(matches!(err, SoulseekError::InvalidResponse(_)));
     }
 
+    fn album(title: &str) -> Album {
+        Album {
+            id: "release".to_string(),
+            title: title.to_string(),
+            artist: "Static Harbor".to_string(),
+            release_date: None,
+            mbid: None,
+            cover_url: None,
+            country: None,
+            media: None,
+            track_count: None,
+        }
+    }
+
+    fn tracks(titles: &[&str]) -> Vec<Track> {
+        titles
+            .iter()
+            .map(|title| Track {
+                id: title.to_string(),
+                title: title.to_string(),
+                artist: "Static Harbor".to_string(),
+                album_id: Some("release".to_string()),
+                album_title: Some("Album".to_string()),
+                release_date: None,
+                duration: None,
+                track_number: None,
+                disc_number: None,
+                mbid: None,
+                release_mbid: None,
+            })
+            .collect()
+    }
+
+    fn texts(album: Option<&Album>, tracks: &[Track]) -> Vec<Vec<String>> {
+        build_search_tiers(album, tracks)
+            .into_iter()
+            .map(|tier| tier.into_iter().map(|query| query.text).collect())
+            .collect()
+    }
+
     #[test]
-    fn album_query_drops_artist_and_release_boilerplate() {
+    fn album_queries_keep_the_credited_artist_and_add_a_bracket_free_variant() {
+        let album = album("Random Access Memories (Deluxe Edition)");
         assert_eq!(
-            album_search_text("Metaphor: ReFantazio Original Soundtrack"),
-            "Metaphor ReFantazio"
+            texts(Some(&album), &tracks(&["Get Lucky", "Instant Crush"])),
+            vec![
+                vec![
+                    "Static Harbor Random Access Memories (Deluxe Edition)".to_string(),
+                    "Static Harbor Random Access Memories".to_string(),
+                ],
+                vec!["Random Access Memories".to_string()],
+            ]
         );
+    }
+
+    #[test]
+    fn title_only_fallback_needs_a_distinctive_title() {
+        let short = album("OST");
         assert_eq!(
-            album_search_text("Random Access Memories (Deluxe Edition)"),
-            "Random Access Memories"
+            texts(Some(&short), &tracks(&["Theme A", "Theme B"])),
+            vec![vec!["Static Harbor OST".to_string()]]
         );
-        assert_eq!(album_search_text("OST"), "OST");
+
+        let long = album("Random Access Memories (Deluxe Edition)");
+        let tiers = build_search_tiers(Some(&long), &tracks(&["Get Lucky", "Instant Crush"]));
+        assert!(!tiers[0][0].requires_artist);
+        assert!(tiers[1][0].requires_artist);
+    }
+
+    #[test]
+    fn various_artists_search_by_title_only() {
+        let mut compilation = album("Random Access Memories (Deluxe Edition)");
+        compilation.artist = "Various Artists".to_string();
+        assert_eq!(
+            texts(Some(&compilation), &tracks(&["Get Lucky", "Instant Crush"])),
+            vec![vec![
+                "Random Access Memories (Deluxe Edition)".to_string(),
+                "Random Access Memories".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn soundtrack_titles_keep_a_boilerplate_free_fallback() {
+        let album = album("Metaphor: ReFantazio Original Soundtrack");
+        assert_eq!(
+            texts(
+                Some(&album),
+                &tracks(&["The King's Trial", "A Dying World"])
+            ),
+            vec![
+                vec!["Static Harbor Metaphor: ReFantazio Original Soundtrack".to_string()],
+                vec![
+                    "Metaphor: ReFantazio Original Soundtrack".to_string(),
+                    "Metaphor ReFantazio".to_string(),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn single_track_albums_fall_back_to_the_track_title() {
+        let album = album("Glass Atlas");
+        assert_eq!(
+            texts(Some(&album), &tracks(&["Northern Line"])),
+            vec![
+                vec!["Static Harbor Glass Atlas".to_string()],
+                vec!["Static Harbor Northern Line".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn track_queries_use_the_track_artist_and_title() {
+        assert_eq!(
+            texts(None, &tracks(&["Northern Line"])),
+            vec![vec!["Static Harbor Northern Line".to_string()]]
+        );
+    }
+
+    #[test]
+    fn leading_dashes_never_read_as_exclusions() {
+        let album = album("-Ology");
+        assert_eq!(
+            texts(Some(&album), &tracks(&["Track"])),
+            vec![
+                vec!["Static Harbor Ology".to_string()],
+                vec!["Static Harbor Track".to_string()],
+            ]
+        );
     }
 
     #[test]

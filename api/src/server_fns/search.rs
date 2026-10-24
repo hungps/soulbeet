@@ -32,7 +32,7 @@ pub struct FilterOptionsQuery {
 pub struct AlbumQuery {
     pub id: String,
     #[serde(default)]
-    pub provider: Option<Provider>,
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,9 +104,8 @@ pub async fn search_filter_options(
 #[post("/api/metadata/album", auth: AuthSession)]
 pub async fn find_album(input: AlbumQuery) -> Result<AlbumWithTracks, ServerFnError> {
     let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
-    let provider_str = input.provider.map(|p| p.to_string());
     let provider = metadata_provider(
-        provider_str.as_deref(),
+        input.provider.as_deref(),
         user_settings.lastfm_api_key.as_deref(),
     )
     .await
@@ -127,7 +126,7 @@ pub(crate) async fn hydrate_album_tracks(query: &mut DownloadQuery) -> Result<()
         return Ok(());
     };
 
-    let provider = metadata_provider(None, None)
+    let provider = metadata_provider(query.provider.as_deref(), None)
         .await
         .map_err(|e| format!("metadata provider unavailable: {e}"))?;
     let album_with_tracks = provider

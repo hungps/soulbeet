@@ -10,6 +10,7 @@ pub fn process_search_responses(
     searched_artist: &str,
     searched_album: Option<&str>,
     expected_tracks: &[&str],
+    require_artist_match: bool,
 ) -> Vec<AlbumResult> {
     const MIN_SCORE_THRESHOLD: f64 = 0.6;
     let audio_extensions: HashSet<&str> = ["flac", "wav", "m4a", "ogg", "aac", "wma", "mp3"]
@@ -31,6 +32,12 @@ pub fn process_search_responses(
                     if !audio_extensions.contains(ext.as_str()) {
                         return None;
                     }
+                }
+
+                if require_artist_match
+                    && !utils::path_names_artist(&file.filename, searched_artist)
+                {
+                    return None;
                 }
 
                 let rank_result = utils::rank_match(
@@ -238,10 +245,35 @@ mod tests {
             "ATLUS Sound Team",
             Some("Metaphor: ReFantazio Original Soundtrack"),
             &titles,
+            false,
         );
 
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].track_count, titles.len());
+    }
+
+    #[test]
+    fn title_only_results_must_name_the_artist() {
+        let titles = ["The King's Trial", "Unfamiliar Lands", "A Dying World"];
+        let responses = vec![response("peer", "Metaphor ReFantazio OST", &titles)];
+
+        let loose = process_search_responses(
+            &responses,
+            "ATLUS Sound Team",
+            Some("Metaphor: ReFantazio Original Soundtrack"),
+            &titles,
+            false,
+        );
+        assert_eq!(loose.len(), 1);
+
+        let strict = process_search_responses(
+            &responses,
+            "ATLUS Sound Team",
+            Some("Metaphor: ReFantazio Original Soundtrack"),
+            &titles,
+            true,
+        );
+        assert!(strict.is_empty());
     }
 
     #[test]
@@ -260,6 +292,7 @@ mod tests {
             "ATLUS Sound Team",
             Some("Metaphor: ReFantazio Original Soundtrack"),
             &titles,
+            false,
         );
 
         assert_eq!(albums.len(), 1);

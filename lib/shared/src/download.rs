@@ -8,6 +8,10 @@ pub struct DownloadQuery {
     pub tracks: Vec<Track>,
     #[serde(default)]
     pub backend: Option<String>,
+    /// Metadata provider the album ID belongs to. Tracklists are resolved
+    /// through it when the query carries no tracks yet.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 impl DownloadQuery {
@@ -16,6 +20,7 @@ impl DownloadQuery {
             album: None,
             tracks,
             backend: None,
+            provider: None,
         }
     }
 
@@ -26,6 +31,11 @@ impl DownloadQuery {
 
     pub fn backend(mut self, backend: impl Into<String>) -> Self {
         self.backend = Some(backend.into());
+        self
+    }
+
+    pub fn provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
         self
     }
 
@@ -83,6 +93,21 @@ pub struct DownloadRequestSummary {
     /// `active`, `stopped` or `completed`.
     pub state: String,
     pub tracks: Vec<DownloadRequestTrack>,
+}
+
+/// A request that has not reached the transfer stage yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingRequestSummary {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub artist: Option<String>,
+    /// `searching` while a source search runs, `requested` while queued for retry.
+    pub state: String,
+    #[serde(default)]
+    pub track_count: usize,
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 /// Persisted state of one track inside a request session.

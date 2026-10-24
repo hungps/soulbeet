@@ -21,7 +21,7 @@ test('connects to Navidrome from the media server settings', async ({ page, cont
   await page.goto('/');
 
   await openSettings(page);
-  await page.getByRole('button', { name: 'Config' }).click();
+  await page.getByRole('button', { name: 'Media Server' }).click();
 
   await page.getByPlaceholder('http://localhost:4533').fill(navidromeUrlForApp);
   await page.getByPlaceholder('Navidrome username').fill(navidromeAdminUser);

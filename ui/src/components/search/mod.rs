@@ -27,8 +27,7 @@ use shared::library::{
     LibraryMatchQuery, LibraryTrackRef,
 };
 use shared::metadata::{
-    Album, AlbumWithTracks, Provider, SearchFilterOptions, SearchFilters, SearchResult,
-    SearchResults, Track,
+    Album, AlbumWithTracks, SearchFilterOptions, SearchFilters, SearchResult, SearchResults, Track,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -833,16 +832,23 @@ pub fn Search(
         let Some(release_id) = restore_release.clone() else {
             return;
         };
-        let provider = selected_provider().parse::<Provider>().ok();
+        let provider = selected_provider();
         spawn(async move {
             match auth
                 .call(api::find_album(api::AlbumQuery {
                     id: release_id.clone(),
-                    provider,
+                    provider: Some(provider.clone()),
                 }))
                 .await
             {
-                Ok(data) => download(DownloadQuery::new(vec![]).album(data.album)).await,
+                Ok(data) => {
+                    download(
+                        DownloadQuery::new(vec![])
+                            .album(data.album)
+                            .provider(provider),
+                    )
+                    .await
+                }
                 Err(e) => {
                     info!("Failed to restore release from url: {:?}", e);
                     match auth
@@ -863,7 +869,7 @@ pub fn Search(
         });
     });
 
-    let mut toggle_expand = move |album_id: String, provider: Provider| {
+    let mut toggle_expand = move |album_id: String| {
         let is_expanded = expanded_albums.read().contains(&album_id);
         if is_expanded {
             expanded_albums.write().remove(&album_id);
@@ -872,6 +878,7 @@ pub fn Search(
             let needs_fetch = !album_cache.read().contains_key(&album_id);
             if needs_fetch {
                 let aid = album_id.clone();
+                let provider = selected_provider();
                 spawn(async move {
                     match auth
                         .call(api::find_album(api::AlbumQuery {
@@ -1268,7 +1275,6 @@ pub fn Search(
         } else {
           match &*search_results.read() {
               Some(ref data) if !data.results.is_empty() => {
-                let provider = data.provider;
                 rsx! {
                   div { class: "w-full bg-beet-panel/50 border border-white/5 p-6 backdrop-blur-sm mt-8 rounded-lg",
                     h5 { class: "text-xl font-display font-bold mb-4 border-b border-white/10 pb-2 text-white",
@@ -1297,11 +1303,19 @@ pub fn Search(
                                           spawn(download(DownloadQuery::from(track_clone.clone())));
                                       },
                                       on_album_click: {
-                                          let album_id_for_expand = track_clone_2.album_id.clone();
+                                          let album_title = track_clone_2.album_title.clone();
+                                          let album_artist = track_clone_2.artist.clone();
                                           move || {
-                                              if let Some(ref aid) = album_id_for_expand {
-                                                  toggle_expand(aid.clone(), provider);
-                                              }
+                                              let Some(title) = album_title
+                                                  .clone()
+                                                  .filter(|title| !title.trim().is_empty())
+                                              else {
+                                                  return;
+                                              };
+                                              search.set(title);
+                                              artist.set(Some(album_artist.clone()));
+                                              search_type.set(SearchType::Album);
+                                              spawn(perform_search());
                                           }
                                       },
                                       track: track.clone(),
@@ -1355,7 +1369,7 @@ pub fn Search(
                                       on_toggle: {
                                           let id = album_clone.id.clone();
                                           move || {
-                                              toggle_expand(id.clone(), provider);
+                                              toggle_expand(id.clone());
                                           }
                                       },
                                       on_search_sources: {
@@ -1372,7 +1386,8 @@ pub fn Search(
                                                   country: album_for_search.country.clone(),
                                                   media: album_for_search.media.clone(),
                                                   track_count: album_for_search.track_count,
-                                              });
+                                              })
+                                              .provider(selected_provider());
                                               spawn(download(query));
                                           }
                                       },
@@ -1398,7 +1413,8 @@ pub fn Search(
                                               country: album_for_dl.country.clone(),
                                               media: album_for_dl.media.clone(),
                                               track_count: album_for_dl.track_count,
-                                          });
+                                          })
+                                              .provider(selected_provider());
                                           handle_auto_download(album_for_dl.id.clone(), query);
                                       },
                                       on_override_download: move |folder: Folder| {
@@ -1412,7 +1428,8 @@ pub fn Search(
                                               country: album_for_override.country.clone(),
                                               media: album_for_override.media.clone(),
                                               track_count: album_for_override.track_count,
-                                          });
+                                          })
+                                              .provider(selected_provider());
                                           handle_override_download(album_for_override.id.clone(), query, folder);
                                       },
                                       tracks: tracks_for_panel,
@@ -1495,11 +1512,15 @@ pub fn Search(
                                       },
                                       is_expanded,
                                       on_toggle: move || {
-                                          toggle_expand(edition_id.clone(), provider);
+                                          toggle_expand(edition_id.clone());
                                       },
                                       on_search_sources: move || {
                                           source_item.set(Some(edition_for_search.id.clone()));
-                                          spawn(download(DownloadQuery::new(vec![]).album(edition_for_search.clone())));
+                                          spawn(download(
+                                              DownloadQuery::new(vec![])
+                                                  .album(edition_for_search.clone())
+                                                  .provider(selected_provider()),
+                                          ));
                                       },
                                       download_state: effective_state,
                                       folders: current_folders,
@@ -1511,13 +1532,17 @@ pub fn Search(
                                       on_download: move |_| {
                                           handle_auto_download(
                                               edition_for_dl.id.clone(),
-                                              DownloadQuery::new(vec![]).album(edition_for_dl.clone()),
+                                              DownloadQuery::new(vec![])
+                                                  .album(edition_for_dl.clone())
+                                                  .provider(selected_provider()),
                                           );
                                       },
                                       on_override_download: move |folder: Folder| {
                                           handle_override_download(
                                               edition_for_override.id.clone(),
-                                              DownloadQuery::new(vec![]).album(edition_for_override.clone()),
+                                              DownloadQuery::new(vec![])
+                                                  .album(edition_for_override.clone())
+                                                  .provider(selected_provider()),
                                               folder,
                                           );
                                       },

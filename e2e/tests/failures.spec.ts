@@ -2,9 +2,14 @@
 // and availability, so the project runs serially after everything else and
 // restores stub state between tests.
 
-import type { Page } from '@playwright/test';
 import { expect, test } from '@playwright/test';
-import { freshSession, performSearch } from '../helpers/app.js';
+import {
+  expandTransferGroups,
+  freshSession,
+  openDownloadsPanel,
+  performSearch,
+  waitForTransferRow,
+} from '../helpers/app.js';
 import { resetStubs, setOutage, setPeerBehavior } from '../helpers/control.js';
 import { expectFileAppears, importedTrackPath } from '../helpers/files.js';
 import { driftwoodCodes, glassAtlas } from '../fixtures/dataset.js';
@@ -14,10 +19,6 @@ test.describe.configure({ timeout: 180_000 });
 test.afterEach(async () => {
   await resetStubs();
 });
-
-function transferRow(page: Page, remotePath: string) {
-  return page.locator('div.group').filter({ has: page.getByTitle(remotePath, { exact: true }) });
-}
 
 test('falls back to manual source picking when no source scores high enough', async ({
   context,
@@ -51,7 +52,7 @@ test('fails tracks whose transfer never shows up in slskd', async ({ context, pa
   const row = page.locator('li').filter({ hasText: 'Paper Lanterns' }).first();
   await row.getByRole('button', { name: 'Download' }).click();
 
-  await page.getByRole('button', { name: 'Downloads', exact: true }).click();
+  await openDownloadsPanel(page);
   const drawer = page.locator('div.bg-beet-panel').filter({ hasText: 'Active Transfers' });
 
   // A row is keyed by remote path, and failover rebinds it to the peer it
@@ -61,9 +62,10 @@ test('fails tracks whose transfer never shows up in slskd', async ({ context, pa
   // mp3_hoarder's mp3 path, before giving up with nowhere left to fail over
   // to, so mp3_hoarder's path is the row's final binding, not an arbitrary
   // choice.
-  const item = transferRow(
+  const item = await waitForTransferRow(
     page,
     'Music\\mp3\\Static Harbor\\Glass Atlas\\02 - Paper Lanterns.mp3',
+    90_000,
   );
 
   // The monitor gives up after its empty-poll grace period and fails the row
@@ -85,10 +87,11 @@ test('surfaces a mid-transfer error and recovers on retry', async ({ context, pa
   const row = page.locator('li').filter({ hasText: 'Northern Line' }).first();
   await row.getByRole('button', { name: 'Download' }).click();
 
-  await page.getByRole('button', { name: 'Downloads', exact: true }).click();
-  const item = transferRow(
+  await openDownloadsPanel(page);
+  const item = await waitForTransferRow(
     page,
     'Music\\FLAC\\Static Harbor\\Glass Atlas\\01 - Northern Line.flac',
+    90_000,
   );
   await expect(item.getByText('ERR', { exact: true })).toBeVisible({ timeout: 90_000 });
 
@@ -155,7 +158,8 @@ test('falls over to the next peer when the best source errors', async ({ context
 
   // Failover rebinds one download rather than starting a second, so the dead
   // peer's row is replaced by the retry's instead of sitting beside it.
-  await page.getByRole('button', { name: 'Downloads', exact: true }).click();
+  await openDownloadsPanel(page);
+  await expandTransferGroups(page);
   const drawer = page.locator('div.bg-beet-panel').filter({ hasText: 'Active Transfers' });
   await expect(drawer.locator('div.group')).toHaveCount(1);
 });
@@ -174,10 +178,11 @@ test('fails fast when the peer goes offline before enqueue', async ({ context, p
   const row = page.locator('li').filter({ hasText: 'Paper Lanterns' }).first();
   await row.getByRole('button', { name: 'Download' }).click();
 
-  await page.getByRole('button', { name: 'Downloads', exact: true }).click();
-  const item = transferRow(
+  await openDownloadsPanel(page);
+  const item = await waitForTransferRow(
     page,
     'Music\\FLAC\\Static Harbor\\Glass Atlas\\02 - Paper Lanterns.flac',
+    10_000,
   );
   await expect(item.getByText('ERR', { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(item.getByText(/is offline/)).toBeVisible();
@@ -195,10 +200,11 @@ test('surfaces a per-file enqueue rejection with its real reason', async ({ cont
   const row = page.locator('li').filter({ hasText: 'Paper Lanterns' }).first();
   await row.getByRole('button', { name: 'Download' }).click();
 
-  await page.getByRole('button', { name: 'Downloads', exact: true }).click();
-  const item = transferRow(
+  await openDownloadsPanel(page);
+  const item = await waitForTransferRow(
     page,
     'Music\\FLAC\\Static Harbor\\Glass Atlas\\02 - Paper Lanterns.flac',
+    30_000,
   );
   await expect(item.getByText('ERR', { exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(item.getByText('Error: Enqueue rejected by peer')).toBeVisible();
@@ -225,9 +231,12 @@ test('cancels a transfer stuck in the remote queue', async ({ context, page }) =
   const row = page.locator('li').filter({ hasText: 'Undertow' }).first();
   await row.getByRole('button', { name: 'Download' }).click();
 
-  await page.getByRole('button', { name: 'Downloads', exact: true }).click();
-  const item = transferRow(page, 'Music\\FLAC\\Static Harbor\\Glass Atlas\\03 - Undertow.flac');
-  await expect(item).toBeVisible({ timeout: 60_000 });
+  await openDownloadsPanel(page);
+  const item = await waitForTransferRow(
+    page,
+    'Music\\FLAC\\Static Harbor\\Glass Atlas\\03 - Undertow.flac',
+  );
+  await expect(item).toBeVisible();
 
   await item.hover();
   await item.getByTitle('Cancel download').click();
