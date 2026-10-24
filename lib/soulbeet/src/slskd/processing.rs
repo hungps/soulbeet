@@ -72,17 +72,17 @@ fn find_best_albums(
         return vec![];
     }
 
-    let album_groups = scored_files.iter().into_group_map_by(|(rank, search)| {
-        (
-            search.username.clone(),
-            rank.guessed_artist.clone(),
-            rank.guessed_album.clone(),
-        )
-    });
+    let album_groups = scored_files
+        .iter()
+        .into_group_map_by(|(rank, search)| (search.username.clone(), rank.guessed_album.clone()));
 
     album_groups
         .into_iter()
-        .filter_map(|((username, artist, album_title), files_in_group)| {
+        .filter_map(|((username, album_title), files_in_group)| {
+            let artist = files_in_group
+                .first()
+                .map(|(rank, _)| rank.guessed_artist.clone())
+                .unwrap_or_default();
             // Specific search: find the single best file for each expected track.
             let mut best_files_for_album = HashMap::new();
 
@@ -161,4 +161,95 @@ fn find_best_albums(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::slskd::models::{SearchResponse, SearchResponseFile};
+
+    fn response(username: &str, folder: &str, tracks: &[&str]) -> SearchResponse {
+        SearchResponse {
+            username: username.to_string(),
+            files: tracks
+                .iter()
+                .enumerate()
+                .map(|(index, title)| SearchResponseFile {
+                    filename: format!("/music/{folder}/{:02} - {title}.flac", index + 1),
+                    size: 30_000_000,
+                    bit_rate: None,
+                    length: Some(240),
+                    sample_rate: Some(44100),
+                    bit_depth: Some(16),
+                })
+                .collect(),
+            has_free_upload_slot: true,
+            upload_speed: 1_000_000,
+            queue_length: 0,
+        }
+    }
+
+    #[test]
+    fn artist_prefixed_track_numbers_do_not_split_the_album() {
+        let titles = [
+            "The King's Trial",
+            "Unfamiliar Lands",
+            "A Dying World",
+            "Beyond the Horizon",
+            "Final Conflict",
+        ];
+        let response = SearchResponse {
+            username: "peer".to_string(),
+            files: titles
+                .iter()
+                .enumerate()
+                .map(|(index, title)| SearchResponseFile {
+                    filename: format!(
+                        "/music/Metaphor ReFantazio OST/ATLUS Sound Team - {:02} - {title}.flac",
+                        index + 1
+                    ),
+                    size: 30_000_000,
+                    bit_rate: None,
+                    length: Some(240),
+                    sample_rate: Some(44100),
+                    bit_depth: Some(16),
+                })
+                .collect(),
+            has_free_upload_slot: true,
+            upload_speed: 1_000_000,
+            queue_length: 0,
+        };
+
+        let albums = process_search_responses(
+            &[response],
+            "ATLUS Sound Team",
+            Some("Metaphor: ReFantazio Original Soundtrack"),
+            &titles,
+        );
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].track_count, titles.len());
+    }
+
+    #[test]
+    fn soundtrack_tracks_from_a_plain_ost_folder_are_kept() {
+        let titles = [
+            "The King's Trial",
+            "Unfamiliar Lands",
+            "A Dying World",
+            "Beyond the Horizon",
+            "Final Conflict",
+        ];
+        let responses = vec![response("peer", "Metaphor ReFantazio OST", &titles)];
+
+        let albums = process_search_responses(
+            &responses,
+            "ATLUS Sound Team",
+            Some("Metaphor: ReFantazio Original Soundtrack"),
+            &titles,
+        );
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].track_count, titles.len());
+    }
 }

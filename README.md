@@ -1,5 +1,12 @@
 # Soulbeet
 
+> THIS FORK IS MADE WITH CLANKER, USE WITH CAUTION
+
+> What's added:
+> - Filter album by release type and medium
+> - Able to pick album releases
+> - Plex integration
+
 [![Docker Pulls](https://img.shields.io/docker/pulls/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet)
 [![Docker Image Size](https://img.shields.io/docker/image-size/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet/tags)
 [![Docker Image Version](https://img.shields.io/docker/v/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet/tags)
@@ -19,7 +26,7 @@ Screenshots: [here](./screenshots)
 - **Three Discovery Profiles**: Conservative (close to what you know), Balanced, or Adventurous (unfamiliar territory). Run one or all three, each with its own playlist.
 - **Rate & Keep**: Listen in Navidrome or Plex. 3+ stars promotes a track to your permanent library, 1 star deletes it. Unrated tracks expire and get replaced with fresh picks.
 - **Multi-user**: Private or shared folders. Each user gets their own discovery profiles, scrobble credentials, and preferences.
-- **Multiple Metadata Providers**: MusicBrainz (albums) or Last.fm (single tracks), selectable per user.
+- **Multiple Metadata Providers**: MusicBrainz, BrainzMash (a community MusicBrainz mirror pool) or Last.fm (single tracks), selectable per user. MusicBrainz searches expose release type and medium filters.
 
 ## How It Works
 
@@ -94,9 +101,13 @@ For discovery (optional): add your Last.fm API key and/or ListenBrainz token in 
 | `SECRET_KEY` | Encryption key for tokens and credentials | |
 | `BEETS_CONFIG` | Path to custom beets config file | `beets_config.yaml` |
 | `BEETS_ALBUM_MODE` | Enable album import mode (see below) | `false` |
+| `MUSICBRAINZ_HOST` | MusicBrainz mirror (host[:port], no scheme) | `musicbrainz.org` |
+| `BRAINZMASH_HOST` | BrainzMash endpoint (host[:port], no scheme) | `api.brainzmash.cc` |
 
 
 **Note**: slskd URL and API key are configured through the web UI (Settings > Config) and stored in the database. Scrobble credentials (Last.fm API key, ListenBrainz token) are configured per-user in Settings > Library. Navidrome and Plex URLs and credentials are configured per-user in Settings > Media Server.
+
+**Note**: BrainzMash (`api.brainzmash.cc`) is a community pool of MusicBrainz mirrors. The public endpoint is gated by the pool operators, so set `BRAINZMASH_HOST` to an approved endpoint or your own MusicBrainz mirror if searches fail with HTTP 403.
 
 ### Beets Configuration
 

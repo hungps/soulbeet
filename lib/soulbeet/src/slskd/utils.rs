@@ -9,6 +9,8 @@ static RE_TRAIL_BRACKET: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*\[\s*[^\]]*\]\s*$").unwrap());
 static RE_TRAIL_YEAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*[-\(\[]?\d{4}[-\)\]]?\s*$").unwrap());
+static RE_TRAIL_TRACK_NO: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s+[-\u{2013}]\s+\d{1,3}\s*$").unwrap());
 
 // A struct to hold pre-processed text for efficient comparisons.
 #[derive(Debug, Clone)]
@@ -144,6 +146,7 @@ fn score_artist(
     } else {
         clean_name(&stem.original)
     };
+    let stem_artist_part = RE_TRAIL_TRACK_NO.replace(&stem_artist_part, "").to_string();
     let stem_candidate_c = CleanedText::new(&stem_artist_part);
     let stem_score = containment_sim(&stem_candidate_c, target_artist);
 
@@ -187,9 +190,11 @@ pub fn rank_match(
     const ALBUM_WEIGHT: f64 = 0.4;
     const TRACK_WEIGHT: f64 = 0.4;
     const ARTIST_WEIGHT: f64 = 0.2;
-    // If the album score is below this, we assume the path has no useful album info
-    // and we don't penalize the score for it.
+    // If a dimension scores below this, we assume the path has no useful info
+    // for it (e.g. peers who do not organise by artist) and we do not let it
+    // drag the total score down.
     const ALBUM_INFO_THRESHOLD: f64 = 0.25;
+    const ARTIST_INFO_THRESHOLD: f64 = 0.25;
 
     let path_info = PathInfo::from_path(filename);
     let path_folders_c: Vec<_> = path_info
@@ -231,7 +236,9 @@ pub fn rank_match(
 
     if searched_artist.is_some() {
         weighted_sum += artist_score * ARTIST_WEIGHT;
-        total_weight += ARTIST_WEIGHT;
+        if artist_score > ARTIST_INFO_THRESHOLD {
+            total_weight += ARTIST_WEIGHT;
+        }
     }
 
     if !expected_tracks.is_empty() {

@@ -299,7 +299,7 @@ impl SoulseekClient {
         let query = match album {
             Some(ref album) => match tracks.len() {
                 1 => format!("{} {}", album.artist.trim(), tracks[0].title.trim()),
-                _ => format!("{} {}", album.artist.trim(), album.title.trim()),
+                _ => album_search_text(&album.title),
             },
             // No album, should be a single track search
             None => format!("{} {}", tracks[0].artist.trim(), tracks[0].title.trim()),
@@ -927,10 +927,7 @@ fn parse_batch_enqueue_response(
                 .transfers
                 .iter()
                 .any(|t| t.filename == file.filename);
-            let failure = parsed
-                .failures
-                .iter()
-                .find(|f| f.filename == file.filename);
+            let failure = parsed.failures.iter().find(|f| f.filename == file.filename);
 
             let error = if enqueued {
                 None
@@ -1008,12 +1005,7 @@ impl crate::DownloadBackend for SoulseekClient {
         Ok(entries.into_iter().map(Into::into).collect())
     }
 
-    async fn cancel_download(
-        &self,
-        username: &str,
-        download_id: &str,
-        remove: bool,
-    ) -> Result<()> {
+    async fn cancel_download(&self, username: &str, download_id: &str, remove: bool) -> Result<()> {
         self.cancel_download(username, download_id, remove).await
     }
 
@@ -1025,6 +1017,48 @@ impl crate::DownloadBackend for SoulseekClient {
                 false
             }
         }
+    }
+}
+
+const ALBUM_QUERY_STOP_WORDS: &[&str] = &[
+    "the",
+    "a",
+    "an",
+    "original",
+    "soundtrack",
+    "ost",
+    "vol",
+    "volume",
+    "deluxe",
+    "edition",
+    "remaster",
+    "remastered",
+    "expanded",
+    "special",
+    "complete",
+    "bonus",
+    "version",
+    "anniversary",
+];
+
+/// Album downloads search Soulseek by path, which ANDs every term. Keeping the
+/// credited artist and release boilerplate in the query hides peer folders that
+/// are named after the work only ("Metaphor ReFantazio OST"). Scoring still uses
+/// the artist and the full album title.
+fn album_search_text(title: &str) -> String {
+    let kept: Vec<&str> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .filter(|token| {
+            let lower = token.to_lowercase();
+            !ALBUM_QUERY_STOP_WORDS.iter().any(|word| *word == lower)
+        })
+        .collect();
+
+    if kept.is_empty() {
+        title.to_string()
+    } else {
+        kept.join(" ")
     }
 }
 
@@ -1149,6 +1183,19 @@ mod tests {
         let files = batch(&[r"a\album\1.mp3"]);
         let err = parse_batch_enqueue_response("peer", &files, "<html>gateway</html>").unwrap_err();
         assert!(matches!(err, SoulseekError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn album_query_drops_artist_and_release_boilerplate() {
+        assert_eq!(
+            album_search_text("Metaphor: ReFantazio Original Soundtrack"),
+            "Metaphor ReFantazio"
+        );
+        assert_eq!(
+            album_search_text("Random Access Memories (Deluxe Edition)"),
+            "Random Access Memories"
+        );
+        assert_eq!(album_search_text("OST"), "OST");
     }
 
     #[test]

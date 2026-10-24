@@ -22,7 +22,10 @@ use shared::download::{
     AutoDownloadEvent, DownloadQuery, DownloadableGroup, DownloadableItem,
     SearchState as DownloadSearchState,
 };
-use shared::metadata::{AlbumWithTracks, Provider, SearchResult, SearchResults, Track};
+use shared::metadata::{
+    Album, AlbumWithTracks, Provider, SearchFilterOptions, SearchFilters, SearchResult,
+    SearchResults, Track,
+};
 use std::collections::{HashMap, HashSet};
 
 use track::TrackResult;
@@ -39,6 +42,12 @@ use toast::{FallbackToast, FallbackToastData};
 
 mod search_type_toggle;
 use search_type_toggle::{SearchType, SearchTypeToggle};
+
+mod albumgroup;
+use albumgroup::AlbumGroupResult;
+
+mod filter_chips;
+use filter_chips::FilterChips;
 
 #[component]
 pub fn Search() -> Element {
@@ -66,6 +75,34 @@ pub fn Search() -> Element {
     let mut fallback_toasts = use_signal::<Vec<FallbackToastData>>(Vec::new);
     let mut batch_to_name = use_signal::<HashMap<String, String>>(HashMap::new);
     let mut active_menu = use_signal::<Option<String>>(|| None);
+    let mut filters = use_signal(SearchFilters::default);
+    let mut filter_options = use_signal(SearchFilterOptions::default);
+    let mut filter_provider = use_signal(String::new);
+    let mut selected_edition = use_signal::<HashMap<String, usize>>(HashMap::new);
+
+    use_effect(move || {
+        let provider = settings.default_provider();
+        if *filter_provider.peek() == provider {
+            return;
+        }
+        filter_provider.set(provider.clone());
+        filter_options.set(SearchFilterOptions::default());
+        filters.set(SearchFilters::default());
+        spawn(async move {
+            match auth
+                .call(api::search_filter_options(api::FilterOptionsQuery {
+                    provider: Some(provider),
+                }))
+                .await
+            {
+                Ok(options) => {
+                    filters.set(default_search_filters(&options));
+                    filter_options.set(options);
+                }
+                Err(e) => info!("Failed to load search filters: {:?}", e),
+            }
+        });
+    });
 
     // Track if we've synced search_type from settings (to avoid saving on initial load)
     let mut synced = use_signal(|| false);
@@ -465,6 +502,7 @@ pub fn Search() -> Element {
             artist: artist(),
             query: search(),
             provider,
+            filters: filters(),
         };
 
         let result = match search_type() {
@@ -516,6 +554,25 @@ pub fn Search() -> Element {
                     }
                 });
             }
+        }
+    };
+
+    let mut toggle_filter = move |(field, value): (u8, String)| {
+        let mut current = filters();
+        let list = match field {
+            0 => &mut current.release_types,
+            1 => &mut current.secondary_types,
+            _ => &mut current.media_formats,
+        };
+        match list.iter().position(|item| item == &value) {
+            Some(index) => {
+                list.remove(index);
+            }
+            None => list.push(value),
+        }
+        filters.set(current);
+        if !search.peek().is_empty() {
+            spawn(perform_search());
         }
     };
 
@@ -660,6 +717,29 @@ pub fn Search() -> Element {
           }
         }
 
+        if search_type() == SearchType::Album && filter_options.read().is_supported() {
+          div { class: "w-full -mt-4 space-y-2.5 bg-beet-panel/30 border border-white/5 rounded-lg p-3",
+            FilterChips {
+              label: "Type".to_string(),
+              values: filter_options.read().release_types.clone(),
+              selected: filters.read().release_types.clone(),
+              on_toggle: move |value| toggle_filter((0, value)),
+            }
+            FilterChips {
+              label: "Secondary".to_string(),
+              values: filter_options.read().secondary_types.clone(),
+              selected: filters.read().secondary_types.clone(),
+              on_toggle: move |value| toggle_filter((1, value)),
+            }
+            FilterChips {
+              label: "Medium".to_string(),
+              values: filter_options.read().media_formats.clone(),
+              selected: filters.read().media_formats.clone(),
+              on_toggle: move |value| toggle_filter((2, value)),
+            }
+          }
+        }
+
 
         SystemStatus {
             health: system_health.get(),
@@ -780,6 +860,9 @@ pub fn Search() -> Element {
                                                   release_date: album_for_search.release_date.clone(),
                                                   mbid: album_for_search.mbid.clone(),
                                                   cover_url: album_for_search.cover_url.clone(),
+                                                  country: album_for_search.country.clone(),
+                                                  media: album_for_search.media.clone(),
+                                                  track_count: album_for_search.track_count,
                                               });
                                               spawn(download(query));
                                           }
@@ -797,6 +880,9 @@ pub fn Search() -> Element {
                                               release_date: album_for_dl.release_date.clone(),
                                               mbid: album_for_dl.mbid.clone(),
                                               cover_url: album_for_dl.cover_url.clone(),
+                                              country: album_for_dl.country.clone(),
+                                              media: album_for_dl.media.clone(),
+                                              track_count: album_for_dl.track_count,
                                           });
                                           handle_auto_download(album_for_dl.id.clone(), query);
                                       },
@@ -808,11 +894,107 @@ pub fn Search() -> Element {
                                               release_date: album_for_override.release_date.clone(),
                                               mbid: album_for_override.mbid.clone(),
                                               cover_url: album_for_override.cover_url.clone(),
+                                              country: album_for_override.country.clone(),
+                                              media: album_for_override.media.clone(),
+                                              track_count: album_for_override.track_count,
                                           });
                                           handle_override_download(album_for_override.id.clone(), query, folder);
                                       },
                                       tracks: tracks_for_panel,
                                       download_states,
+                                      on_track_download: move |track: Track| {
+                                          handle_track_download(track);
+                                      },
+                                      on_track_override_download: move |(track, folder): (Track, Folder)| {
+                                          handle_track_override_download((track, folder));
+                                      },
+                                    }
+                                  }
+                                }
+                            }
+                            SearchResult::AlbumGroup(ref group) => {
+                                let selected = selected_edition
+                                    .read()
+                                    .get(&group.id)
+                                    .copied()
+                                    .unwrap_or(0)
+                                    .min(group.editions.len().saturating_sub(1));
+                                let fallback_album = Album {
+                                    id: group.id.clone(),
+                                    title: group.title.clone(),
+                                    artist: group.artist.clone(),
+                                    release_date: group.release_date.clone(),
+                                    mbid: group.mbid.clone(),
+                                    cover_url: group.cover_url.clone(),
+                                    country: None,
+                                    media: None,
+                                    track_count: None,
+                                };
+                                let edition = group
+                                    .editions
+                                    .get(selected)
+                                    .cloned()
+                                    .unwrap_or(fallback_album);
+                                let edition_id = edition.id.clone();
+                                let edition_for_search = edition.clone();
+                                let edition_for_dl = edition.clone();
+                                let edition_for_override = edition;
+                                let group_id = group.id.clone();
+                                let is_expanded = expanded_albums.read().contains(&edition_id);
+                                let cached = album_cache.read().get(&edition_id).cloned();
+                                let tracks_for_panel: Option<Vec<Track>> = if is_expanded {
+                                    cached.map(|awt| awt.tracks)
+                                } else {
+                                    Some(vec![])
+                                };
+                                let dl_state = download_states
+                                    .read()
+                                    .get(&edition_id)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let has_folders = !folders.read().is_empty();
+                                let effective_state = if !has_folders {
+                                    DownloadRowState::Disabled
+                                } else {
+                                    dl_state
+                                };
+                                let current_folders = folders.read().clone();
+                                let current_folder_id = selected_folder_id();
+
+                                rsx! {
+                                  li { key: "{group.id}",
+                                    AlbumGroupResult {
+                                      editions: group.editions.clone(),
+                                      selected,
+                                      on_select: move |index: usize| {
+                                          selected_edition.write().insert(group_id.clone(), index);
+                                      },
+                                      is_expanded,
+                                      on_toggle: move || {
+                                          toggle_expand(edition_id.clone(), provider);
+                                      },
+                                      on_search_sources: move || {
+                                          spawn(download(DownloadQuery::new(vec![]).album(edition_for_search.clone())));
+                                      },
+                                      download_state: effective_state,
+                                      folders: current_folders,
+                                      selected_folder_id: current_folder_id.clone(),
+                                      active_menu,
+                                      tracks: tracks_for_panel,
+                                      download_states,
+                                      on_download: move |_| {
+                                          handle_auto_download(
+                                              edition_for_dl.id.clone(),
+                                              DownloadQuery::new(vec![]).album(edition_for_dl.clone()),
+                                          );
+                                      },
+                                      on_override_download: move |folder: Folder| {
+                                          handle_override_download(
+                                              edition_for_override.id.clone(),
+                                              DownloadQuery::new(vec![]).album(edition_for_override.clone()),
+                                              folder,
+                                          );
+                                      },
                                       on_track_download: move |track: Track| {
                                           handle_track_download(track);
                                       },
@@ -854,5 +1036,21 @@ pub fn Search() -> Element {
           }
         }
       }
+    }
+}
+
+fn default_search_filters(options: &SearchFilterOptions) -> SearchFilters {
+    let pick = |available: &[String], wanted: &[&str]| -> Vec<String> {
+        available
+            .iter()
+            .filter(|value| wanted.iter().any(|want| value.eq_ignore_ascii_case(want)))
+            .cloned()
+            .collect()
+    };
+
+    SearchFilters {
+        release_types: pick(&options.release_types, &["Album", "Single"]),
+        secondary_types: pick(&options.secondary_types, &["Soundtrack"]),
+        media_formats: Vec::new(),
     }
 }

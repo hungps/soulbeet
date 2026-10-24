@@ -1,6 +1,6 @@
 use reqwest::Client;
 use serde::Deserialize;
-use shared::metadata::{Album, AlbumWithTracks, SearchResult, Track};
+use shared::metadata::{Album, AlbumWithTracks, SearchFilters, SearchResult, Track};
 use shared::recommendation::{
     ArtistPopularity, Listen, RankedArtist, RankedTrack, SimilarArtist, SimilarTrack, TimePeriod,
     WeightedTag,
@@ -750,6 +750,7 @@ impl crate::MetadataProvider for LastFmProvider {
         &self,
         artist: Option<&str>,
         query: &str,
+        _filters: &SearchFilters,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
         let albums = self.search_albums_internal(artist, query, limit).await?;
@@ -769,6 +770,9 @@ impl crate::MetadataProvider for LastFmProvider {
                     release_date: None,
                     mbid,
                     cover_url,
+                    country: None,
+                    media: None,
+                    track_count: None,
                 })
             })
             .collect())
@@ -812,7 +816,7 @@ impl crate::MetadataProvider for LastFmProvider {
                 let album_mbid = nonempty_mbid(info.mbid.clone());
                 let cover_url = LastFmImage::get_largest(&info.image);
 
-                let tracks = info
+                let tracks: Vec<Track> = info
                     .tracks
                     .map(|t| {
                         t.track
@@ -850,6 +854,9 @@ impl crate::MetadataProvider for LastFmProvider {
                         release_date: info.wiki.and_then(|w| w.published),
                         mbid: album_mbid,
                         cover_url,
+                        country: None,
+                        media: None,
+                        track_count: Some(tracks.len() as u32),
                     },
                     tracks,
                 });

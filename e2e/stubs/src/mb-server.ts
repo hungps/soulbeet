@@ -163,6 +163,25 @@ function recordingJson(hit: RecordingHit, withReleases: boolean): Record<string,
   };
 }
 
+function searchReleases(query: string): FixtureRelease[] {
+  const { fields, freeText } = parseLucene(query);
+  const title =
+    fields.get('release') ?? fields.get('releaseaccent') ?? fields.get('alias');
+  const artist = fields.get('artist') ?? fields.get('artistname');
+  const free = freeText.join(' ');
+  const hasCriteria = title !== undefined || artist !== undefined || free.length > 0;
+
+  return releases.filter((release) => {
+    const titleOk = matchesText(release.title, title);
+    const artistOk = matchesText(release.artist, artist);
+    const freeOk =
+      title === undefined && artist === undefined
+        ? matchesText(`${release.artist} ${release.title}`, free)
+        : true;
+    return hasCriteria && titleOk && artistOk && freeOk;
+  });
+}
+
 function releaseGroupJson(release: FixtureRelease): Record<string, unknown> {
   return {
     id: release.releaseGroupMbid,
@@ -264,6 +283,21 @@ export function createMusicBrainzServer(): Server {
             count: found.length,
             offset: 0,
             'release-groups': found.map((r) => releaseGroupJson(r)),
+          });
+        },
+      },
+      {
+        method: 'GET',
+        pattern: '/ws/2/release',
+        handler: ({ res, url }) => {
+          const query = url.searchParams.get('query') ?? '';
+          const found = searchReleases(query);
+          console.log(`[mb] release search "${query}" -> ${found.length}`);
+          sendJson(res, 200, {
+            created: new Date().toISOString(),
+            count: found.length,
+            offset: 0,
+            releases: found.map((release) => releaseJson(release)),
           });
         },
       },

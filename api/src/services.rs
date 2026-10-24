@@ -24,6 +24,7 @@ use crate::models::app_config::{keys, AppConfig};
 
 pub mod providers {
     pub const MUSICBRAINZ: &str = "musicbrainz";
+    pub const BRAINZMASH: &str = "brainzmash";
     pub const LASTFM: &str = "lastfm";
 }
 
@@ -55,6 +56,7 @@ static MEDIA_SERVERS: LazyLock<RwLock<HashMap<String, Arc<dyn MediaServer>>>> =
 pub fn available_metadata_providers() -> Vec<(&'static str, &'static str)> {
     vec![
         (providers::MUSICBRAINZ, "MusicBrainz"),
+        (providers::BRAINZMASH, "BrainzMash"),
         (providers::LASTFM, "Last.fm"),
     ]
 }
@@ -75,6 +77,7 @@ async fn init_metadata_provider(
     lastfm_api_key: Option<&str>,
 ) -> Result<Arc<dyn MetadataProvider>, String> {
     match id {
+        providers::BRAINZMASH => Ok(Arc::new(MusicBrainzProvider::brainzmash())),
         providers::LASTFM => {
             let api_key = lastfm_api_key
                 .filter(|k| !k.is_empty())

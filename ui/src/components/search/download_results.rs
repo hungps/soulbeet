@@ -142,7 +142,7 @@ fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
                         }
                     }
                     p { class: "text-sm text-gray-400 font-mono",
-                        "{album.artist.clone().unwrap_or_default()} - Quality: {album.quality}, Score: {album.score:.2}"
+                        "{album.artist.clone().unwrap_or_default()} - Quality: {album.quality}, {album.item_count} tracks, Score: {album.score:.2}"
                     }
                 }
 

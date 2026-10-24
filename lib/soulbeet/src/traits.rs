@@ -3,7 +3,10 @@ use shared::{
     download::{DownloadProgress, DownloadableItem, QueuedDownload, SearchResult},
     library::DuplicateReport,
     media_server::{MediaAlbum, MediaServerKind, MediaTrack},
-    metadata::{Album, AlbumWithTracks, SearchResult as MetadataSearchResult, Track},
+    metadata::{
+        Album, AlbumWithTracks, SearchFilterOptions, SearchFilters,
+        SearchResult as MetadataSearchResult, Track,
+    },
     recommendation::{
         ArtistPopularity, CandidateSet, Listen, ProfileConfig, RankedArtist, RankedTrack,
         SignalReport, SimilarArtist, SimilarTrack, TimePeriod, UserMusicProfile, WeightedTag,
@@ -22,6 +25,7 @@ pub trait MetadataProvider: Send + Sync {
         &self,
         artist: Option<&str>,
         query: &str,
+        filters: &SearchFilters,
         limit: usize,
     ) -> Result<Vec<MetadataSearchResult>>;
 
@@ -31,6 +35,12 @@ pub trait MetadataProvider: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<Vec<MetadataSearchResult>>;
+
+    /// Filter values offered for album searches. Empty means the provider has
+    /// no album facets and the UI hides the filters.
+    fn search_filter_options(&self) -> SearchFilterOptions {
+        SearchFilterOptions::default()
+    }
 
     async fn get_album(&self, id: &str) -> Result<AlbumWithTracks>;
 }
@@ -105,10 +115,11 @@ impl MetadataProvider for FallbackMetadataProvider {
         &self,
         artist: Option<&str>,
         query: &str,
+        filters: &SearchFilters,
         limit: usize,
     ) -> Result<Vec<MetadataSearchResult>> {
         for provider in &self.providers {
-            match provider.search_albums(artist, query, limit).await {
+            match provider.search_albums(artist, query, filters, limit).await {
                 Ok(results) if !results.is_empty() => return Ok(results),
                 Ok(_) => continue,
                 Err(e) => {
@@ -137,6 +148,13 @@ impl MetadataProvider for FallbackMetadataProvider {
             }
         }
         Ok(vec![])
+    }
+
+    fn search_filter_options(&self) -> SearchFilterOptions {
+        self.providers
+            .first()
+            .map(|provider| provider.search_filter_options())
+            .unwrap_or_default()
     }
 
     async fn get_album(&self, id: &str) -> Result<AlbumWithTracks> {

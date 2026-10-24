@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use shared::{
     download::{DownloadQuery, SearchResult as DownloadSearchResult},
-    metadata::{AlbumWithTracks, Provider, SearchResults},
+    metadata::{AlbumWithTracks, Provider, SearchFilterOptions, SearchFilters, SearchResults},
 };
 
 #[cfg(feature = "server")]
@@ -16,6 +16,14 @@ use crate::{server_fns::server_error, AuthSession};
 pub struct SearchQuery {
     pub artist: Option<String>,
     pub query: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub filters: SearchFilters,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FilterOptionsQuery {
     #[serde(default)]
     pub provider: Option<String>,
 }
@@ -46,7 +54,7 @@ pub async fn search_album(input: SearchQuery) -> Result<SearchResults, ServerFnE
 
     let provider_enum: Provider = provider.id().parse().unwrap_or_default();
     let results = provider
-        .search_albums(input.artist.as_deref(), &input.query, 25)
+        .search_albums(input.artist.as_deref(), &input.query, &input.filters, 25)
         .await
         .map_err(server_error)?;
 
@@ -76,6 +84,21 @@ pub async fn search_track(input: SearchQuery) -> Result<SearchResults, ServerFnE
         provider: provider_enum,
         results,
     })
+}
+
+#[post("/api/metadata/search/filters", auth: AuthSession)]
+pub async fn search_filter_options(
+    input: FilterOptionsQuery,
+) -> Result<SearchFilterOptions, ServerFnError> {
+    let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
+    let provider = metadata_provider(
+        input.provider.as_deref(),
+        user_settings.lastfm_api_key.as_deref(),
+    )
+    .await
+    .map_err(server_error)?;
+
+    Ok(provider.search_filter_options())
 }
 
 #[post("/api/metadata/album", auth: AuthSession)]

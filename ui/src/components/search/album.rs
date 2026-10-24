@@ -53,8 +53,21 @@ pub fn AlbumResult(props: Props) -> Element {
                         "{album.title}"
                     }
                     p { class: "text-xs text-gray-400 font-mono truncate", "{album.artist}" }
-                    if let Some(release_date) = &album.release_date {
-                        p { class: "text-xs text-gray-500 font-mono", "{release_date}" }
+                    {
+                        let meta = [
+                            album.country.clone(),
+                            album.medium_label(),
+                            album.release_date.clone(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<String>>()
+                        .join(" · ");
+                        rsx! {
+                            if !meta.is_empty() {
+                                p { class: "text-xs text-gray-500 font-mono", "{meta}" }
+                            }
+                        }
                     }
                 }
 

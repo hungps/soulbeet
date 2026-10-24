@@ -2,13 +2,21 @@ use musicbrainz_rs::{
     entity::{
         artist_credit::ArtistCredit,
         recording::{Recording, RecordingSearchQuery},
-        release::{Release, ReleaseStatus},
-        release_group::{ReleaseGroup, ReleaseGroupPrimaryType, ReleaseGroupSearchQuery},
+        release::{Release, ReleaseSearchQuery},
+        release_group::{ReleaseGroup, ReleaseGroupPrimaryType, ReleaseGroupSecondaryType},
     },
     Fetch, MusicBrainzClient, Search,
 };
-use shared::metadata::{Album, AlbumWithTracks, SearchResult, Track};
-use std::{collections::HashSet, future::Future, sync::OnceLock, time::Duration};
+use shared::metadata::{
+    compare_musicbrainz_dates, Album, AlbumGroup, AlbumWithTracks, SearchFilterOptions,
+    SearchFilters, SearchResult, Track,
+};
+use std::{
+    collections::{hash_map::Entry, HashMap, HashSet},
+    future::Future,
+    sync::OnceLock,
+    time::Duration,
+};
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -24,26 +32,38 @@ const BASE_DELAY_MS: u64 = 500;
 /// Maximum backoff delay cap (milliseconds)
 const MAX_BACKOFF_MS: u64 = 5000;
 
-// This ensures the client is initialized only once with a proper user agent.
+/// Releases fetched per album search. Release groups are assembled client side,
+/// so this needs to be well above the number of groups we return.
+const ALBUM_FETCH_LIMIT: u8 = 100;
+
+fn build_client(env_var: &str, default_host: &str) -> MusicBrainzClient {
+    let version = env!("CARGO_PKG_VERSION");
+    let mut client = MusicBrainzClient::new(&format!(
+        "Soulbeet/{version} ( https://github.com/terry90/soulbeet )"
+    ))
+    .expect("Failed to create MusicBrainz client - invalid user agent format");
+    let configured = std::env::var(env_var).ok();
+    let host = configured
+        .as_deref()
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .unwrap_or(default_host);
+    client.musicbrainz_domain = host.to_string();
+    client
+}
+
+/// Official MusicBrainz server. `MUSICBRAINZ_HOST` points it at a mirror
+/// (host[:port], no scheme), mirroring the `musicbrainz.host` beets option.
 fn musicbrainz_client() -> &'static MusicBrainzClient {
     static CLIENT: OnceLock<MusicBrainzClient> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        let version = env!("CARGO_PKG_VERSION");
-        let mut client = MusicBrainzClient::new(&format!(
-            "Soulbeet/{version} ( https://github.com/terry90/soulbeet )"
-        ))
-        .expect("Failed to create MusicBrainz client - invalid user agent format");
-        // MUSICBRAINZ_HOST points the client at a MusicBrainz mirror
-        // (host[:port], no scheme). Mirrors the `musicbrainz.host` option
-        // beets exposes for the same purpose.
-        if let Ok(host) = std::env::var("MUSICBRAINZ_HOST") {
-            let host = host.trim();
-            if !host.is_empty() {
-                client.musicbrainz_domain = host.to_string();
-            }
-        }
-        client
-    })
+    CLIENT.get_or_init(|| build_client("MUSICBRAINZ_HOST", "musicbrainz.org"))
+}
+
+/// BrainzMash is a load-balanced pool of read-only MusicBrainz mirrors that
+/// speaks the same ws/2 API. `BRAINZMASH_HOST` overrides the endpoint.
+fn brainzmash_client() -> &'static MusicBrainzClient {
+    static CLIENT: OnceLock<MusicBrainzClient> = OnceLock::new();
+    CLIENT.get_or_init(|| build_client("BRAINZMASH_HOST", "api.brainzmash.cc"))
 }
 
 /// Formats the artist credits into a single, comma-separated string.
@@ -182,206 +202,496 @@ pub enum SearchType {
     Album,
 }
 
-/// Performs a refined search for music, prioritizing canonical releases.
-pub async fn search(
-    artist: &Option<String>,
-    query: &str,
-    search_type: SearchType,
-    limit: u8,
-) -> Result<Vec<SearchResult>, musicbrainz_rs::Error> {
-    let client = musicbrainz_client();
-    let mut results = Vec::new();
-
-    info!(
-        "Starting {:?} search for query: '{}', artist: '{:?}'",
-        search_type, query, artist
-    );
-
-    match search_type {
-        SearchType::Track => {
-            let search_results = with_retry("MusicBrainz track search", || {
-                let mut recording_query = RecordingSearchQuery::query_builder();
-                if let Some(ref artist) = artist {
-                    recording_query.artist_name(artist).and();
-                }
-                let search_query = recording_query.recording(query).build();
-                async move {
-                    Recording::search(search_query)
-                        .limit(limit)
-                        .with_releases()
-                        .with_ratings()
-                        .execute_with_client(client)
-                        .await
-                }
-            })
-            .await?;
-
-            // Sort by rating (descending) - higher rated recordings first
-            let mut recordings: Vec<_> = search_results.entities;
-            recordings.sort_by(|a, b| {
-                let a_rating = a.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
-                let b_rating = b.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
-                b_rating
-                    .partial_cmp(&a_rating)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            let mut unique_tracks = HashSet::new();
-
-            for recording in recordings {
-                let artist_name = format_artist_credit(&recording.artist_credit);
-                let album_title = recording
-                    .releases
-                    .as_ref()
-                    .and_then(|r| r.first())
-                    .map(|r| r.title.clone())
-                    .unwrap_or_default();
-
-                // Use a combination of title, artist, and album to define a unique track
-                let key = (
-                    recording.title.to_lowercase(),
-                    artist_name.to_lowercase(),
-                    album_title.to_lowercase(),
-                );
-
-                if !unique_tracks.contains(&key) {
-                    let first_release = recording.releases.as_ref().and_then(|r| r.first());
-                    let track = Track {
-                        id: recording.id.clone(),
-                        title: recording.title.clone(),
-                        artist: artist_name.clone(),
-                        album_id: first_release.map(|release| release.id.clone()),
-                        album_title: first_release.map(|r| r.title.clone()),
-                        release_date: first_release.and_then(|r| r.date.clone().map(|d| d.0)),
-                        duration: format_duration(&recording.length),
-                        mbid: Some(recording.id.clone()),
-                        release_mbid: first_release.map(|r| r.id.clone()),
-                    };
-                    unique_tracks.insert(key);
-                    results.push(SearchResult::Track(track));
-                }
-            }
-        }
-        SearchType::Album => {
-            let search_results = with_retry("MusicBrainz album search", || {
-                let mut album_query = ReleaseGroupSearchQuery::query_builder();
-                if let Some(ref artist) = artist {
-                    album_query.artist(artist).and();
-                }
-                let search_query = album_query.release_group(query).build();
-                async move {
-                    ReleaseGroup::search(search_query)
-                        .limit(limit)
-                        .with_releases()
-                        .with_ratings()
-                        .execute_with_client(client)
-                        .await
-                }
-            })
-            .await?;
-
-            // Sort by rating (descending) - higher rated albums first
-            let mut release_groups: Vec<_> = search_results.entities;
-            release_groups.sort_by(|a, b| {
-                let a_rating = a.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
-                let b_rating = b.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
-                b_rating
-                    .partial_cmp(&a_rating)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            for release_group in release_groups {
-                if release_group.primary_type != Some(ReleaseGroupPrimaryType::Album)
-                    && release_group.primary_type != Some(ReleaseGroupPrimaryType::Ep)
-                {
-                    continue;
-                }
-
-                if let Some(best_release) = release_group.releases.as_ref().and_then(|releases| {
-                    releases
-                        .iter()
-                        .filter(|r| r.status == Some(ReleaseStatus::Official))
-                        .min_by_key(|release| release.date.as_ref().map(|d| &d.0))
-                }) {
-                    // If no official release was found, take the first one available
-                    let final_release = best_release.clone();
-
-                    results.push(SearchResult::Album(Album {
-                        id: final_release.id.clone(),
-                        title: release_group.title.clone(),
-                        artist: format_artist_credit(&release_group.artist_credit),
-                        release_date: final_release.date.as_ref().map(|d| d.0.clone()),
-                        mbid: Some(final_release.id.clone()),
-                        cover_url: None,
-                    }));
-                }
-            }
-        }
+fn album_search_query(artist: Option<&str>, query: &str) -> String {
+    let mut release_query = ReleaseSearchQuery::query_builder();
+    if let Some(artist) = artist {
+        release_query.artist(artist).and();
     }
-
-    Ok(results)
+    let mut title_query = ReleaseSearchQuery::query_builder();
+    title_query.release(query).or().alias(query);
+    release_query.expr(&mut title_query).build()
 }
 
-/// Fetches a release (album) by its ID and returns it with its full tracklist.
-pub async fn find_album(release_id: &str) -> Result<AlbumWithTracks, musicbrainz_rs::Error> {
-    let client = musicbrainz_client();
+fn query_tokens(query: &str) -> Vec<String> {
+    query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| token.len() > 2)
+        .map(str::to_string)
+        .collect()
+}
 
-    // Fetch the release with recordings (tracks) and artist credits for the tracks.
-    let release = with_retry("MusicBrainz album fetch", || async {
-        Release::fetch()
-            .id(release_id)
-            .with_recordings()
-            .with_artist_credits()
-            .execute_with_client(client)
-            .await
-    })
-    .await?;
+fn matched_tokens(title: &str, tokens: &[String]) -> usize {
+    let title = title.to_lowercase();
+    tokens
+        .iter()
+        .filter(|token| title.contains(token.as_str()))
+        .count()
+}
 
-    let mut tracks = Vec::new();
-
-    // A release contains media (like CD 1, CD 2), and each medium has tracks.
-    if let Some(media) = &release.media {
-        for medium in media {
-            if let Some(release_tracks) = &medium.tracks {
-                for track in release_tracks {
-                    if let Some(recording) = &track.recording {
-                        tracks.push(Track {
-                            id: recording.id.clone(),
-                            title: recording.title.clone(),
-                            artist: format_artist_credit(&recording.artist_credit),
-                            album_id: Some(release.id.clone()),
-                            album_title: Some(release.title.clone()),
-                            release_date: release.date.as_ref().map(|d| d.0.clone()),
-                            duration: format_duration(&recording.length),
-                            mbid: Some(recording.id.clone()),
-                            release_mbid: Some(release.id.clone()),
-                        });
-                    }
-                }
-            }
-        }
+fn album_title(group_title: &str, release_title: &str, tokens: &[String]) -> String {
+    if tokens.is_empty() || matched_tokens(group_title, tokens) > 0 {
+        group_title.to_string()
+    } else {
+        release_title.to_string()
     }
+}
 
-    // First, create the standalone Album object.
-    let album = Album {
-        id: release.id.clone(),
-        title: release.title,
-        artist: format_artist_credit(&release.artist_credit),
-        release_date: release.date.map(|d| d.0),
-        mbid: Some(release.id),
-        cover_url: None,
+fn edition_title(release: &Release) -> String {
+    match release.disambiguation.as_deref() {
+        Some(comment) if !comment.is_empty() => format!("{} ({})", release.title, comment),
+        _ => release.title.clone(),
+    }
+}
+
+fn sort_editions(editions: &mut [Album], tokens: &[String]) {
+    editions.sort_by(|a, b| {
+        matched_tokens(&b.title, tokens)
+            .cmp(&matched_tokens(&a.title, tokens))
+            .then_with(|| {
+                compare_musicbrainz_dates(a.release_date.as_deref(), b.release_date.as_deref())
+            })
+            .then_with(|| a.title.cmp(&b.title))
+    });
+}
+
+fn media_label(release: &Release) -> Option<String> {
+    let formats: Vec<&str> = release
+        .media
+        .as_ref()?
+        .iter()
+        .filter_map(|medium| medium.format.as_deref())
+        .collect();
+    let first = formats.first()?;
+    if formats.iter().all(|format| format == first) {
+        if formats.len() > 1 {
+            Some(format!("{}×{}", formats.len(), first))
+        } else {
+            Some(first.to_string())
+        }
+    } else {
+        Some(formats.join(" + "))
+    }
+}
+
+fn release_track_count(release: &Release) -> Option<u32> {
+    let media = release.media.as_ref()?;
+    let total: u32 = media.iter().map(|medium| medium.track_count).sum();
+    (total > 0).then_some(total)
+}
+
+fn primary_type_name(primary_type: Option<&ReleaseGroupPrimaryType>) -> Option<&'static str> {
+    Some(match primary_type? {
+        ReleaseGroupPrimaryType::Album => "Album",
+        ReleaseGroupPrimaryType::Single => "Single",
+        ReleaseGroupPrimaryType::Ep => "EP",
+        ReleaseGroupPrimaryType::Broadcast => "Broadcast",
+        ReleaseGroupPrimaryType::Other => "Other",
+        _ => return None,
+    })
+}
+
+fn secondary_type_name(secondary_type: &ReleaseGroupSecondaryType) -> &'static str {
+    match secondary_type {
+        ReleaseGroupSecondaryType::AudioDrama => "Audio drama",
+        ReleaseGroupSecondaryType::Audiobook => "Audiobook",
+        ReleaseGroupSecondaryType::Compilation => "Compilation",
+        ReleaseGroupSecondaryType::DjMix => "DJ-mix",
+        ReleaseGroupSecondaryType::Demo => "Demo",
+        ReleaseGroupSecondaryType::Interview => "Interview",
+        ReleaseGroupSecondaryType::Live => "Live",
+        ReleaseGroupSecondaryType::MixtapeStreet => "Mixtape/Street",
+        ReleaseGroupSecondaryType::Remix => "Remix",
+        ReleaseGroupSecondaryType::Soundtrack => "Soundtrack",
+        ReleaseGroupSecondaryType::Spokenword => "Spokenword",
+        _ => "Other",
+    }
+}
+
+fn matches_any(wanted: &[String], value: &str) -> bool {
+    wanted
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(value))
+}
+
+fn format_matches(release: &Release, filters: &SearchFilters) -> bool {
+    if filters.media_formats.is_empty() {
+        return true;
+    }
+    release.media.as_ref().is_some_and(|media| {
+        media
+            .iter()
+            .filter_map(|medium| medium.format.as_deref())
+            .any(|format| matches_any(&filters.media_formats, format))
+    })
+}
+
+fn release_matches(release: &Release, group: &ReleaseGroup, filters: &SearchFilters) -> bool {
+    let primary_match = if filters.release_types.is_empty() {
+        None
+    } else {
+        Some(
+            primary_type_name(group.primary_type.as_ref())
+                .is_some_and(|primary| matches_any(&filters.release_types, primary)),
+        )
     };
 
-    let album_with_tracks = AlbumWithTracks { album, tracks };
+    let secondary_match =
+        if filters.secondary_types.is_empty() {
+            None
+        } else {
+            Some(group.secondary_types.iter().any(|secondary| {
+                matches_any(&filters.secondary_types, secondary_type_name(secondary))
+            }))
+        };
 
-    Ok(album_with_tracks)
+    let type_match = match (primary_match, secondary_match) {
+        (None, None) => true,
+        (Some(primary), None) => primary,
+        (None, Some(secondary)) => secondary,
+        (Some(primary), Some(secondary)) => primary || secondary,
+    };
+
+    type_match && format_matches(release, filters)
 }
 
-pub struct MusicBrainzProvider;
+fn filter_options() -> SearchFilterOptions {
+    SearchFilterOptions {
+        release_types: ["Album", "Single", "EP", "Broadcast", "Other"]
+            .map(str::to_string)
+            .to_vec(),
+        secondary_types: [
+            "Compilation",
+            "Soundtrack",
+            "Spokenword",
+            "Interview",
+            "Audiobook",
+            "Audio drama",
+            "Live",
+            "Remix",
+            "DJ-mix",
+            "Mixtape/Street",
+            "Demo",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        media_formats: [
+            "CD",
+            "Digital Media",
+            "Vinyl",
+            "12\" Vinyl",
+            "10\" Vinyl",
+            "7\" Vinyl",
+            "Cassette",
+            "SACD",
+            "DVD",
+            "Blu-ray",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    }
+}
+
+/// Tracks as printed on this release. MusicBrainz keeps the release's track
+/// title/credit separate from the linked recording, which carries the canonical
+/// (often original-language) title, so the release values win here.
+fn release_tracks(release: &Release) -> Vec<Track> {
+    let mut tracks = Vec::new();
+
+    if let Some(media) = &release.media {
+        for medium in media {
+            let Some(release_tracks) = &medium.tracks else {
+                continue;
+            };
+            for track in release_tracks {
+                let Some(recording) = &track.recording else {
+                    continue;
+                };
+                let credits = track
+                    .artist_credit
+                    .clone()
+                    .or_else(|| recording.artist_credit.clone());
+
+                tracks.push(Track {
+                    id: recording.id.clone(),
+                    title: track.title.clone(),
+                    artist: format_artist_credit(&credits),
+                    album_id: Some(release.id.clone()),
+                    album_title: Some(release.title.clone()),
+                    release_date: release.date.as_ref().map(|d| d.0.clone()),
+                    duration: format_duration(&track.length.or(recording.length)),
+                    mbid: Some(recording.id.clone()),
+                    release_mbid: Some(release.id.clone()),
+                });
+            }
+        }
+    }
+
+    tracks
+}
+
+type EditionKey = (String, Option<String>, Option<String>);
+
+struct GroupAccum {
+    title: String,
+    artist: String,
+    editions: HashMap<EditionKey, Album>,
+}
+
+pub struct MusicBrainzProvider {
+    id: &'static str,
+    name: &'static str,
+    client: &'static MusicBrainzClient,
+}
 
 impl MusicBrainzProvider {
     pub fn new() -> Self {
-        Self
+        Self {
+            id: "musicbrainz",
+            name: "MusicBrainz",
+            client: musicbrainz_client(),
+        }
+    }
+
+    pub fn brainzmash() -> Self {
+        Self {
+            id: "brainzmash",
+            name: "BrainzMash",
+            client: brainzmash_client(),
+        }
+    }
+
+    async fn search(
+        &self,
+        artist: Option<&str>,
+        query: &str,
+        search_type: SearchType,
+        filters: &SearchFilters,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, musicbrainz_rs::Error> {
+        let client = self.client;
+        let mut results = Vec::new();
+
+        info!(
+            "Starting {:?} search for query: '{}', artist: '{:?}'",
+            search_type, query, artist
+        );
+
+        match search_type {
+            SearchType::Track => {
+                let limit = limit.min(100) as u8;
+                let search_results = with_retry("MusicBrainz track search", || {
+                    let mut recording_query = RecordingSearchQuery::query_builder();
+                    if let Some(artist) = artist {
+                        recording_query.artist_name(artist).and();
+                    }
+                    let search_query = recording_query.recording(query).build();
+                    async move {
+                        Recording::search(search_query)
+                            .limit(limit)
+                            .with_releases()
+                            .with_ratings()
+                            .execute_with_client(client)
+                            .await
+                    }
+                })
+                .await?;
+
+                // Sort by rating (descending) - higher rated recordings first
+                let mut recordings: Vec<_> = search_results.entities;
+                recordings.sort_by(|a, b| {
+                    let a_rating = a.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
+                    let b_rating = b.rating.as_ref().and_then(|r| r.value).unwrap_or(0.0);
+                    b_rating
+                        .partial_cmp(&a_rating)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                let mut unique_tracks = HashSet::new();
+
+                for recording in recordings {
+                    let artist_name = format_artist_credit(&recording.artist_credit);
+                    let album_title = recording
+                        .releases
+                        .as_ref()
+                        .and_then(|r| r.first())
+                        .map(|r| r.title.clone())
+                        .unwrap_or_default();
+
+                    // Use a combination of title, artist, and album to define a unique track
+                    let key = (
+                        recording.title.to_lowercase(),
+                        artist_name.to_lowercase(),
+                        album_title.to_lowercase(),
+                    );
+
+                    if !unique_tracks.contains(&key) {
+                        let first_release = recording.releases.as_ref().and_then(|r| r.first());
+                        let track = Track {
+                            id: recording.id.clone(),
+                            title: recording.title.clone(),
+                            artist: artist_name.clone(),
+                            album_id: first_release.map(|release| release.id.clone()),
+                            album_title: first_release.map(|r| r.title.clone()),
+                            release_date: first_release.and_then(|r| r.date.clone().map(|d| d.0)),
+                            duration: format_duration(&recording.length),
+                            mbid: Some(recording.id.clone()),
+                            release_mbid: first_release.map(|r| r.id.clone()),
+                        };
+                        unique_tracks.insert(key);
+                        results.push(SearchResult::Track(track));
+                    }
+                }
+            }
+            SearchType::Album => {
+                let search_results = with_retry("MusicBrainz album search", || {
+                    let search_query = album_search_query(artist, query);
+                    async move {
+                        Release::search(search_query)
+                            .limit(ALBUM_FETCH_LIMIT)
+                            .with_release_groups()
+                            .execute_with_client(client)
+                            .await
+                    }
+                })
+                .await?;
+
+                let tokens = query_tokens(query);
+                let mut groups: HashMap<String, GroupAccum> = HashMap::new();
+                let mut rank: HashMap<String, usize> = HashMap::new();
+
+                for release in search_results.entities {
+                    let Some(group) = release.release_group.as_ref() else {
+                        continue;
+                    };
+                    if !release_matches(&release, group, filters) {
+                        continue;
+                    }
+
+                    let group_id = group.id.clone();
+                    if !rank.contains_key(&group_id) {
+                        let position = rank.len();
+                        rank.insert(group_id.clone(), position);
+                    }
+
+                    let edition = Album {
+                        id: release.id.clone(),
+                        title: edition_title(&release),
+                        artist: format_artist_credit(&release.artist_credit),
+                        release_date: release.date.as_ref().map(|d| d.0.clone()),
+                        mbid: Some(release.id.clone()),
+                        cover_url: Some(format!(
+                            "https://coverartarchive.org/release/{}/front-250",
+                            release.id
+                        )),
+                        country: release.country.clone(),
+                        media: media_label(&release),
+                        track_count: release_track_count(&release),
+                    };
+
+                    let accum = groups.entry(group_id).or_insert_with(|| GroupAccum {
+                        title: group.title.clone(),
+                        artist: format_artist_credit(&group.artist_credit),
+                        editions: HashMap::new(),
+                    });
+
+                    let key = (
+                        edition.title.clone(),
+                        edition.country.clone(),
+                        edition.media.clone(),
+                    );
+                    match accum.editions.entry(key) {
+                        Entry::Vacant(slot) => {
+                            slot.insert(edition);
+                        }
+                        Entry::Occupied(mut slot) => {
+                            let existing_date = slot.get().release_date.clone();
+                            if compare_musicbrainz_dates(
+                                existing_date.as_deref(),
+                                edition.release_date.as_deref(),
+                            ) == std::cmp::Ordering::Greater
+                            {
+                                slot.insert(edition);
+                            }
+                        }
+                    }
+                }
+
+                let mut grouped = Vec::with_capacity(groups.len());
+                for (group_id, accum) in groups {
+                    let mut editions: Vec<Album> = accum.editions.into_values().collect();
+                    sort_editions(&mut editions, &tokens);
+                    let Some(primary_edition) = editions.first() else {
+                        continue;
+                    };
+                    grouped.push(SearchResult::AlbumGroup(AlbumGroup {
+                        cover_url: Some(format!(
+                            "https://coverartarchive.org/release-group/{group_id}/front-250"
+                        )),
+                        id: group_id.clone(),
+                        title: album_title(&accum.title, &primary_edition.title, &tokens),
+                        artist: accum.artist,
+                        release_date: primary_edition.release_date.clone(),
+                        mbid: Some(group_id),
+                        editions,
+                    }));
+                }
+
+                grouped.sort_by(|a, b| {
+                    let (SearchResult::AlbumGroup(a), SearchResult::AlbumGroup(b)) = (a, b) else {
+                        return std::cmp::Ordering::Equal;
+                    };
+                    let a_rank = rank.get(&a.id).copied().unwrap_or(usize::MAX);
+                    let b_rank = rank.get(&b.id).copied().unwrap_or(usize::MAX);
+                    a_rank.cmp(&b_rank).then_with(|| {
+                        compare_musicbrainz_dates(
+                            a.release_date.as_deref(),
+                            b.release_date.as_deref(),
+                        )
+                    })
+                });
+                grouped.truncate(limit);
+                results.extend(grouped);
+            }
+        }
+
+        Ok(results)
+    }
+
+    async fn fetch_album(
+        &self,
+        release_id: &str,
+    ) -> Result<AlbumWithTracks, musicbrainz_rs::Error> {
+        let client = self.client;
+
+        // Fetch the release with recordings (tracks) and artist credits for the tracks.
+        let release = with_retry("MusicBrainz album fetch", || async {
+            Release::fetch()
+                .id(release_id)
+                .with_recordings()
+                .with_artist_credits()
+                .execute_with_client(client)
+                .await
+        })
+        .await?;
+
+        let tracks = release_tracks(&release);
+
+        let media = media_label(&release);
+        let track_count = release_track_count(&release);
+        let album = Album {
+            id: release.id.clone(),
+            title: edition_title(&release),
+            artist: format_artist_credit(&release.artist_credit),
+            release_date: release.date.map(|d| d.0),
+            mbid: Some(release.id),
+            cover_url: None,
+            country: release.country.clone(),
+            media,
+            track_count,
+        };
+
+        Ok(AlbumWithTracks { album, tracks })
     }
 }
 
@@ -394,21 +704,21 @@ impl Default for MusicBrainzProvider {
 #[async_trait::async_trait]
 impl crate::MetadataProvider for MusicBrainzProvider {
     fn id(&self) -> &'static str {
-        "musicbrainz"
+        self.id
     }
 
     fn name(&self) -> &'static str {
-        "MusicBrainz"
+        self.name
     }
 
     async fn search_albums(
         &self,
         artist: Option<&str>,
         query: &str,
+        filters: &SearchFilters,
         limit: usize,
     ) -> crate::error::Result<Vec<SearchResult>> {
-        let artist_opt = artist.map(String::from);
-        search(&artist_opt, query, SearchType::Album, limit.min(100) as u8)
+        self.search(artist, query, SearchType::Album, filters, limit)
             .await
             .map_err(|e| crate::error::SoulseekError::Api {
                 status: 500,
@@ -422,21 +732,293 @@ impl crate::MetadataProvider for MusicBrainzProvider {
         query: &str,
         limit: usize,
     ) -> crate::error::Result<Vec<SearchResult>> {
-        let artist_opt = artist.map(String::from);
-        search(&artist_opt, query, SearchType::Track, limit.min(100) as u8)
+        self.search(
+            artist,
+            query,
+            SearchType::Track,
+            &SearchFilters::default(),
+            limit,
+        )
+        .await
+        .map_err(|e| crate::error::SoulseekError::Api {
+            status: 500,
+            message: e.to_string(),
+        })
+    }
+
+    fn search_filter_options(&self) -> SearchFilterOptions {
+        filter_options()
+    }
+
+    async fn get_album(&self, id: &str) -> crate::error::Result<AlbumWithTracks> {
+        self.fetch_album(id)
             .await
             .map_err(|e| crate::error::SoulseekError::Api {
                 status: 500,
                 message: e.to_string(),
             })
     }
+}
 
-    async fn get_album(&self, id: &str) -> crate::error::Result<AlbumWithTracks> {
-        find_album(id)
-            .await
-            .map_err(|e| crate::error::SoulseekError::Api {
-                status: 500,
-                message: e.to_string(),
-            })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(id: &str, title: &str, date: &str, status: &str, formats: &[&str]) -> Release {
+        let media: Vec<serde_json::Value> = formats
+            .iter()
+            .map(|format| serde_json::json!({ "format": format, "track-count": 10 }))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "title": title,
+            "date": date,
+            "status": status,
+            "media": media,
+        }))
+        .unwrap()
+    }
+
+    fn release_group(primary: &str, secondary: &[&str]) -> ReleaseGroup {
+        serde_json::from_value(serde_json::json!({
+            "id": "group",
+            "title": "Metaphor: ReFantazio Original Soundtrack",
+            "primary-type": primary,
+            "secondary-types": secondary,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn release_track_titles_win_over_recording_titles() {
+        let release: Release = serde_json::from_value(serde_json::json!({
+            "id": "release-us",
+            "title": "Metaphor: ReFantazio Original Soundtrack",
+            "date": "2025-01-15",
+            "media": [{
+                "position": 1,
+                "track-count": 2,
+                "format": "Digital Media",
+                "tracks": [
+                    {
+                        "id": "track-1",
+                        "number": "1",
+                        "position": 1,
+                        "title": "The End of the Beginning",
+                        "length": 120000,
+                        "artist-credit": [
+                            {"name": "ATLUS Sound Team", "joinphrase": "", "artist": {}}
+                        ],
+                        "recording": {
+                            "id": "rec-1",
+                            "title": "始まりの終わり",
+                            "length": 121000,
+                            "artist-credit": [
+                                {"name": "アトラスサウンドチーム", "joinphrase": "", "artist": {}}
+                            ]
+                        }
+                    },
+                    {
+                        "id": "track-2",
+                        "number": "2",
+                        "position": 2,
+                        "title": "Master Tactician",
+                        "recording": {
+                            "id": "rec-2",
+                            "title": "謀略の主",
+                            "length": 90000,
+                            "artist-credit": [
+                                {"name": "アトラスサウンドチーム", "joinphrase": "", "artist": {}}
+                            ]
+                        }
+                    }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let tracks = release_tracks(&release);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].title, "The End of the Beginning");
+        assert_eq!(tracks[0].artist, "ATLUS Sound Team");
+        assert_eq!(tracks[0].duration.as_deref(), Some("02:00"));
+        assert_eq!(tracks[0].id, "rec-1");
+        assert_eq!(tracks[1].title, "Master Tactician");
+        assert_eq!(tracks[1].artist, "アトラスサウンドチーム");
+        assert_eq!(tracks[1].duration.as_deref(), Some("01:30"));
+    }
+
+    #[test]
+    fn album_query_searches_release_and_alias_titles() {
+        assert_eq!(
+            album_search_query(None, "Metaphor ReFantazio"),
+            "query=(release:\"Metaphor ReFantazio\" OR alias:\"Metaphor ReFantazio\")"
+        );
+    }
+
+    #[test]
+    fn album_query_keeps_the_artist_term_as_an_and() {
+        assert_eq!(
+            album_search_query(Some("Shoji Meguro"), "Metaphor"),
+            "query=artist:\"Shoji Meguro\" AND (release:Metaphor OR alias:Metaphor)"
+        );
+    }
+
+    #[test]
+    fn album_title_falls_back_to_the_release_title_for_localized_group_titles() {
+        let tokens = query_tokens("Metaphor Refantazio");
+        assert_eq!(
+            album_title(
+                "メタファー：リファンタジオ オリジナル・サウンドトラック",
+                "Metaphor: ReFantazio Original Soundtrack",
+                &tokens
+            ),
+            "Metaphor: ReFantazio Original Soundtrack"
+        );
+    }
+
+    #[test]
+    fn album_title_keeps_the_group_title_when_it_matches_the_query() {
+        let tokens = query_tokens("Metaphor Refantazio");
+        assert_eq!(
+            album_title(
+                "Metaphor: ReFantazio Special Soundtrack",
+                "Metaphor: ReFantazio Special Soundtrack",
+                &tokens
+            ),
+            "Metaphor: ReFantazio Special Soundtrack"
+        );
+    }
+
+    fn album(id: &str, title: &str, date: Option<&str>) -> Album {
+        Album {
+            id: id.to_string(),
+            title: title.to_string(),
+            artist: "アトラスサウンドチーム".to_string(),
+            release_date: date.map(str::to_string),
+            mbid: Some(id.to_string()),
+            cover_url: None,
+            country: None,
+            media: None,
+            track_count: None,
+        }
+    }
+
+    #[test]
+    fn localized_editions_sort_after_titles_that_match_the_query() {
+        let mut editions = vec![
+            album(
+                "jp",
+                "メタファー：リファンタジオ オリジナル・サウンドトラック",
+                Some("2025-01-15"),
+            ),
+            album(
+                "en",
+                "Metaphor: ReFantazio Original Soundtrack",
+                Some("2025-01-15"),
+            ),
+        ];
+        sort_editions(&mut editions, &query_tokens("Metaphor Refantazio"));
+        assert_eq!(editions[0].id, "en");
+    }
+
+    #[test]
+    fn editions_of_matching_titles_sort_by_date() {
+        let mut editions = vec![
+            album(
+                "later",
+                "Metaphor: ReFantazio Original Soundtrack",
+                Some("2025-06-01"),
+            ),
+            album(
+                "earlier",
+                "Metaphor: ReFantazio Original Soundtrack",
+                Some("2025-01-15"),
+            ),
+        ];
+        sort_editions(&mut editions, &query_tokens("Metaphor Refantazio"));
+        assert_eq!(editions[0].id, "earlier");
+    }
+
+    #[test]
+    fn no_filters_keep_every_release() {
+        let release = release("r", "Album", "2024", "Official", &["CD", "CD"]);
+        let group = release_group("Album", &["Soundtrack"]);
+        assert!(release_matches(&release, &group, &SearchFilters::default()));
+    }
+
+    #[test]
+    fn release_type_filter_rejects_other_types() {
+        let release = release("r", "Album", "2024", "Official", &["CD"]);
+        let group = release_group("Single", &[]);
+        let filters = SearchFilters {
+            release_types: vec!["Album".to_string(), "EP".to_string()],
+            ..Default::default()
+        };
+        assert!(!release_matches(&release, &group, &filters));
+    }
+
+    #[test]
+    fn secondary_type_filter_matches_soundtracks() {
+        let release = release("r", "Album", "2024", "Official", &["CD"]);
+        let group = release_group("Album", &["Soundtrack"]);
+        let filters = SearchFilters {
+            secondary_types: vec!["Soundtrack".to_string()],
+            ..Default::default()
+        };
+        assert!(release_matches(&release, &group, &filters));
+    }
+
+    #[test]
+    fn type_and_secondary_selections_combine_as_a_union() {
+        let release = release("r", "Single", "2024", "Official", &["CD"]);
+        let group = release_group("Single", &[]);
+        let filters = SearchFilters {
+            release_types: vec!["Album".to_string(), "Single".to_string()],
+            secondary_types: vec!["Soundtrack".to_string()],
+            ..Default::default()
+        };
+        assert!(release_matches(&release, &group, &filters));
+    }
+
+    #[test]
+    fn secondary_only_filter_rejects_groups_without_secondaries() {
+        let release = release("r", "Album", "2024", "Official", &["CD"]);
+        let group = release_group("Album", &[]);
+        let filters = SearchFilters {
+            secondary_types: vec!["Soundtrack".to_string()],
+            ..Default::default()
+        };
+        assert!(!release_matches(&release, &group, &filters));
+    }
+
+    #[test]
+    fn media_filter_accepts_multi_disc_releases() {
+        let release = release("r", "Album", "2024", "Official", &["CD", "CD", "CD"]);
+        let group = release_group("Album", &[]);
+        let filters = SearchFilters {
+            media_formats: vec!["CD".to_string()],
+            ..Default::default()
+        };
+        assert!(release_matches(&release, &group, &filters));
+    }
+
+    #[test]
+    fn media_filter_rejects_other_formats() {
+        let release = release("r", "Album", "2024", "Official", &["Digital Media"]);
+        let group = release_group("Album", &[]);
+        let filters = SearchFilters {
+            media_formats: vec!["CD".to_string()],
+            ..Default::default()
+        };
+        assert!(!release_matches(&release, &group, &filters));
+    }
+
+    #[test]
+    fn filter_options_are_offered_for_musicbrainz() {
+        let options = filter_options();
+        assert!(options.is_supported());
+        assert!(options.release_types.contains(&"Album".to_string()));
+        assert!(options.media_formats.contains(&"CD".to_string()));
     }
 }
