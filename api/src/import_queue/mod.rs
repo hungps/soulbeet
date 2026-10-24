@@ -2,18 +2,20 @@
 //! import through here, so a row waiting for another job's import says so
 //! instead of reading "Importing".
 
+mod choice;
 mod retry;
 mod rows;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-pub use retry::{forget_retries, retry_import_for};
+pub use choice::Refusal;
+pub use retry::{forget_retries, import_choices_for, retry_import_for};
 
 use async_trait::async_trait;
 use futures::FutureExt;
-use shared::download::{DownloadEvent, DownloadProgress, DownloadState};
+use shared::download::{DownloadEvent, DownloadProgress, DownloadState, MatchChoices};
 use soulbeet::audio::{count_audio_files, is_audio_path};
-use soulbeet::{ImportMode, ImportOutcome, ImportResult, MusicImporter};
+use soulbeet::{DriverChoice, ImportMode, ImportOutcome, ImportResult, MusicImporter};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -45,6 +47,10 @@ pub struct ImportJob {
     pub snapshot_target: bool,
     /// Prune the emptied source folders up to (not including) this root.
     pub cleanup_root: Option<PathBuf>,
+    /// How this run decides on a match.
+    pub choice: DriverChoice,
+    /// What the last automatic run of these files left to pick from.
+    pub choices: Option<Arc<MatchChoices>>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,13 +59,18 @@ pub struct JobOutcome {
     /// Audio files the run added, relative to the target. Only filled for
     /// `snapshot_target` jobs.
     pub new_files: Vec<PathBuf>,
+    /// The importer ran. Only then does an automatic run's result say what
+    /// can be picked.
+    ran: bool,
 }
 
 impl JobOutcome {
+    /// The outcome of a job the importer never ran.
     fn of(result: ImportResult) -> Self {
         JobOutcome {
             result,
             new_files: vec![],
+            ran: false,
         }
     }
 }
@@ -298,7 +309,9 @@ impl Shared {
             true => Some(audio_files_under(target).await),
             false => None,
         };
-        let result = importer.import(&sources, target, job.mode).await;
+        let result = importer
+            .import(&sources, target, job.mode, &job.choice)
+            .await;
         let new_files = match before {
             Some(before) => {
                 let mut new: Vec<PathBuf> = audio_files_under(target)
@@ -311,7 +324,11 @@ impl Shared {
             }
             None => vec![],
         };
-        JobOutcome { result, new_files }
+        JobOutcome {
+            result,
+            new_files,
+            ran: true,
+        }
     }
 
     async fn finish(&self, job: &ImportJob, outcome: JobOutcome, state: &watch::Sender<JobState>) {
@@ -343,11 +360,22 @@ impl Shared {
                 }
             }
         }
+        // An automatic run of the importer finds what can be picked. A chosen
+        // run keeps it, so a pick that failed still offers the others, and so
+        // does a run the importer never got (broken, unavailable, panicked).
+        let choices = match (&job.choice, outcome.ran) {
+            (DriverChoice::Auto, true) => outcome.result.choices.clone().map(Arc::new),
+            _ => job.choices.clone(),
+        };
+        let job = Arc::new(ImportJob {
+            choices,
+            ..job.clone()
+        });
         // Stored before the rows go out, so their Retry button always finds it.
-        self.retries.record(job, &outcome.result);
+        self.retries.record(&job, &outcome.result);
         let _emit = self.emit_lock.lock().await;
         if let Some(owner) = &job.owner {
-            let rows = rows_for_done(&owner.rows, job, &outcome);
+            let rows = rows_for_done(&owner.rows, &job, &outcome);
             self.deps
                 .emit(&owner.username, DownloadEvent::Progress(rows))
                 .await;
@@ -395,6 +423,8 @@ pub async fn import_to_library(src: &Path, target: &Path) -> Result<(), String> 
             owner: None,
             snapshot_target: false,
             cleanup_root: None,
+            choice: DriverChoice::Auto,
+            choices: None,
         })
         .await
         .wait()
@@ -453,6 +483,8 @@ mod tests {
             owner: None,
             snapshot_target: false,
             cleanup_root: None,
+            choice: DriverChoice::Auto,
+            choices: None,
         }
     }
 

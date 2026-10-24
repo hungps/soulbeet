@@ -11,6 +11,8 @@ use std::sync::LazyLock;
 
 static RE_ITEMS_HEADER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(.*) \((\d+) items\)$").unwrap());
+static RE_UNMATCHED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Unmatched tracks \((\d+)\):$").unwrap());
 static RE_CANDIDATES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:Evaluating|Found) (\d+) candidates\.$").unwrap());
 static RE_ALREADY: LazyLock<Regex> =
@@ -97,6 +99,9 @@ pub(crate) struct Classifier {
     candidates_differ: bool,
     /// Sum of the album headers' `(N items)`, when any was printed.
     header_items: Option<u32>,
+    /// Files of applied album matches that fit no track of the release:
+    /// beets leaves them where they are.
+    unmatched_items: u32,
     stdout_skipping: bool,
     stdout_asis: bool,
     already_in_library: bool,
@@ -120,6 +125,7 @@ impl Classifier {
             candidates: None,
             candidates_differ: false,
             header_items: None,
+            unmatched_items: 0,
             stdout_skipping: false,
             stdout_asis: false,
             already_in_library: false,
@@ -154,6 +160,9 @@ impl Classifier {
         } else if let Some(c) = RE_ITEMS_HEADER.captures(line) {
             let items: u32 = c[2].parse().unwrap_or(0);
             self.header_items = Some(self.header_items.unwrap_or(0).saturating_add(items));
+        } else if let Some(c) = RE_UNMATCHED.captures(line) {
+            let items: u32 = c[1].parse().unwrap_or(0);
+            self.unmatched_items = self.unmatched_items.saturating_add(items);
         }
     }
 
@@ -259,6 +268,7 @@ impl Classifier {
             outcome,
             output_tail: tail,
             tasks,
+            choices: None,
         }
     }
 
@@ -300,7 +310,9 @@ impl Classifier {
             ));
         }
         let taken = match self.mode {
-            ImportMode::Album => self.header_items,
+            ImportMode::Album => self
+                .header_items
+                .map(|items| items.saturating_sub(self.unmatched_items)),
             ImportMode::Singleton => Some(self.tasks.imported),
         };
         if let Some(taken) = taken {
@@ -533,6 +545,36 @@ mod tests {
         );
     }
 
+    /// Import as-is runs `beet import -A`, which leaves no marker either, so
+    /// the importer passes `autotag_off` for it.
+    #[test]
+    fn minus_a_imports_are_untagged_when_the_importer_says_so() {
+        let album = classify(fixture!("asis"), true);
+        assert_eq!(album.outcome, imported(true, &[]));
+        assert_eq!(
+            album.tasks,
+            TaskCount {
+                imported: 1,
+                total: 1
+            }
+        );
+        assert_eq!(album.to_string(), "Imported as-is (untagged)");
+        assert_eq!(
+            classify(fixture!("asis"), false).outcome,
+            imported(false, &[])
+        );
+
+        let single = classify(fixture!("asis_single"), true);
+        assert_eq!(single.outcome, imported(true, &[]));
+        assert_eq!(
+            single.tasks,
+            TaskCount {
+                imported: 2,
+                total: 2
+            }
+        );
+    }
+
     #[test]
     fn sources_without_audio_are_nothing_to_import() {
         for f in [fixture!("empty"), fixture!("nonmusic")] {
@@ -550,6 +592,25 @@ mod tests {
             imported(false, &["1 file(s) were not imported"])
         );
         assert_eq!(result.to_string(), "Imported; 1 file(s) were not imported");
+    }
+
+    #[test]
+    fn files_left_out_of_an_applied_album_match_are_a_warning() {
+        // A picked release with two tracks for a folder of three files.
+        let f = fixture!("pick_extra");
+        assert!(f.stdout.lines().any(|l| l == "/src (3 items)"));
+        let result = classify(f, false);
+        assert_eq!(
+            result.outcome,
+            imported(false, &["1 file(s) were not imported"])
+        );
+        assert_eq!(
+            result.tasks,
+            TaskCount {
+                imported: 1,
+                total: 1
+            }
+        );
     }
 
     #[test]
