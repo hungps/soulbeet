@@ -3,10 +3,13 @@ use dioxus::prelude::*;
 use shared::metadata::Track;
 
 use super::download_icon::{DownloadIcon, DownloadRowState};
+use super::request_badge;
 
 #[derive(Props, PartialEq, Clone)]
 pub struct Props {
     pub track: Track,
+    #[props(default)]
+    pub request_state: Option<String>,
     pub index: usize,
     pub download_state: DownloadRowState,
     pub folders: Vec<Folder>,
@@ -38,6 +41,8 @@ pub fn InlineTrackRow(props: Props) -> Element {
                 class: "text-sm font-mono text-gray-300 flex-grow truncate",
                 "{track.title}"
             }
+
+            {request_badge(&props.request_state)}
 
             // Duration (conditional)
             if let Some(duration) = &track.duration {

@@ -11,6 +11,9 @@ pub mod keys {
     pub const ALBUM_MODE: &str = "album_mode";
     pub const MUSICBRAINZ_SERVERS: &str = "musicbrainz_servers";
     pub const PLEX_CLIENT_ID: &str = "plex_client_id";
+    pub const LIBRARY_SCAN_INTERVAL: &str = "library_scan_interval";
+    pub const LIBRARY_WATCH_ENABLED: &str = "library_watch_enabled";
+    pub const LIBRARY_REQUEST_RETRY_INTERVAL: &str = "library_request_retry_interval";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

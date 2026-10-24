@@ -26,16 +26,16 @@ pub fn DownloadItem(file: DownloadProgress, on_cancel: EventHandler<DownloadProg
             "DOWNLOADED",
         ),
         DownloadState::Importing => (
-            "Importing...",
+            "Tagging with beets",
             "border-beet-leaf/50",
             "bg-beet-leaf/20 text-beet-leaf",
-            "BEETS",
+            "TAGGING",
         ),
         DownloadState::Imported => (
-            "Imported",
+            "Tagged",
             "border-green-500/50",
             "bg-green-500/20 text-green-300",
-            "LIB",
+            "TAGGED",
         ),
         DownloadState::ImportSkipped => (
             "Import Skipped",

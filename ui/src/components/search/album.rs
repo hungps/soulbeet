@@ -1,15 +1,21 @@
 use api::models::folder::Folder;
 use dioxus::prelude::*;
+use shared::library::{DownloadActivity, LibraryMatchInfo};
 use shared::metadata::{Album, Track};
 use std::collections::HashMap;
 
 use super::download_icon::{DownloadIcon, DownloadRowState};
 use super::inline_track_panel::InlineTrackPanel;
+use super::{library_badge, request_badge};
 use crate::CoverArt;
 
 #[derive(Props, PartialEq, Clone)]
 pub struct Props {
     pub album: Album,
+    #[props(default)]
+    pub library_match: Option<LibraryMatchInfo>,
+    #[props(default)]
+    pub request_state: Option<String>,
     pub is_expanded: bool,
     pub on_toggle: Callback,
     pub on_search_sources: Callback,
@@ -19,6 +25,7 @@ pub struct Props {
     pub active_menu: Signal<Option<String>>,
     pub tracks: Option<Vec<Track>>,
     pub download_states: Signal<HashMap<String, DownloadRowState>>,
+    pub activity: Signal<DownloadActivity>,
     #[props(into)]
     pub on_download: EventHandler<()>,
     #[props(into)]
@@ -52,7 +59,11 @@ pub fn AlbumResult(props: Props) -> Element {
                     p { class: "text-sm font-bold text-white truncate group-hover:text-beet-accent transition-colors",
                         "{album.title}"
                     }
-                    p { class: "text-xs text-gray-400 font-mono truncate", "{album.artist}" }
+                    div { class: "flex items-center gap-2 min-w-0",
+                        p { class: "text-xs text-gray-400 font-mono truncate", "{album.artist}" }
+                        {library_badge(&props.library_match)}
+                        {request_badge(&props.request_state)}
+                    }
                     {
                         let meta = [
                             album.country.clone(),
@@ -132,6 +143,7 @@ pub fn AlbumResult(props: Props) -> Element {
                     InlineTrackPanel {
                         tracks: if props.is_expanded { props.tracks.clone() } else { Some(vec![]) },
                         download_states: props.download_states,
+                        activity: props.activity,
                         folders: props.folders.clone(),
                         selected_folder_id: props.selected_folder_id.clone(),
                         active_menu: props.active_menu,

@@ -1,12 +1,36 @@
 use dioxus::prelude::*;
 use shared::navidrome::LibraryStats;
 
-#[derive(PartialEq, Clone, Copy, Default)]
+pub mod library;
+pub use library::LibraryTab;
+
+#[derive(PartialEq, Clone, Copy, Default, Debug)]
 pub enum DashboardTab {
     #[default]
     Overview,
+    Library,
     History,
     Discovery,
+}
+
+impl DashboardTab {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Library => "library",
+            Self::History => "history",
+            Self::Discovery => "discovery",
+        }
+    }
+
+    pub fn from_key(value: &str) -> Self {
+        match value {
+            "library" => Self::Library,
+            "history" => Self::History,
+            "discovery" => Self::Discovery,
+            _ => Self::Overview,
+        }
+    }
 }
 
 #[component]
@@ -29,6 +53,7 @@ pub fn DashboardTabs(active: DashboardTab, on_change: EventHandler<DashboardTab>
     rsx! {
         nav { class: "flex items-center gap-1 bg-beet-panel/50 p-1.5 rounded-lg border border-white/5 backdrop-blur-sm overflow-x-auto whitespace-nowrap",
             {tab("Overview", DashboardTab::Overview)}
+            {tab("Library", DashboardTab::Library)}
             {tab("History", DashboardTab::History)}
             {tab("Discovery", DashboardTab::Discovery)}
         }

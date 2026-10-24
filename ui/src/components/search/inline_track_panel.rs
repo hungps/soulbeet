@@ -1,5 +1,6 @@
 use api::models::folder::Folder;
 use dioxus::prelude::*;
+use shared::library::{track_activity_key, DownloadActivity};
 use shared::metadata::Track;
 use std::collections::HashMap;
 
@@ -12,6 +13,7 @@ const SKELETON_WIDTHS: [u8; 4] = [60, 75, 50, 65];
 pub struct Props {
     pub tracks: Option<Vec<Track>>,
     pub download_states: Signal<HashMap<String, DownloadRowState>>,
+    pub activity: Signal<DownloadActivity>,
     pub folders: Vec<Folder>,
     pub selected_folder_id: Option<String>,
     pub active_menu: Signal<Option<String>>,
@@ -63,10 +65,17 @@ pub fn InlineTrackPanel(props: Props) -> Element {
                                     };
                                     let track_for_dl = track.clone();
                                     let track_for_override = track.clone();
+                                    let request_state = props
+                                        .activity
+                                        .read()
+                                        .tracks
+                                        .get(&track_activity_key(&track.artist, &track.title))
+                                        .cloned();
                                     rsx! {
                                         InlineTrackRow {
                                             key: "{track.id}",
                                             track: track.clone(),
+                                            request_state,
                                             index: idx,
                                             download_state: dl_state,
                                             folders: props.folders.clone(),

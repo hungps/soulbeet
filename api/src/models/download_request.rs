@@ -7,6 +7,8 @@ use shared::download::DownloadState;
 use shared::download::{DownloadRequestContext, DownloadableItem};
 #[cfg(feature = "server")]
 use shared::download::{DownloadRequestSummary, DownloadRequestTrack};
+#[cfg(feature = "server")]
+use shared::library::{album_activity_key, normalize_key, track_activity_key, DownloadActivity};
 
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
@@ -81,6 +83,24 @@ pub fn state_is_terminal_key(state: &str) -> bool {
         state,
         "imported" | "import_skipped" | "failed" | "cancelled" | "stopped"
     )
+}
+
+#[cfg(feature = "server")]
+async fn track_in_library(user_id: &str, artist: &str, title: &str) -> Result<bool, String> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM library_tracks t
+            JOIN folders f ON f.id = t.folder_id
+            WHERE f.user_id = ? AND t.artist_key = ? AND t.title_key = ?
+        )",
+    )
+    .bind(user_id)
+    .bind(normalize_key(artist))
+    .bind(normalize_key(title))
+    .fetch_one(&*DB)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(exists != 0)
 }
 
 impl DownloadRequestTrackRow {
@@ -224,6 +244,16 @@ impl DownloadRequestRow {
     }
 
     #[cfg(feature = "server")]
+    pub async fn list_active() -> Result<Vec<Self>, String> {
+        sqlx::query_as::<_, Self>(
+            "SELECT * FROM download_requests WHERE state = 'active' ORDER BY created_at",
+        )
+        .fetch_all(&*DB)
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    #[cfg(feature = "server")]
     pub async fn set_state(id: &str, state: &str) -> Result<(), String> {
         sqlx::query(
             "UPDATE download_requests
@@ -310,21 +340,171 @@ impl DownloadRequestRow {
 
         let mut removed = Vec::new();
         for row in rows {
-            let pending: Option<i64> = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM download_request_tracks
-                 WHERE request_id = ?
-                   AND state NOT IN ('imported', 'import_skipped', 'failed', 'cancelled', 'stopped')",
+            let counts: (i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN state = 'imported' THEN 1 ELSE 0 END), 0)
+                 FROM download_request_tracks WHERE request_id = ?",
             )
             .bind(&row.id)
             .fetch_one(&*DB)
             .await
             .map_err(|e| e.to_string())?;
-            if pending.unwrap_or(0) == 0 {
+            if counts.0 > 0 && counts.1 == counts.0 {
                 Self::delete(&row.id).await?;
                 removed.push(row.id);
             }
         }
         Ok(removed)
+    }
+
+    #[cfg(feature = "server")]
+    pub async fn delete_failed(user_id: &str) -> Result<Vec<String>, String> {
+        let rows = sqlx::query_as::<_, Self>(
+            "SELECT * FROM download_requests
+             WHERE user_id = ? AND state IN ('completed', 'stopped')",
+        )
+        .bind(user_id)
+        .fetch_all(&*DB)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let mut removed = Vec::new();
+        for row in rows {
+            let tracks = DownloadRequestTrackRow::list_for_request(&row.id).await?;
+            let has_failed = tracks.iter().any(|track| track.state == "failed");
+            let settled = tracks.iter().all(|track| track.state_is_terminal());
+            if has_failed && settled {
+                Self::delete(&row.id).await?;
+                removed.push(row.id);
+            }
+        }
+        Ok(removed)
+    }
+
+    #[cfg(feature = "server")]
+    pub async fn activity(user_id: &str) -> Result<DownloadActivity, String> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            request_label: String,
+            request_artist: Option<String>,
+            track_title: Option<String>,
+            track_artist: Option<String>,
+            track_state: Option<String>,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT r.label AS request_label, r.artist AS request_artist,
+                    t.title AS track_title, t.artist AS track_artist, t.state AS track_state
+             FROM download_requests r
+             LEFT JOIN download_request_tracks t ON t.request_id = r.id
+             WHERE r.user_id = ? AND r.state IN ('active', 'stopped')
+               AND COALESCE(r.backend, '') != 'beets'",
+        )
+        .bind(user_id)
+        .fetch_all(&*DB)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let mut activity = DownloadActivity::default();
+        let mut album_states: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut album_active_counts: std::collections::BTreeMap<String, u32> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let track_downloading = row
+                .track_state
+                .as_deref()
+                .map(|state| matches!(state, "in_progress" | "completed" | "importing"))
+                .unwrap_or(false);
+            let track_pending = row
+                .track_state
+                .as_deref()
+                .map(|state| {
+                    !matches!(
+                        state,
+                        "imported" | "import_skipped" | "failed" | "cancelled" | "stopped"
+                    )
+                })
+                .unwrap_or(false);
+            let state = if track_downloading {
+                "downloading".to_string()
+            } else {
+                "requested".to_string()
+            };
+            let album_key = album_activity_key(
+                row.request_artist.as_deref().unwrap_or_default(),
+                &row.request_label,
+            );
+            let priority = |value: &str| if value == "downloading" { 1 } else { 0 };
+            album_states
+                .entry(album_key.clone())
+                .and_modify(|current| {
+                    if priority(&state) > priority(current) {
+                        *current = state.clone();
+                    }
+                })
+                .or_insert(state.clone());
+            if track_pending {
+                if let (Some(title), Some(artist)) = (&row.track_title, &row.track_artist) {
+                    if track_in_library(user_id, artist, title)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        *album_active_counts.entry(album_key.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            if let (Some(title), Some(artist)) = (row.track_title, row.track_artist) {
+                let key = track_activity_key(&artist, &title);
+                activity
+                    .tracks
+                    .entry(key)
+                    .and_modify(|current| {
+                        if priority(&state) > priority(current) {
+                            *current = state.clone();
+                        }
+                    })
+                    .or_insert(state);
+            }
+        }
+        activity.albums = album_states;
+        activity.album_active_counts = album_active_counts;
+
+        let user_id_owned = user_id.to_string();
+        if let Ok(pending) =
+            crate::models::request_queue::LibraryRequestRow::list_for_user(user_id).await
+        {
+            for request in pending {
+                let album_key = album_activity_key(
+                    request.artist.as_deref().unwrap_or_default(),
+                    &request.label,
+                );
+                activity
+                    .albums
+                    .entry(album_key.clone())
+                    .or_insert_with(|| "requested".to_string());
+                if let Ok(query) =
+                    serde_json::from_str::<shared::download::DownloadQuery>(&request.query_json)
+                {
+                    for track in query.tracks {
+                        if track_in_library(&user_id_owned, &track.artist, &track.title)
+                            .await
+                            .unwrap_or(false)
+                        {
+                            *activity
+                                .album_active_counts
+                                .entry(album_key.clone())
+                                .or_insert(0) += 1;
+                        }
+                        activity
+                            .tracks
+                            .entry(track_activity_key(&track.artist, &track.title))
+                            .or_insert_with(|| "requested".to_string());
+                    }
+                }
+            }
+        }
+        Ok(activity)
     }
 }
 

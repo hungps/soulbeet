@@ -406,6 +406,8 @@ mod tests {
             album_title: Some("An Album".to_string()),
             release_date: None,
             duration: None,
+            track_number: None,
+            disc_number: None,
             mbid: None,
             release_mbid: None,
         }

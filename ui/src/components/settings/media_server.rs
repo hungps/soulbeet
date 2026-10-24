@@ -1,8 +1,6 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
-use shared::media_server::{
-    MediaPathMapping, MediaServerKind, MediaServerView, PlexServerOption,
-};
+use shared::media_server::{MediaPathMapping, MediaServerKind, MediaServerView, PlexServerOption};
 use shared::system::MediaServerStatus;
 
 use api::PlexLinkPoll;
@@ -388,7 +386,9 @@ fn PlexPanel(
             let secure_value = secure();
             let index = next
                 .iter()
-                .position(|server| configured.as_deref() == Some(server_url(server, secure_value).as_str()))
+                .position(|server| {
+                    configured.as_deref() == Some(server_url(server, secure_value).as_str())
+                })
                 .unwrap_or(0);
             selected.set(index);
             last_servers.set(Some(next));

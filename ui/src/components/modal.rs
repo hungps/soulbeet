@@ -26,7 +26,7 @@ pub fn Modal(props: Props) -> Element {
 
         // Content
         div {
-          class: "bg-beet-panel border border-white/10 max-h-[85vh] overflow-hidden flex flex-col rounded-lg shadow-2xl max-w-lg w-full pointer-events-auto transform transition-all",
+          class: "bg-beet-panel border border-white/10 max-h-[85vh] overflow-hidden flex flex-col rounded-lg shadow-2xl max-w-lg w-full pointer-events-auto transform transform-gpu transition-all",
           onclick: move |event| event.stop_propagation(),
           // Header Container
           div { class: "flex items-center justify-between p-4 border-b border-white/10 bg-black/20",
@@ -50,7 +50,7 @@ pub fn Modal(props: Props) -> Element {
             }
           }
           // Scrollable Body
-          div { class: "overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-beet-accent/50 scrollbar-track-transparent",
+          div { class: "overflow-y-auto [scrollbar-gutter:stable] min-h-0 min-w-0 p-4 scrollbar-thin scrollbar-thumb-beet-accent/50 scrollbar-track-transparent",
             {props.children}
           }
         }

@@ -91,6 +91,10 @@ pub struct Track {
     pub release_date: Option<String>,
     /// The duration of the track in a formatted MM:SS string.
     pub duration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disc_number: Option<u32>,
     /// The MusicBrainz recording ID, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mbid: Option<String>,

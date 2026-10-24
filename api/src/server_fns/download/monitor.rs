@@ -725,7 +725,10 @@ impl DownloadMonitor {
                     download.item
                 );
                 self.track_states[slot].processed = true;
-                let dl = download.clone();
+                let dl = self
+                    .stamp_batch(vec![download.clone()])
+                    .pop()
+                    .unwrap_or_else(|| download.clone());
                 let tp = self.target_path.clone();
                 let tx_clone = self.tx.clone();
                 let user_id = self.user_id.clone();
@@ -929,7 +932,7 @@ impl DownloadMonitor {
                 successful.len()
             );
             process_downloads(
-                successful,
+                self.stamp_batch(successful),
                 self.target_path.clone(),
                 self.tx.clone(),
                 self.user_id.clone(),

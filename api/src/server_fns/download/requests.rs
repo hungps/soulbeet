@@ -331,7 +331,7 @@ async fn cancel_tracks(
 }
 
 #[cfg(feature = "server")]
-async fn requeue(
+pub(crate) async fn requeue(
     request: &DownloadRequestRow,
     tracks: Vec<DownloadRequestTrackRow>,
     tx: &broadcast::Sender<DownloadEvent>,
@@ -477,6 +477,24 @@ pub async fn remove_download_request(action: RequestAction) -> Result<(), Server
     });
     info!("User {} removed request {}", auth.0.username, request.id);
     Ok(())
+}
+
+#[post("/api/downloads/requests/dismiss-failed", auth: AuthSession)]
+pub async fn dismiss_failed_download_requests() -> Result<Vec<String>, ServerFnError> {
+    let removed = DownloadRequestRow::delete_failed(&auth.0.sub)
+        .await
+        .map_err(server_error)?;
+    if !removed.is_empty() {
+        let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
+        for request_id in &removed {
+            forget_request_token(request_id).await;
+            let _ = tx.send(DownloadEvent::RequestRemoved {
+                request_id: request_id.clone(),
+                items: Vec::new(),
+            });
+        }
+    }
+    Ok(removed)
 }
 
 #[post("/api/downloads/requests/dismiss-finished", auth: AuthSession)]

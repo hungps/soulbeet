@@ -31,9 +31,19 @@ pub async fn create_user_folder(
         return Err(server_error(format!("Failed to create directory: {}", e)));
     }
 
-    models::folder::Folder::create(&claims.sub, &name, &path)
+    let folder = models::folder::Folder::create(&claims.sub, &name, &path)
         .await
-        .map_err(server_error)
+        .map_err(server_error)?;
+
+    #[cfg(feature = "server")]
+    {
+        let id = folder.id.clone();
+        tokio::spawn(async move {
+            let _ = crate::library::scan_folder_internal(&id, true).await;
+        });
+    }
+
+    Ok(folder)
 }
 
 #[put("/api/folders/update", _: AuthSession)]
@@ -42,16 +52,52 @@ pub async fn update_folder(
     name: String,
     path: String,
 ) -> Result<(), ServerFnError> {
+    let old = models::folder::Folder::get_by_id(&folder_id)
+        .await
+        .map_err(server_error)?;
     models::folder::Folder::update(&folder_id, &name, &path)
         .await
-        .map_err(server_error)
+        .map_err(server_error)?;
+
+    #[cfg(feature = "server")]
+    {
+        if old.map(|folder| folder.path) != Some(path) {
+            clear_indexed_folder(&folder_id).await;
+            tokio::spawn(async move {
+                let _ = crate::library::scan_folder_internal(&folder_id, true).await;
+            });
+        }
+    }
+
+    Ok(())
 }
 
 #[delete("/api/folders/delete", _: AuthSession)]
 pub async fn delete_folder(folder_id: String) -> Result<(), ServerFnError> {
+    #[cfg(feature = "server")]
+    clear_indexed_folder(&folder_id).await;
+
     models::folder::Folder::delete(&folder_id)
         .await
         .map_err(server_error)
+}
+
+#[cfg(feature = "server")]
+async fn clear_indexed_folder(folder_id: &str) {
+    use crate::db::DB;
+
+    let _ = sqlx::query("DELETE FROM library_tracks WHERE folder_id = ?")
+        .bind(folder_id)
+        .execute(&*DB)
+        .await;
+    let _ = sqlx::query("DELETE FROM library_releases WHERE folder_id = ?")
+        .bind(folder_id)
+        .execute(&*DB)
+        .await;
+    let _ = sqlx::query("DELETE FROM library_scan_state WHERE folder_id = ?")
+        .bind(folder_id)
+        .execute(&*DB)
+        .await;
 }
 
 /// Find duplicate tracks across all of the user's library folders.

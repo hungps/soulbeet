@@ -11,6 +11,9 @@ fn parse_search_state(query: &str) -> SearchUrlState {
             "q" => state.query = value.into_owned(),
             "artist" => state.artist = Some(value.into_owned()).filter(|value| !value.is_empty()),
             "release" => state.release = Some(value.into_owned()).filter(|value| !value.is_empty()),
+            "type" => {
+                state.search_type = Some(value.into_owned()).filter(|value| !value.is_empty())
+            }
             _ => {}
         }
     }
@@ -30,6 +33,13 @@ fn format_search_state(state: &SearchUrlState) -> String {
     }
     if let Some(release) = state.release.as_deref().filter(|value| !value.is_empty()) {
         serializer.append_pair("release", release);
+    }
+    if let Some(search_type) = state
+        .search_type
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        serializer.append_pair("type", search_type);
     }
 
     serializer.finish()
@@ -86,6 +96,7 @@ pub fn SearchPage() -> Element {
             initial_query: state.query.clone(),
             initial_artist: state.artist.clone(),
             initial_release: state.release.clone(),
+            initial_search_type: state.search_type.clone(),
         }
     }
 }
@@ -97,11 +108,12 @@ mod tests {
 
     #[test]
     fn parses_the_search_state_from_a_query_string() {
-        let state = parse_search_state("?q=Maritime&artist=Vela%20Norte&release=9c4d");
+        let state = parse_search_state("?q=Maritime&artist=Vela%20Norte&release=9c4d&type=track");
 
         assert_eq!(state.query, "Maritime");
         assert_eq!(state.artist.as_deref(), Some("Vela Norte"));
         assert_eq!(state.release.as_deref(), Some("9c4d"));
+        assert_eq!(state.search_type.as_deref(), Some("track"));
     }
 
     #[test]
@@ -111,6 +123,7 @@ mod tests {
                 query: query.to_string(),
                 artist: Some("Simon & Garfunkel".to_string()),
                 release: Some("id=1".to_string()),
+                search_type: Some("album".to_string()),
             };
             let reparsed = parse_search_state(&format_search_state(&original));
 
@@ -124,6 +137,7 @@ mod tests {
             query: "  ".to_string(),
             artist: Some(String::new()),
             release: None,
+            search_type: None,
         };
 
         assert!(format_search_state(&state).is_empty());

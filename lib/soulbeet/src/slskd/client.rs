@@ -410,6 +410,11 @@ impl SoulseekClient {
                             b.score
                                 .partial_cmp(&a.score)
                                 .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| {
+                                    b.availability_score
+                                        .partial_cmp(&a.availability_score)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                })
                         });
 
                         if albums.len() > MAX_SEARCH_RESULTS {
@@ -441,6 +446,11 @@ impl SoulseekClient {
                                 b.score
                                     .partial_cmp(&a.score)
                                     .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| {
+                                        b.availability_score
+                                            .partial_cmp(&a.availability_score)
+                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                    })
                             });
                             albums.truncate(MAX_SEARCH_RESULTS);
 

@@ -3,6 +3,7 @@ pub mod engine;
 pub mod error;
 pub mod http;
 pub mod lastfm;
+pub mod library;
 pub mod listenbrainz;
 pub mod musicbrainz;
 pub mod navidrome;

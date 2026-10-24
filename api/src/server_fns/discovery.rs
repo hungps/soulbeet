@@ -622,6 +622,8 @@ pub async fn generate_discovery_playlist_internal(
                     album_title: candidate.album.clone(),
                     release_date: None,
                     duration: None,
+                    track_number: None,
+                    disc_number: None,
                     mbid: None,
                     release_mbid: None,
                 }];

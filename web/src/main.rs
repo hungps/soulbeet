@@ -3,6 +3,8 @@ use dioxus::prelude::*;
 #[cfg(feature = "web")]
 use shared::download::DownloadEvent;
 use shared::download::DownloadProgress;
+#[cfg(feature = "web")]
+use shared::download::DownloadState;
 use shared::media_server::MediaServerKind;
 use shared::system::MediaServerStatus;
 use std::collections::HashMap;
@@ -13,8 +15,8 @@ use dioxus::fullstack::WebSocketOptions;
 use websocket::use_resilient_websocket;
 
 use ui::{
-    AutoDownloadSignal, Downloads, HealthProvider, Layout, Navbar, SearchPrefill, SearchReset,
-    SettingsProvider,
+    AutoDownloadSignal, DownloadTick, Downloads, HealthProvider, Layout, Navbar, SearchPrefill,
+    SearchReset, SettingsProvider,
 };
 use views::{DashboardPage, LoginPage, SearchPage, SettingsPage};
 
@@ -50,6 +52,8 @@ fn main() {
         dioxus::serve(|| async move {
             // Start background cleanup task for user channels
             api::globals::start_channel_cleanup_task();
+            api::library::start_library_tasks();
+            api::recovery::start_startup_recovery();
 
             Ok(dioxus::server::router(App).layer(CookieManagerLayer::new()))
         });
@@ -116,8 +120,11 @@ fn WebNavbar() -> Element {
     let mut has_downloads = use_signal(|| false);
 
     let search_prefill = use_signal(|| None::<(String, String)>);
+    #[allow(unused_mut)]
+    let mut download_tick = use_signal(|| 0u32);
     use_context_provider(|| SearchReset(search_reset));
     use_context_provider(|| SearchPrefill(search_prefill));
+    use_context_provider(|| DownloadTick(download_tick));
 
     #[allow(unused_mut)]
     let mut auto_download_signal = use_signal(|| None::<shared::download::AutoDownloadEvent>);
@@ -126,50 +133,65 @@ fn WebNavbar() -> Element {
     #[cfg(feature = "web")]
     use_resilient_websocket(
         || api::download_updates_ws(WebSocketOptions::new()),
-        move |event: DownloadEvent| {
-            match event {
-                DownloadEvent::Progress(data) => {
-                    let mut map = downloads.write();
-                    for file in data {
-                        map.insert(file.item.clone(), file);
-                    }
-                    let active = !map.is_empty();
-                    drop(map);
-                    if *has_downloads.peek() != active {
-                        has_downloads.set(active);
-                    }
+        move |event: DownloadEvent| match event {
+            DownloadEvent::Progress(data) => {
+                let mut refresh = false;
+                let mut map = downloads.write();
+                for file in data {
+                    let previous = map.get(&file.item).map(|entry| entry.state.clone());
+                    refresh |= previous.as_ref() != Some(&file.state)
+                        && matches!(
+                            file.state,
+                            DownloadState::Queued
+                                | DownloadState::InProgress
+                                | DownloadState::Completed
+                                | DownloadState::Importing
+                                | DownloadState::Imported
+                                | DownloadState::ImportSkipped
+                                | DownloadState::Failed(_)
+                                | DownloadState::Cancelled
+                                | DownloadState::Stopped
+                        );
+                    map.insert(file.item.clone(), file);
                 }
-                DownloadEvent::Replaced {
-                    previous_item,
-                    entry,
-                } => {
-                    let mut map = downloads.write();
-                    map.remove(&previous_item);
-                    map.insert(entry.item.clone(), entry);
-                    let active = !map.is_empty();
-                    drop(map);
-                    if *has_downloads.peek() != active {
-                        has_downloads.set(active);
-                    }
+                let active = !map.is_empty();
+                drop(map);
+                if *has_downloads.peek() != active {
+                    has_downloads.set(active);
                 }
-                DownloadEvent::AutoDownload(auto_event) => {
-                    auto_download_signal.set(Some(auto_event));
+                if refresh {
+                    download_tick += 1;
                 }
-                DownloadEvent::RequestRemoved {
-                    request_id,
-                    items,
-                } => {
-                    let mut map = downloads.write();
-                    for item in items {
-                        map.remove(&item);
-                    }
-                    map.retain(|_, file| file.batch_id.as_deref() != Some(request_id.as_str()));
-                    let active = !map.is_empty();
-                    drop(map);
-                    if *has_downloads.peek() != active {
-                        has_downloads.set(active);
-                    }
+            }
+            DownloadEvent::Replaced {
+                previous_item,
+                entry,
+            } => {
+                let mut map = downloads.write();
+                map.remove(&previous_item);
+                map.insert(entry.item.clone(), entry);
+                let active = !map.is_empty();
+                drop(map);
+                if *has_downloads.peek() != active {
+                    has_downloads.set(active);
                 }
+                download_tick += 1;
+            }
+            DownloadEvent::AutoDownload(auto_event) => {
+                auto_download_signal.set(Some(auto_event));
+            }
+            DownloadEvent::RequestRemoved { request_id, items } => {
+                let mut map = downloads.write();
+                for item in items {
+                    map.remove(&item);
+                }
+                map.retain(|_, file| file.batch_id.as_deref() != Some(request_id.as_str()));
+                let active = !map.is_empty();
+                drop(map);
+                if *has_downloads.peek() != active {
+                    has_downloads.set(active);
+                }
+                download_tick += 1;
             }
         },
     );

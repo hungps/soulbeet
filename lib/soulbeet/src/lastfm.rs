@@ -759,9 +759,7 @@ impl crate::MetadataProvider for LastFmProvider {
             .into_iter()
             .map(|a| {
                 let mbid = nonempty_mbid(a.mbid);
-                let id = mbid
-                    .clone()
-                    .unwrap_or_else(|| generate_lastfm_id(&a.artist, &a.name));
+                let id = generate_lastfm_id(&a.artist, &a.name);
                 let cover_url = LastFmImage::get_largest(&a.image);
                 SearchResult::Album(Album {
                     id,
@@ -801,6 +799,8 @@ impl crate::MetadataProvider for LastFmProvider {
                     album_title: None,
                     release_date: None,
                     duration: None,
+                    track_number: None,
+                    disc_number: None,
                     mbid,
                     release_mbid: None,
                 })
@@ -822,7 +822,8 @@ impl crate::MetadataProvider for LastFmProvider {
                         t.track
                             .into_vec()
                             .into_iter()
-                            .map(|track| {
+                            .enumerate()
+                            .map(|(index, track)| {
                                 let track_mbid = nonempty_mbid(track.mbid);
                                 Track {
                                     id: generate_lastfm_id(&info.artist, &track.name),
@@ -838,6 +839,8 @@ impl crate::MetadataProvider for LastFmProvider {
                                         .as_ref()
                                         .and_then(|w| w.published.clone()),
                                     duration: format_duration(track.duration),
+                                    track_number: Some(index as u32 + 1),
+                                    disc_number: Some(1),
                                     mbid: track_mbid,
                                     release_mbid: album_mbid.clone(),
                                 }

@@ -182,11 +182,10 @@ async fn login_navidrome(
                 .map_err(server_error)?
             {
                 Some(u) => {
-                    let has_navidrome =
-                        MediaServerConfig::get(&u.id, MediaServerKind::Navidrome)
-                            .await
-                            .map_err(server_error)?
-                            .is_some();
+                    let has_navidrome = MediaServerConfig::get(&u.id, MediaServerKind::Navidrome)
+                        .await
+                        .map_err(server_error)?
+                        .is_some();
                     if u.media_account_id.is_some() && !has_navidrome {
                         return Err(unauthorized_error(
                             "This username is linked to a Plex account",
@@ -364,14 +363,9 @@ async fn login_plex(
     let (kind, status) = match &config {
         Some(config) => {
             let status = MediaServerStatus::from(config.status.as_str());
-            User::set_active_media(
-                &user.id,
-                "plex",
-                config.token.as_deref(),
-                status.as_str(),
-            )
-            .await
-            .map_err(server_error)?;
+            User::set_active_media(&user.id, "plex", config.token.as_deref(), status.as_str())
+                .await
+                .map_err(server_error)?;
             (MediaServerKind::Plex, status)
         }
         None => (

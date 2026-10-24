@@ -12,6 +12,7 @@ pub struct SearchUrlState {
     pub query: String,
     pub artist: Option<String>,
     pub release: Option<String>,
+    pub search_type: Option<String>,
 }
 
 #[derive(Clone, Copy)]

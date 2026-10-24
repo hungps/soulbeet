@@ -6,7 +6,11 @@ pub mod discovery_playlist;
 pub mod download_request;
 pub mod engine_report;
 pub mod folder;
+#[cfg(feature = "server")]
+pub mod library;
 pub mod media_server;
+#[cfg(feature = "server")]
+pub mod request_queue;
 pub mod user;
 pub mod user_profile;
 pub mod user_settings;

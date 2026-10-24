@@ -1,5 +1,6 @@
 use api::{create_user_folder, delete_folder, get_user_folders, update_folder};
 use dioxus::prelude::*;
+use shared::library::{LibraryScanInterval, LibraryScanSettings};
 
 use crate::auth::use_auth;
 use crate::friendly_error;
@@ -25,6 +26,18 @@ pub fn FolderManager() -> Element {
     let mut lastfm_username = use_signal(String::new);
     let mut lb_username = use_signal(String::new);
     let mut lb_token = use_signal(String::new);
+    let mut scan_interval = use_signal(|| LibraryScanInterval::Off);
+    let mut watch_enabled = use_signal(|| false);
+    let mut request_retry_interval = use_signal(|| LibraryScanInterval::Off);
+    let scan_settings_resource = use_resource(|| async { api::get_library_scan_settings().await });
+
+    use_effect(move || {
+        if let Some(Ok(settings)) = &*scan_settings_resource.read() {
+            scan_interval.set(settings.scan_interval);
+            watch_enabled.set(settings.watch_enabled);
+            request_retry_interval.set(settings.request_retry_interval);
+        }
+    });
 
     // Discovery settings state
     let mut discovery_enabled = use_signal(|| false);
@@ -312,6 +325,124 @@ pub fn FolderManager() -> Element {
                 },
                 Some(Ok(_)) => rsx! {
                 div { class: "space-y-4",
+                    // Automatic library indexing
+                    div { class: "p-3 bg-beet-dark rounded border border-white/10",
+                        p { class: "text-sm text-white font-medium mb-1", "Library Indexing" }
+                        p { class: "text-xs text-gray-500 font-mono mb-3",
+                            "Soulbeet indexes each library folder so the Dashboard can show releases, track completeness and library matches in search results."
+                        }
+                        div { class: "space-y-3",
+                            div { class: "flex items-center justify-between gap-3",
+                                div {
+                                    p { class: "text-sm text-white font-medium", "Periodic scan" }
+                                    p { class: "text-xs text-gray-500 font-mono mt-0.5",
+                                        "Re-index files and synchronise the beets database on a schedule"
+                                    }
+                                }
+                                select {
+                                    class: "bg-beet-panel border border-white/10 rounded px-2 py-1 text-xs font-mono text-gray-300 focus:border-beet-accent focus:outline-none",
+                                    value: "{scan_interval().key()}",
+                                    onchange: move |event| {
+                                        let value = LibraryScanInterval::from_key(&event.value());
+                                        scan_interval.set(value);
+                                        let settings = LibraryScanSettings {
+                                            scan_interval: value,
+                                            watch_enabled: watch_enabled(),
+                                            request_retry_interval: request_retry_interval(),
+                                        };
+                                        spawn(async move {
+                                            let _ = api::update_library_scan_settings(settings).await;
+                                        });
+                                    },
+                                    for interval in [
+                                        LibraryScanInterval::Off,
+                                        LibraryScanInterval::TwoHours,
+                                        LibraryScanInterval::SixHours,
+                                        LibraryScanInterval::TwelveHours,
+                                        LibraryScanInterval::OneDay,
+                                        LibraryScanInterval::OneWeek,
+                                    ] {
+                                        option {
+                                            value: "{interval.key()}",
+                                            selected: scan_interval() == interval,
+                                            "{interval.label()}"
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "flex items-center justify-between gap-3",
+                                div {
+                                    p { class: "text-sm text-white font-medium", "Native file watch" }
+                                    p { class: "text-xs text-gray-500 font-mono mt-0.5",
+                                        "Re-index a folder when files change on disk (requires the app to stay running)"
+                                    }
+                                }
+                                button {
+                                    class: format!(
+                                        "relative w-11 h-6 rounded-full cursor-pointer transition-colors shrink-0 {}",
+                                        if watch_enabled() { "bg-beet-leaf" } else { "bg-gray-600" }
+                                    ),
+                                    onclick: move |_| {
+                                        let new_val = !watch_enabled();
+                                        watch_enabled.set(new_val);
+                                        let settings = LibraryScanSettings {
+                                            scan_interval: scan_interval(),
+                                            watch_enabled: new_val,
+                                            request_retry_interval: request_retry_interval(),
+                                        };
+                                        spawn(async move {
+                                            let _ = api::update_library_scan_settings(settings).await;
+                                        });
+                                    },
+                                    span {
+                                        class: format!(
+                                            "absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform {}",
+                                            if watch_enabled() { "translate-x-5" } else { "" }
+                                        ),
+                                    }
+                                }
+                            }
+                            div { class: "flex items-center justify-between gap-3",
+                                div {
+                                    p { class: "text-sm text-white font-medium", "Retry unavailable requests" }
+                                    p { class: "text-xs text-gray-500 font-mono mt-0.5",
+                                        "Re-check Soulseek for requested albums or tracks that had no source"
+                                    }
+                                }
+                                select {
+                                    class: "bg-beet-panel border border-white/10 rounded px-2 py-1 text-xs font-mono text-gray-300 focus:border-beet-accent focus:outline-none",
+                                    value: "{request_retry_interval().key()}",
+                                    onchange: move |event| {
+                                        let value = LibraryScanInterval::from_key(&event.value());
+                                        request_retry_interval.set(value);
+                                        let settings = LibraryScanSettings {
+                                            scan_interval: scan_interval(),
+                                            watch_enabled: watch_enabled(),
+                                            request_retry_interval: value,
+                                        };
+                                        spawn(async move {
+                                            let _ = api::update_library_scan_settings(settings).await;
+                                        });
+                                    },
+                                    for interval in [
+                                        LibraryScanInterval::Off,
+                                        LibraryScanInterval::TwoHours,
+                                        LibraryScanInterval::SixHours,
+                                        LibraryScanInterval::TwelveHours,
+                                        LibraryScanInterval::OneDay,
+                                        LibraryScanInterval::OneWeek,
+                                    ] {
+                                        option {
+                                            value: "{interval.key()}",
+                                            selected: request_retry_interval() == interval,
+                                            "{interval.label()}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Discovery (user-level)
                     div {
                         h3 { class: "text-sm font-semibold text-white mb-3", "Discovery" }

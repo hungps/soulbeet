@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use api::auth::AuthResponse;
-use api::{PlexLoginPoll, create_plex_pin, poll_plex_login};
+use api::{create_plex_pin, poll_plex_login, PlexLoginPoll};
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use shared::media_server::{AuthServers, MediaServerKind};

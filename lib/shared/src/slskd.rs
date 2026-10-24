@@ -250,8 +250,10 @@ fn truncated(value: &Value) -> String {
 
 fn collect_user_files(user: &Value, out: &mut FlattenedFiles) {
     let Some(directories) = user.get("directories").and_then(|d| d.as_array()) else {
-        out.errors
-            .push(format!("user entry without directories: {}", truncated(user)));
+        out.errors.push(format!(
+            "user entry without directories: {}",
+            truncated(user)
+        ));
         return;
     };
     for dir in directories {
@@ -421,17 +423,24 @@ impl SearchResult {
             }
         }
 
-        if self.has_free_upload_slot {
-            base_score += 0.1;
-        }
-        if self.upload_speed > 100 {
-            base_score += 0.05;
-        }
-        if self.queue_length > 10 {
-            base_score -= 0.1;
-        }
-
         base_score.min(1.0)
+    }
+
+    pub fn availability_score(&self) -> f64 {
+        let mut score = 0.0;
+        if self.has_free_upload_slot {
+            score += 0.5;
+        }
+        if self.upload_speed > 0 {
+            let speed = (self.upload_speed as f64).log10() / 6.0;
+            score += speed.clamp(0.0, 1.0) * 0.3;
+        }
+        if self.queue_length <= 0 {
+            score += 0.2;
+        } else if self.queue_length <= 10 {
+            score += 0.1;
+        }
+        score.min(1.0)
     }
 }
 
@@ -448,6 +457,8 @@ pub struct AlbumResult {
     pub has_free_upload_slot: bool,
     pub upload_speed: i32,
     pub queue_length: i32,
+    #[serde(default)]
+    pub availability_score: f64,
     pub score: f64,
 }
 
@@ -836,5 +847,26 @@ mod tests {
                 "unrecognized state {state} mapped to {got:?}"
             );
         }
+    }
+
+    #[test]
+    fn availability_does_not_change_format_quality() {
+        let result =
+            |has_free_upload_slot: bool, upload_speed: i32, queue_length: i32| SearchResult {
+                username: "peer".to_string(),
+                filename: "/music/Album/01 - Track.flac".to_string(),
+                size: 30_000_000,
+                bitrate: None,
+                duration: Some(240),
+                sample_rate: Some(44100),
+                bit_depth: Some(16),
+                has_free_upload_slot,
+                upload_speed,
+                queue_length,
+            };
+        let busy = result(false, 0, 50);
+        let free = result(true, 5_000_000, 0);
+        assert_eq!(busy.quality_score(), free.quality_score());
+        assert!(free.availability_score() > busy.availability_score());
     }
 }

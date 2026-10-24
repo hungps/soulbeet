@@ -82,6 +82,11 @@ pub async fn import_group(
             tokio::spawn(async move {
                 crate::server_fns::media_server::trigger_media_scan(&user_id, &scan_target).await;
             });
+
+            let library_target = target_path.clone();
+            tokio::spawn(async move {
+                crate::library::scan_folder_containing(&library_target).await;
+            });
         }
         Ok(ImportResult::Skipped(reason)) => {
             info!("Import skipped items: {}", reason);

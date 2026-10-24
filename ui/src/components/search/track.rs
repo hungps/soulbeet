@@ -1,12 +1,18 @@
 use api::models::folder::Folder;
 use dioxus::prelude::*;
+use shared::library::LibraryMatchInfo;
 use shared::metadata::Track;
 
 use super::download_icon::{DownloadIcon, DownloadRowState};
+use super::{library_badge, request_badge};
 
 #[derive(Props, PartialEq, Clone)]
 pub struct Props {
     pub track: Track,
+    #[props(default)]
+    pub library_match: Option<LibraryMatchInfo>,
+    #[props(default)]
+    pub request_state: Option<String>,
     pub on_album_click: Callback,
     pub on_search_sources: Callback,
     pub download_state: DownloadRowState,
@@ -24,9 +30,10 @@ pub fn TrackResult(props: Props) -> Element {
     let track = props.track.clone();
     let mut cover_error = use_signal(|| false);
 
-    let cover_url = track.release_mbid.as_ref().map(|mbid| {
-        format!("https://coverartarchive.org/release/{}/front-250", mbid)
-    });
+    let cover_url = track
+        .release_mbid
+        .as_ref()
+        .map(|mbid| format!("https://coverartarchive.org/release/{}/front-250", mbid));
 
     rsx! {
       div {
@@ -61,8 +68,12 @@ pub fn TrackResult(props: Props) -> Element {
 
         // Track info
         div { class: "flex-grow min-w-0",
-          p { class: "text-sm font-bold text-white truncate group-hover:text-beet-accent transition-colors",
-            "{track.title}"
+          div { class: "flex items-center gap-2 min-w-0",
+            p { class: "text-sm font-bold text-white truncate group-hover:text-beet-accent transition-colors",
+              "{track.title}"
+            }
+            {library_badge(&props.library_match)}
+            {request_badge(&props.request_state)}
           }
           p { class: "text-xs text-gray-400 font-mono truncate", "{track.artist}" }
           if let Some(album_title) = &track.album_title {

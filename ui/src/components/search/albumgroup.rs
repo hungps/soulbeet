@@ -1,5 +1,6 @@
 use api::models::folder::Folder;
 use dioxus::prelude::*;
+use shared::library::{DownloadActivity, LibraryMatchInfo};
 use shared::metadata::{Album, Track};
 use std::collections::HashMap;
 
@@ -10,6 +11,10 @@ use super::download_icon::DownloadRowState;
 pub struct Props {
     pub editions: Vec<Album>,
     pub selected: usize,
+    #[props(default)]
+    pub library_match: Option<LibraryMatchInfo>,
+    #[props(default)]
+    pub request_state: Option<String>,
     #[props(into)]
     pub on_select: EventHandler<usize>,
     pub is_expanded: bool,
@@ -21,6 +26,7 @@ pub struct Props {
     pub active_menu: Signal<Option<String>>,
     pub tracks: Option<Vec<Track>>,
     pub download_states: Signal<HashMap<String, DownloadRowState>>,
+    pub activity: Signal<DownloadActivity>,
     #[props(into)]
     pub on_download: EventHandler<()>,
     #[props(into)]
@@ -80,6 +86,8 @@ pub fn AlbumGroupResult(props: Props) -> Element {
 
         AlbumResult {
           album,
+          library_match: props.library_match.clone(),
+          request_state: props.request_state.clone(),
           is_expanded: props.is_expanded,
           on_toggle: props.on_toggle,
           on_search_sources: props.on_search_sources,
@@ -89,6 +97,7 @@ pub fn AlbumGroupResult(props: Props) -> Element {
           active_menu: props.active_menu,
           tracks: props.tracks.clone(),
           download_states: props.download_states,
+          activity: props.activity,
           on_download: props.on_download,
           on_override_download: props.on_override_download,
           on_track_download: props.on_track_download,

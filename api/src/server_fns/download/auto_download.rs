@@ -19,6 +19,8 @@ use crate::globals::{get_or_create_user_channel, register_user_task, unregister_
 #[cfg(feature = "server")]
 use crate::models::download_request::{DownloadRequestRow, DownloadRequestTrackRow};
 #[cfg(feature = "server")]
+use crate::models::request_queue::LibraryRequestRow;
+#[cfg(feature = "server")]
 use crate::services::{available_download_backends, download_backend};
 #[cfg(feature = "server")]
 use crate::AuthSession;
@@ -121,6 +123,11 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
     let request_context = req.query.request_context();
     let task_username = username.clone();
     let task_user_id = auth.0.sub.clone();
+    let queue_folder_id = req.folder_id.clone();
+    let queue_folder_path = req.folder_path.clone();
+    let queue_query = req.query.clone();
+    let queue_label = request_context.label.clone();
+    let queue_artist = request_context.artist.clone();
 
     tokio::spawn(async move {
         // Send Searching event
@@ -205,9 +212,18 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             .collect();
 
         if all_groups.is_empty() {
+            let _ = LibraryRequestRow::enqueue(
+                &task_user_id,
+                &queue_folder_id,
+                &queue_folder_path,
+                &queue_query,
+                &queue_label,
+                queue_artist.as_deref(),
+            )
+            .await;
             let _ = tx.send(DownloadEvent::AutoDownload(AutoDownloadEvent::Failed {
                 batch_id: batch_id.clone(),
-                error: "No results found".to_string(),
+                error: "No results found — request saved for later retry".to_string(),
             }));
             info!("Auto-download: no results for '{}'", query_desc);
             return;
@@ -389,12 +405,28 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
         };
 
         if successful.is_empty() {
+            let _ = LibraryRequestRow::enqueue(
+                &task_user_id,
+                &queue_folder_id,
+                &queue_folder_path,
+                &queue_query,
+                &queue_label,
+                queue_artist.as_deref(),
+            )
+            .await;
             let _ = tx.send(DownloadEvent::AutoDownload(AutoDownloadEvent::Failed {
                 batch_id: batch_id.clone(),
-                error: "All downloads failed to queue".to_string(),
+                error: "All downloads failed to queue — request saved for later retry".to_string(),
             }));
             return;
         }
+
+        let _ = LibraryRequestRow::delete_matching(
+            &task_user_id,
+            &queue_label,
+            queue_artist.as_deref(),
+        )
+        .await;
 
         // Send Downloading event
         let _ = tx.send(DownloadEvent::AutoDownload(

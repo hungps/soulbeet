@@ -32,15 +32,5 @@ pub static DB: Lazy<SqlitePool> = Lazy::new(|| async move {
         .await
         .expect("Failed to run migrations");
 
-    // Download monitors are process-local, so nothing is polling when the
-    // process starts. Requests left active by a restart are surfaced as
-    // stopped so the transfer panel can resume them.
-    let _ = sqlx::query("UPDATE download_request_tracks SET state = 'stopped' WHERE state IN ('queued', 'in_progress', 'completed', 'importing')")
-        .execute(&pool)
-        .await;
-    let _ = sqlx::query("UPDATE download_requests SET state = 'stopped' WHERE state = 'active'")
-        .execute(&pool)
-        .await;
-
     dioxus::Ok(pool)
 });

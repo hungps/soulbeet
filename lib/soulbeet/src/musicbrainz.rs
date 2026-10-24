@@ -391,7 +391,7 @@ fn release_tracks(release: &Release) -> Vec<Track> {
     let mut tracks = Vec::new();
 
     if let Some(media) = &release.media {
-        for medium in media {
+        for (medium_index, medium) in media.iter().enumerate() {
             let Some(release_tracks) = &medium.tracks else {
                 continue;
             };
@@ -412,6 +412,8 @@ fn release_tracks(release: &Release) -> Vec<Track> {
                     album_title: Some(release.title.clone()),
                     release_date: release.date.as_ref().map(|d| d.0.clone()),
                     duration: format_duration(&track.length.or(recording.length)),
+                    track_number: Some(track.position),
+                    disc_number: Some(medium_index as u32 + 1),
                     mbid: Some(recording.id.clone()),
                     release_mbid: Some(release.id.clone()),
                 });
@@ -530,6 +532,8 @@ impl MusicBrainzProvider {
                             album_title: first_release.map(|r| r.title.clone()),
                             release_date: first_release.and_then(|r| r.date.clone().map(|d| d.0)),
                             duration: format_duration(&recording.length),
+                            track_number: None,
+                            disc_number: None,
                             mbid: Some(recording.id.clone()),
                             release_mbid: first_release.map(|r| r.id.clone()),
                         };

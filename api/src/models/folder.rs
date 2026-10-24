@@ -40,6 +40,13 @@ impl Folder {
             .map_err(|e| e.to_string())
     }
 
+    pub async fn get_all() -> Result<Vec<Folder>, String> {
+        sqlx::query_as::<_, Folder>("SELECT * FROM folders ORDER BY user_id, name")
+            .fetch_all(&*DB)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn update(id: &str, name: &str, path: &str) -> Result<(), String> {
         sqlx::query("UPDATE folders SET name = ?, path = ? WHERE id = ?")
             .bind(name)

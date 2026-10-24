@@ -22,6 +22,10 @@ use shared::download::{
     AutoDownloadEvent, DownloadQuery, DownloadRequestContext, DownloadableGroup, DownloadableItem,
     SearchState as DownloadSearchState,
 };
+use shared::library::{
+    album_activity_key, track_activity_key, DownloadActivity, LibraryAlbumRef, LibraryMatchInfo,
+    LibraryMatchQuery, LibraryTrackRef,
+};
 use shared::metadata::{
     Album, AlbumWithTracks, Provider, SearchFilterOptions, SearchFilters, SearchResult,
     SearchResults, Track,
@@ -32,7 +36,7 @@ use track::TrackResult;
 
 use crate::search::album::AlbumResult;
 use crate::settings_context::use_settings;
-use crate::{use_auth, use_system_health, Button, SystemStatus};
+use crate::{use_auth, use_system_health, Button, ConfirmModal, SystemStatus};
 
 mod download_results;
 use download_results::DownloadResults;
@@ -49,11 +53,97 @@ use albumgroup::AlbumGroupResult;
 mod filter_chips;
 use filter_chips::FilterChips;
 
+#[derive(Clone, PartialEq)]
+enum PendingReplace {
+    Auto {
+        item_id: String,
+        query: Box<DownloadQuery>,
+        folder: Folder,
+        release_ids: Vec<String>,
+        track_ids: Vec<String>,
+        folder_names: Vec<String>,
+    },
+    Source {
+        item_id: String,
+        items: Vec<DownloadableItem>,
+        folder: String,
+        request: DownloadRequestContext,
+        release_ids: Vec<String>,
+        track_ids: Vec<String>,
+        folder_names: Vec<String>,
+    },
+}
+
+fn replace_message(action: &PendingReplace) -> String {
+    let (label, folders) = match action {
+        PendingReplace::Auto {
+            query,
+            folder_names,
+            ..
+        } => {
+            let label = query
+                .album
+                .as_ref()
+                .map(|album| album.title.clone())
+                .or_else(|| query.tracks.first().map(|track| track.title.clone()))
+                .unwrap_or_else(|| "This item".to_string());
+            (label, folder_names.join(", "))
+        }
+        PendingReplace::Source {
+            request,
+            folder_names,
+            ..
+        } => (request.label.clone(), folder_names.join(", ")),
+    };
+    let folders = if folders.is_empty() {
+        "your library".to_string()
+    } else {
+        folders
+    };
+    format!(
+        "{label} already exists in {folders}. Downloading it again will delete the existing files first."
+    )
+}
+
+fn build_library_match_query(results: &SearchResults) -> LibraryMatchQuery {
+    let mut query = LibraryMatchQuery::default();
+    for result in &results.results {
+        match result {
+            SearchResult::Track(track) => query.tracks.push(LibraryTrackRef {
+                key: track.id.clone(),
+                artist: track.artist.clone(),
+                title: track.title.clone(),
+                album: track.album_title.clone(),
+            }),
+            SearchResult::Album(album) => query.albums.push(LibraryAlbumRef {
+                key: album.id.clone(),
+                artist: album.artist.clone(),
+                album: album.title.clone(),
+                mbid: album.mbid.clone(),
+                track_count: album.track_count,
+            }),
+            SearchResult::AlbumGroup(group) => {
+                for edition in &group.editions {
+                    query.albums.push(LibraryAlbumRef {
+                        key: edition.id.clone(),
+                        artist: edition.artist.clone(),
+                        album: edition.title.clone(),
+                        mbid: edition.mbid.clone(),
+                        track_count: edition.track_count,
+                    });
+                }
+            }
+        }
+    }
+    query
+}
+
 #[component]
 pub fn Search(
     #[props(default)] initial_query: Option<String>,
     #[props(default)] initial_artist: Option<String>,
     #[props(default)] initial_release: Option<String>,
+    #[props(default)] initial_search_type: Option<String>,
 ) -> Element {
     let auth = use_auth();
     let mut settings = use_settings();
@@ -63,8 +153,13 @@ pub fn Search(
     let mut search_results = use_signal::<Option<SearchResults>>(|| None);
     let mut search = use_signal(|| restore_query.clone().unwrap_or_default());
     let mut artist = use_signal::<Option<String>>(|| restore_artist.clone());
-    let mut search_type = use_signal(|| settings.last_search_type());
-    let mut loading = use_signal(|| false);
+    let mut search_type = use_signal(|| {
+        initial_search_type
+            .as_deref()
+            .map(SearchType::from)
+            .unwrap_or_else(|| settings.last_search_type())
+    });
+    let mut loading = use_signal(|| restore_release.is_some());
     let mut expanded_albums = use_signal::<HashSet<String>>(HashSet::new);
     let mut album_cache = use_signal::<HashMap<String, AlbumWithTracks>>(HashMap::new);
     let mut download_options = use_signal::<Option<Vec<DownloadableGroup>>>(|| None);
@@ -90,6 +185,23 @@ pub fn Search(
     let mut download_request_context = use_signal::<Option<DownloadRequestContext>>(|| None);
     let mut selected_provider = use_signal(|| settings.default_provider());
     let mut provider_synced = use_signal(|| false);
+    let mut library_matches = use_signal::<HashMap<String, LibraryMatchInfo>>(HashMap::new);
+    let mut download_activity = use_signal(DownloadActivity::default);
+    let mut pending_replace = use_signal::<Option<PendingReplace>>(|| None);
+    let mut source_item = use_signal::<Option<String>>(|| None);
+
+    use_future(move || async move {
+        loop {
+            if auth.is_logged_in() {
+                if let Ok(next) = auth.call(api::get_download_activity()).await {
+                    if next != *download_activity.peek() {
+                        download_activity.set(next);
+                    }
+                }
+            }
+            gloo_timers::future::TimeoutFuture::new(15_000).await;
+        }
+    });
 
     let sync_url = move |release: Option<String>| {
         let Some(sync) = search_url else { return };
@@ -97,6 +209,7 @@ pub fn Search(
             query: search.peek().clone(),
             artist: artist.peek().clone(),
             release,
+            search_type: Some(search_type.peek().as_str().to_string()),
         });
     };
 
@@ -153,7 +266,9 @@ pub fn Search(
     // Sync search type from settings once loaded
     use_effect(move || {
         if settings.is_loaded() && !synced() {
-            search_type.set(settings.last_search_type());
+            if initial_search_type.is_none() {
+                search_type.set(settings.last_search_type());
+            }
             synced.set(true);
         }
     });
@@ -241,7 +356,9 @@ pub fn Search(
 
             match event {
                 AutoDownloadEvent::Searching { .. } | AutoDownloadEvent::ScoringResults { .. } => {
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Searching);
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Searching);
                     // D-09: propagate to expanded track rows
                     if let Some(cached) = album_cache.peek().get(&item_id) {
                         let mut states = download_states.write();
@@ -252,7 +369,9 @@ pub fn Search(
                 }
                 AutoDownloadEvent::PickedSource { .. } | AutoDownloadEvent::Downloading { .. } => {
                     let item_id_timer = item_id.clone();
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Done);
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Done);
                     // D-09: propagate to expanded track rows
                     if let Some(cached) = album_cache.peek().get(&item_id) {
                         let mut states = download_states.write();
@@ -265,14 +384,24 @@ pub fn Search(
                         gloo_timers::future::TimeoutFuture::new(5000).await;
                         let current = download_states.peek().get(&item_id_timer).cloned();
                         if matches!(current, Some(DownloadRowState::Done)) {
-                            download_states.write().insert(item_id_timer, DownloadRowState::Idle);
+                            download_states
+                                .write()
+                                .insert(item_id_timer, DownloadRowState::Idle);
                         }
                     });
                 }
-                AutoDownloadEvent::FallbackToManual { batch_id, results, .. } => {
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Idle);
+                AutoDownloadEvent::FallbackToManual {
+                    batch_id, results, ..
+                } => {
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Idle);
 
-                    let track_name = batch_to_name.peek().get(&batch_id).cloned().unwrap_or(item_id.clone());
+                    let track_name = batch_to_name
+                        .peek()
+                        .get(&batch_id)
+                        .cloned()
+                        .unwrap_or(item_id.clone());
 
                     let toast_id = batch_id.clone();
                     fallback_toasts.write().push(FallbackToastData {
@@ -287,7 +416,12 @@ pub fn Search(
                     });
                 }
                 AutoDownloadEvent::Failed { error, .. } => {
-                    download_states.write().insert(item_id, DownloadRowState::Failed(error));
+                    let state = if error.contains("request saved for later retry") {
+                        DownloadRowState::Idle
+                    } else {
+                        DownloadRowState::Failed(error)
+                    };
+                    download_states.write().insert(item_id, state);
                 }
             }
         }
@@ -306,7 +440,9 @@ pub fn Search(
     // and the auto_download HTTP response would freeze the browser.
     use_effect(move || {
         let _trigger = batch_to_item.read().len();
-        if pending_events.peek().is_empty() { return; }
+        if pending_events.peek().is_empty() {
+            return;
+        }
 
         let events = pending_events.peek().clone();
         let mut still_pending = Vec::new();
@@ -329,7 +465,9 @@ pub fn Search(
 
             match event {
                 AutoDownloadEvent::Searching { .. } | AutoDownloadEvent::ScoringResults { .. } => {
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Searching);
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Searching);
                     // D-09: propagate to expanded track rows
                     if let Some(cached) = album_cache.peek().get(&item_id) {
                         let mut states = download_states.write();
@@ -340,7 +478,9 @@ pub fn Search(
                 }
                 AutoDownloadEvent::PickedSource { .. } | AutoDownloadEvent::Downloading { .. } => {
                     let item_id_timer = item_id.clone();
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Done);
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Done);
                     // D-09: propagate to expanded track rows
                     if let Some(cached) = album_cache.peek().get(&item_id) {
                         let mut states = download_states.write();
@@ -352,13 +492,23 @@ pub fn Search(
                         gloo_timers::future::TimeoutFuture::new(5000).await;
                         let current = download_states.peek().get(&item_id_timer).cloned();
                         if matches!(current, Some(DownloadRowState::Done)) {
-                            download_states.write().insert(item_id_timer, DownloadRowState::Idle);
+                            download_states
+                                .write()
+                                .insert(item_id_timer, DownloadRowState::Idle);
                         }
                     });
                 }
-                AutoDownloadEvent::FallbackToManual { batch_id, results, .. } => {
-                    download_states.write().insert(item_id.clone(), DownloadRowState::Idle);
-                    let track_name = batch_to_name.peek().get(&batch_id).cloned().unwrap_or(item_id.clone());
+                AutoDownloadEvent::FallbackToManual {
+                    batch_id, results, ..
+                } => {
+                    download_states
+                        .write()
+                        .insert(item_id.clone(), DownloadRowState::Idle);
+                    let track_name = batch_to_name
+                        .peek()
+                        .get(&batch_id)
+                        .cloned()
+                        .unwrap_or(item_id.clone());
                     let toast_id = batch_id.clone();
                     fallback_toasts.write().push(FallbackToastData {
                         id: batch_id,
@@ -371,7 +521,12 @@ pub fn Search(
                     });
                 }
                 AutoDownloadEvent::Failed { error, .. } => {
-                    download_states.write().insert(item_id, DownloadRowState::Failed(error));
+                    let state = if error.contains("request saved for later retry") {
+                        DownloadRowState::Idle
+                    } else {
+                        DownloadRowState::Failed(error)
+                    };
+                    download_states.write().insert(item_id, state);
                 }
             }
         }
@@ -387,7 +542,9 @@ pub fn Search(
     // Start an auto_download for a specific folder
     let mut start_auto_download = move |item_id: String, query: DownloadQuery, folder: Folder| {
         download_request_context.set(Some(query.request_context()));
-        download_states.write().insert(item_id.clone(), DownloadRowState::Searching);
+        download_states
+            .write()
+            .insert(item_id.clone(), DownloadRowState::Searching);
 
         // Propagate to expanded track rows (D-09)
         if expanded_albums.read().contains(&item_id) {
@@ -400,8 +557,16 @@ pub fn Search(
         }
 
         // Extract display name before query is moved into the request
-        let display_name = query.album.as_ref().map(|a| a.title.clone())
-            .or_else(|| query.tracks.first().map(|t| format!("{} - {}", t.artist, t.title)))
+        let display_name = query
+            .album
+            .as_ref()
+            .map(|a| a.title.clone())
+            .or_else(|| {
+                query
+                    .tracks
+                    .first()
+                    .map(|t| format!("{} - {}", t.artist, t.title))
+            })
             .unwrap_or_else(|| "Unknown".to_string());
 
         spawn(async move {
@@ -443,12 +608,47 @@ pub fn Search(
             return;
         };
 
+        if let Some(info) = library_matches
+            .peek()
+            .get(&item_id)
+            .cloned()
+            .filter(|info| info.matched)
+        {
+            let release_ids = release_ids_for_target(&info, &folder.id);
+            pending_replace.set(Some(PendingReplace::Auto {
+                item_id,
+                query: Box::new(query),
+                folder,
+                release_ids,
+                track_ids: info.track_ids,
+                folder_names: info.folder_names,
+            }));
+            return;
+        }
+
         start_auto_download(item_id, query, folder);
     };
 
     // Override download to a specific folder (D-02, does not change default)
     let mut handle_override_download =
         move |item_id: String, query: DownloadQuery, folder: Folder| {
+            if let Some(info) = library_matches
+                .peek()
+                .get(&item_id)
+                .cloned()
+                .filter(|info| info.matched)
+            {
+                let release_ids = release_ids_for_target(&info, &folder.id);
+                pending_replace.set(Some(PendingReplace::Auto {
+                    item_id,
+                    query: Box::new(query),
+                    folder,
+                    release_ids,
+                    track_ids: info.track_ids,
+                    folder_names: info.folder_names,
+                }));
+                return;
+            }
             start_auto_download(item_id, query, folder);
         };
 
@@ -467,6 +667,35 @@ pub fn Search(
 
     let download = move |query: DownloadQuery| async move {
         download_request_context.set(Some(query.request_context()));
+
+        let mut match_query = LibraryMatchQuery::default();
+        if let Some(album) = &query.album {
+            match_query.albums.push(LibraryAlbumRef {
+                key: album.id.clone(),
+                artist: album.artist.clone(),
+                album: album.title.clone(),
+                mbid: album.mbid.clone(),
+                track_count: album.track_count,
+            });
+        }
+        if let Some(track) = query.tracks.first() {
+            match_query.tracks.push(LibraryTrackRef {
+                key: track.id.clone(),
+                artist: track.artist.clone(),
+                title: track.title.clone(),
+                album: track.album_title.clone(),
+            });
+        }
+        if !match_query.albums.is_empty() || !match_query.tracks.is_empty() {
+            spawn(async move {
+                if let Ok(matches) = auth.call(api::check_library_matches(match_query)).await {
+                    let mut map = library_matches.write();
+                    map.extend(matches.albums);
+                    map.extend(matches.tracks);
+                }
+            });
+        }
+
         sync_url(query.album.as_ref().map(|album| album.id.clone()));
         loading.set(true);
         download_options.set(Some(vec![]));
@@ -546,6 +775,7 @@ pub fn Search(
 
     let perform_search = move || async move {
         sync_url(None);
+        source_item.set(None);
         loading.set(true);
         download_options.set(None);
 
@@ -564,7 +794,17 @@ pub fn Search(
         };
 
         if let Ok(data) = result {
+            let match_query = build_library_match_query(&data);
             search_results.set(Some(data));
+            if !match_query.albums.is_empty() || !match_query.tracks.is_empty() {
+                spawn(async move {
+                    if let Ok(matches) = auth.call(api::check_library_matches(match_query)).await {
+                        let mut map = library_matches.write();
+                        map.extend(matches.albums);
+                        map.extend(matches.tracks);
+                    }
+                });
+            }
         }
         loading.set(false);
     };
@@ -586,7 +826,7 @@ pub fn Search(
         }
         restored.set(true);
 
-        if restore_query.is_some() {
+        if restore_query.is_some() && restore_release.is_none() {
             spawn(perform_search());
         }
 
@@ -597,13 +837,28 @@ pub fn Search(
         spawn(async move {
             match auth
                 .call(api::find_album(api::AlbumQuery {
-                    id: release_id,
+                    id: release_id.clone(),
                     provider,
                 }))
                 .await
             {
                 Ok(data) => download(DownloadQuery::new(vec![]).album(data.album)).await,
-                Err(e) => info!("Failed to restore release from url: {:?}", e),
+                Err(e) => {
+                    info!("Failed to restore release from url: {:?}", e);
+                    match auth
+                        .call(api::find_album(api::AlbumQuery {
+                            id: release_id.clone(),
+                            provider: None,
+                        }))
+                        .await
+                    {
+                        Ok(data) => download(DownloadQuery::new(vec![]).album(data.album)).await,
+                        Err(e) => {
+                            info!("Default provider could not restore release: {:?}", e);
+                            perform_search().await;
+                        }
+                    }
+                }
             }
         });
     });
@@ -667,11 +922,104 @@ pub fn Search(
             return;
         };
 
+        if let Some(info) = library_matches
+            .peek()
+            .get(&track.id)
+            .cloned()
+            .filter(|info| info.matched)
+        {
+            let release_ids = release_ids_for_target(&info, &folder.id);
+            pending_replace.set(Some(PendingReplace::Auto {
+                item_id: track.id.clone(),
+                query: Box::new(DownloadQuery::from(track)),
+                folder,
+                release_ids,
+                track_ids: info.track_ids,
+                folder_names: info.folder_names,
+            }));
+            return;
+        }
+
         start_auto_download(track.id.clone(), DownloadQuery::from(track), folder);
     };
 
     let mut handle_track_override_download = move |(track, folder): (Track, Folder)| {
+        if let Some(info) = library_matches
+            .peek()
+            .get(&track.id)
+            .cloned()
+            .filter(|info| info.matched)
+        {
+            let release_ids = release_ids_for_target(&info, &folder.id);
+            pending_replace.set(Some(PendingReplace::Auto {
+                item_id: track.id.clone(),
+                query: Box::new(DownloadQuery::from(track)),
+                folder,
+                release_ids,
+                track_ids: info.track_ids,
+                folder_names: info.folder_names,
+            }));
+            return;
+        }
         start_auto_download(track.id.clone(), DownloadQuery::from(track), folder);
+    };
+
+    let mut confirm_replace = move |_| {
+        let Some(action) = pending_replace() else {
+            return;
+        };
+        pending_replace.set(None);
+        let mut start = start_auto_download;
+        let manual = download_tracks;
+        spawn(async move {
+            let (item_id, release_ids, track_ids) = match &action {
+                PendingReplace::Auto {
+                    item_id,
+                    release_ids,
+                    track_ids,
+                    ..
+                } => (item_id.clone(), release_ids.clone(), track_ids.clone()),
+                PendingReplace::Source {
+                    item_id,
+                    release_ids,
+                    track_ids,
+                    ..
+                } => (item_id.clone(), release_ids.clone(), track_ids.clone()),
+            };
+            if track_ids.is_empty() {
+                for release_id in &release_ids {
+                    if let Err(e) = auth
+                        .call(api::remove_library_release(release_id.clone()))
+                        .await
+                    {
+                        warn!("Failed to remove existing release {}: {:?}", release_id, e);
+                    }
+                }
+            } else {
+                for track_id in &track_ids {
+                    if let Err(e) = auth.call(api::remove_library_track(track_id.clone())).await {
+                        warn!("Failed to remove existing track {}: {:?}", track_id, e);
+                    }
+                }
+            }
+            library_matches.write().remove(&item_id);
+            match action {
+                PendingReplace::Auto {
+                    item_id,
+                    query,
+                    folder,
+                    ..
+                } => start(item_id, *query, folder),
+                PendingReplace::Source {
+                    items,
+                    folder,
+                    request,
+                    ..
+                } => {
+                    spawn(manual((items, folder, request)));
+                }
+            }
+        });
     };
 
     let mut handle_provider_change = move |value: String| {
@@ -875,11 +1223,40 @@ pub fn Search(
             is_downloading,
             request: download_request_context.read().clone().unwrap_or_default(),
             selected_folder_id: selected_folder_id(),
-            on_download: move |data| {
-                spawn(download_tracks(data));
+            on_download: move |data: (
+                Vec<DownloadableItem>,
+                String,
+                DownloadRequestContext,
+            )| {
+                let (items, folder, request) = data;
+                let fallback_id = request
+                    .key
+                    .strip_prefix("album:")
+                    .or_else(|| request.key.strip_prefix("track:"))
+                    .map(str::to_string);
+                let candidate_id = source_item().or(fallback_id);
+                let matched = candidate_id
+                    .as_ref()
+                    .and_then(|id| library_matches.peek().get(id).cloned())
+                    .filter(|info| info.matched);
+                if let Some(info) = matched {
+                    let item_id = candidate_id.unwrap_or_else(|| request.key.clone());
+                    pending_replace.set(Some(PendingReplace::Source {
+                        item_id,
+                        items,
+                        folder,
+                        request,
+                        release_ids: info.release_ids,
+                        track_ids: info.track_ids,
+                        folder_names: info.folder_names,
+                    }));
+                    return;
+                }
+                spawn(download_tracks((items, folder, request)));
             },
             on_back: move |_| {
                 sync_url(None);
+                source_item.set(None);
                 download_options.set(None);
                 loading.set(false);
             },
@@ -906,6 +1283,7 @@ pub fn Search(
                                 let track_for_dl = track.clone();
                                 let track_for_override = track.clone();
                                 let track_id = track.id.clone();
+                                let track_id_for_source = track_id.clone();
                                 let dl_state = download_states.read().get(&track_id).cloned().unwrap_or_default();
                                 let has_folders = !folders.read().is_empty();
                                 let effective_state = if !has_folders { DownloadRowState::Disabled } else { dl_state };
@@ -915,6 +1293,7 @@ pub fn Search(
                                   li { key: "{track.id}",
                                     TrackResult {
                                       on_search_sources: move || {
+                                          source_item.set(Some(track_id_for_source.clone()));
                                           spawn(download(DownloadQuery::from(track_clone.clone())));
                                       },
                                       on_album_click: {
@@ -926,6 +1305,12 @@ pub fn Search(
                                           }
                                       },
                                       track: track.clone(),
+                                      library_match: library_matches.read().get(&track.id).cloned(),
+                                      request_state: download_activity
+                                          .read()
+                                          .tracks
+                                          .get(&track_activity_key(&track.artist, &track.title))
+                                          .cloned(),
                                       download_state: effective_state,
                                       folders: current_folders,
                                       selected_folder_id: current_folder_id.clone(),
@@ -976,6 +1361,7 @@ pub fn Search(
                                       on_search_sources: {
                                           let album_for_search = album.clone();
                                           move || {
+                                              source_item.set(Some(album_for_search.id.clone()));
                                               let query = DownloadQuery::new(vec![]).album(shared::metadata::Album {
                                                   id: album_for_search.id.clone(),
                                                   title: album_for_search.title.clone(),
@@ -991,6 +1377,12 @@ pub fn Search(
                                           }
                                       },
                                       album: album.clone(),
+                                      library_match: library_matches.read().get(&album.id).cloned(),
+                                      request_state: download_activity
+                                          .read()
+                                          .albums
+                                          .get(&album_activity_key(&album.artist, &album.title))
+                                          .cloned(),
                                       download_state: effective_state,
                                       folders: current_folders,
                                       selected_folder_id: current_folder_id.clone(),
@@ -1025,6 +1417,7 @@ pub fn Search(
                                       },
                                       tracks: tracks_for_panel,
                                       download_states,
+                                      activity: download_activity,
                                       on_track_download: move |track: Track| {
                                           handle_track_download(track);
                                       },
@@ -1059,6 +1452,8 @@ pub fn Search(
                                     .cloned()
                                     .unwrap_or(fallback_album);
                                 let edition_id = edition.id.clone();
+                                let edition_artist = edition.artist.clone();
+                                let edition_title = edition.title.clone();
                                 let edition_for_search = edition.clone();
                                 let edition_for_dl = edition.clone();
                                 let edition_for_override = edition;
@@ -1089,6 +1484,12 @@ pub fn Search(
                                     AlbumGroupResult {
                                       editions: group.editions.clone(),
                                       selected,
+                                      library_match: library_matches.read().get(&edition_id).cloned(),
+                                      request_state: download_activity
+                                          .read()
+                                          .albums
+                                          .get(&album_activity_key(&edition_artist, &edition_title))
+                                          .cloned(),
                                       on_select: move |index: usize| {
                                           selected_edition.write().insert(group_id.clone(), index);
                                       },
@@ -1097,6 +1498,7 @@ pub fn Search(
                                           toggle_expand(edition_id.clone(), provider);
                                       },
                                       on_search_sources: move || {
+                                          source_item.set(Some(edition_for_search.id.clone()));
                                           spawn(download(DownloadQuery::new(vec![]).album(edition_for_search.clone())));
                                       },
                                       download_state: effective_state,
@@ -1105,6 +1507,7 @@ pub fn Search(
                                       active_menu,
                                       tracks: tracks_for_panel,
                                       download_states,
+                                      activity: download_activity,
                                       on_download: move |_| {
                                           handle_auto_download(
                                               edition_for_dl.id.clone(),
@@ -1141,6 +1544,22 @@ pub fn Search(
           }
         }
 
+        // Replacement confirmation when the target already exists in a library
+        if let Some(action) = pending_replace() {
+          {
+            let message = replace_message(&action);
+            rsx! {
+              ConfirmModal {
+                message,
+                confirm_label: "Replace".to_string(),
+                danger: true,
+                on_confirm: move |_| confirm_replace(()),
+                on_cancel: move |_| pending_replace.set(None),
+              }
+            }
+          }
+        }
+
         // Fallback toasts (D-14 through D-17)
         if !fallback_toasts.read().is_empty() {
           div { class: "fixed bottom-4 right-4 flex flex-col-reverse gap-2 z-40 w-80 md:w-96",
@@ -1162,6 +1581,65 @@ pub fn Search(
     }
 }
 
+fn release_ids_for_target(info: &LibraryMatchInfo, folder_id: &str) -> Vec<String> {
+    let targeted: Vec<String> = info
+        .release_ids
+        .iter()
+        .zip(info.folder_ids.iter())
+        .filter(|(_, release_folder)| release_folder.as_str() == folder_id)
+        .map(|(release_id, _)| release_id.clone())
+        .collect();
+    if targeted.is_empty() {
+        info.release_ids.clone()
+    } else {
+        targeted
+    }
+}
+
+pub(crate) fn request_badge(state: &Option<String>) -> Element {
+    let Some(state) = state.as_ref() else {
+        return rsx! {};
+    };
+    let (label, class) = if state == "downloading" {
+        (
+            "Downloading",
+            "bg-blue-600/20 text-blue-300 border-blue-500/40",
+        )
+    } else {
+        (
+            "Requested",
+            "bg-orange-600/20 text-orange-300 border-orange-500/40",
+        )
+    };
+    rsx! {
+        span {
+            class: "text-[9px] font-mono px-1.5 py-0.5 rounded border uppercase shrink-0 {class}",
+            "{label}"
+        }
+    }
+}
+
+pub(crate) fn library_badge(info: &Option<LibraryMatchInfo>) -> Element {
+    let Some(info) = info.as_ref().filter(|info| info.matched) else {
+        return rsx! {};
+    };
+    let label = if info.complete {
+        "In library".to_string()
+    } else {
+        format!(
+            "In library · {}/{}",
+            info.matched_track_count, info.track_count
+        )
+    };
+    let folders = info.folder_names.join(", ");
+    rsx! {
+        span {
+            class: "text-[9px] font-mono px-1.5 py-0.5 rounded border bg-beet-leaf/15 text-beet-leaf border-beet-leaf/40 uppercase shrink-0",
+            title: "{folders}",
+            "{label}"
+        }
+    }
+}
 fn default_search_filters(options: &SearchFilterOptions) -> SearchFilters {
     let pick = |available: &[String], wanted: &[&str]| -> Vec<String> {
         available

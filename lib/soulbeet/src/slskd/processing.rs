@@ -99,6 +99,11 @@ fn find_best_albums(
                             .then_with(|| {
                                 s1.quality_score().partial_cmp(&s2.quality_score()).unwrap()
                             })
+                            .then_with(|| {
+                                s1.availability_score()
+                                    .partial_cmp(&s2.availability_score())
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
                     })
                 {
                     best_files_for_album.insert(*expected_track_title, best_file_for_track);
@@ -141,9 +146,16 @@ fn find_best_albums(
                 .map(|t| t.base.quality_score())
                 .sum::<f64>()
                 / final_tracks.len() as f64;
+            let avg_availability = final_tracks
+                .iter()
+                .map(|t| t.base.availability_score())
+                .sum::<f64>()
+                / final_tracks.len() as f64;
 
-            let album_quality_score =
-                (avg_score * 0.3) + (completeness * 0.3) + (avg_format_score * 0.4);
+            let album_quality_score = (avg_score * 0.3)
+                + (completeness * 0.3)
+                + (avg_format_score * 0.38)
+                + (avg_availability * 0.02);
 
             Some(AlbumResult {
                 username,
@@ -157,6 +169,7 @@ fn find_best_albums(
                 has_free_upload_slot: first_track.has_free_upload_slot,
                 upload_speed: first_track.upload_speed,
                 queue_length: first_track.queue_length,
+                availability_score: avg_availability,
                 score: album_quality_score,
             })
         })

@@ -219,12 +219,9 @@ pub async fn update_app_config(config: AppConfigValues) -> Result<AppConfigValue
     set_or_delete(keys::DOWNLOAD_DIR, &config.download_path).await?;
 
     if let Some(album_mode) = config.beets_album_mode {
-        AppConfig::set(
-            keys::ALBUM_MODE,
-            if album_mode { "true" } else { "false" },
-        )
-        .await
-        .map_err(server_error)?;
+        AppConfig::set(keys::ALBUM_MODE, if album_mode { "true" } else { "false" })
+            .await
+            .map_err(server_error)?;
     }
 
     if let Some(servers) = &config.musicbrainz_servers {

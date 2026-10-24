@@ -35,6 +35,7 @@ aes-gcm = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
 futures = { version = "0.3", optional = true }
+notify = { version = "8", optional = true }
 
 [build-dependencies]
 dotenvy = "0.15.7"
@@ -60,4 +61,5 @@ server = [
   "dep:sha2",
   "dep:base64",
   "dep:futures",
+  "dep:notify",
 ]

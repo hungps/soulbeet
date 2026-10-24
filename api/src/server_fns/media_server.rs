@@ -1,11 +1,11 @@
 use crate::auth::AuthResponse;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "server")]
+use shared::media_server::MediaServerView;
 use shared::media_server::{
     MediaPathMapping, MediaServerKind, MediaServerSettings, PlexPin, PlexServerOption,
 };
-#[cfg(feature = "server")]
-use shared::media_server::MediaServerView;
 #[cfg(feature = "server")]
 use shared::system::MediaServerStatus;
 
@@ -17,8 +17,8 @@ use crate::{
         user::User,
         user_settings::UserSettings,
     },
-    services::{evict_media_server, media_server_for_user, plex_client_id},
     server_fns::server_error,
+    services::{evict_media_server, media_server_for_user, plex_client_id},
     AuthSession,
 };
 
@@ -52,7 +52,12 @@ fn best_server(servers: &[PlexServerOption]) -> Option<&PlexServerOption> {
         .iter()
         .filter(|s| s.local && !s.relay)
         .min_by_key(|s| if s.secure { 1 } else { 0 })
-        .or_else(|| servers.iter().filter(|s| !s.relay).min_by_key(|s| if s.secure { 1 } else { 0 }))
+        .or_else(|| {
+            servers
+                .iter()
+                .filter(|s| !s.relay)
+                .min_by_key(|s| if s.secure { 1 } else { 0 })
+        })
         .or_else(|| servers.first())
 }
 
@@ -298,24 +303,22 @@ pub async fn poll_plex_login(pin_id: String) -> Result<PlexLoginPoll, ServerFnEr
             return Ok(PlexLoginPoll::Pending);
         };
 
-        let user = match MediaServerConfig::find_user_by_account(
-            MediaServerKind::Plex,
-            &plex_user.id,
-        )
-        .await
-        .map_err(server_error)?
-        {
-            Some(user_id) => User::get_by_id(&user_id).await.map_err(server_error)?,
-            None => {
-                let username = unique_username(&plex_user.username, &plex_user.id)
-                    .await
-                    .map_err(server_error)?;
-                let password = uuid::Uuid::new_v4().to_string();
-                User::create(&username, &password)
-                    .await
-                    .map_err(server_error)?
-            }
-        };
+        let user =
+            match MediaServerConfig::find_user_by_account(MediaServerKind::Plex, &plex_user.id)
+                .await
+                .map_err(server_error)?
+            {
+                Some(user_id) => User::get_by_id(&user_id).await.map_err(server_error)?,
+                None => {
+                    let username = unique_username(&plex_user.username, &plex_user.id)
+                        .await
+                        .map_err(server_error)?;
+                    let password = uuid::Uuid::new_v4().to_string();
+                    User::create(&username, &password)
+                        .await
+                        .map_err(server_error)?
+                }
+            };
 
         let encrypted = crypto::encrypt(&plex_user.token).map_err(server_error)?;
         let existing = MediaServerConfig::get(&user.id, MediaServerKind::Plex)
@@ -422,12 +425,10 @@ pub async fn poll_plex_link(pin_id: String) -> Result<PlexLinkPoll, ServerFnErro
             return Ok(PlexLinkPoll::Pending);
         };
 
-        if let Some(linked_user) = MediaServerConfig::find_user_by_account(
-            MediaServerKind::Plex,
-            &plex_user.id,
-        )
-        .await
-        .map_err(server_error)?
+        if let Some(linked_user) =
+            MediaServerConfig::find_user_by_account(MediaServerKind::Plex, &plex_user.id)
+                .await
+                .map_err(server_error)?
         {
             if linked_user != user_id {
                 return Err(server_error(
@@ -511,7 +512,10 @@ pub async fn poll_plex_link(pin_id: String) -> Result<PlexLinkPoll, ServerFnErro
         media_server::reset_playlists_for_server_change(&user_id).await;
         evict_media_server(&user_id).await;
 
-        info!("Linked Plex account '{}' for user {}", plex_user.username, user_id);
+        info!(
+            "Linked Plex account '{}' for user {}",
+            plex_user.username, user_id
+        );
         Ok(PlexLinkPoll::Complete {
             account_name: plex_user.username,
             servers,
@@ -609,7 +613,12 @@ pub async fn connect_navidrome(
             } else {
                 MediaServerStatus::InvalidCredentials
             };
-            let _ = MediaServerConfig::update_status(&auth.0.sub, MediaServerKind::Navidrome, status.as_str()).await;
+            let _ = MediaServerConfig::update_status(
+                &auth.0.sub,
+                MediaServerKind::Navidrome,
+                status.as_str(),
+            )
+            .await;
             return Err(server_error(e.to_string()));
         }
 
@@ -861,12 +870,18 @@ pub async fn list_plex_servers() -> Result<Vec<PlexServerOption>, ServerFnError>
 }
 
 #[get("/api/media-server/mappings", auth: AuthSession)]
-pub async fn get_path_mappings(kind: Option<MediaServerKind>) -> Result<Vec<MediaPathMapping>, ServerFnError> {
+pub async fn get_path_mappings(
+    kind: Option<MediaServerKind>,
+) -> Result<Vec<MediaPathMapping>, ServerFnError> {
     #[cfg(feature = "server")]
     {
         MediaPathMappingRow::list_for_user(&auth.0.sub, kind)
             .await
-            .map(|rows| rows.into_iter().map(MediaPathMappingRow::into_shared).collect())
+            .map(|rows| {
+                rows.into_iter()
+                    .map(MediaPathMappingRow::into_shared)
+                    .collect()
+            })
             .map_err(server_error)
     }
     #[cfg(not(feature = "server"))]
@@ -958,6 +973,10 @@ pub async fn trigger_media_scan(user_id: &str, local_path: &std::path::Path) {
         .collect();
 
     if let Err(e) = server.start_scan_paths(&paths).await {
-        warn!("Failed to trigger {} scan after import: {}", server.kind(), e);
+        warn!(
+            "Failed to trigger {} scan after import: {}",
+            server.kind(),
+            e
+        );
     }
 }

@@ -121,6 +121,76 @@ fn has_failed(group: &TransferGroup) -> bool {
         .any(|t| matches!(t.state, DownloadState::Failed(_)))
 }
 
+fn track_progress_rank(state: &DownloadState) -> Option<u8> {
+    match state {
+        DownloadState::Queued => Some(0),
+        DownloadState::InProgress => Some(1),
+        DownloadState::Completed => Some(2),
+        DownloadState::Importing => Some(3),
+        DownloadState::Imported => Some(4),
+        _ => None,
+    }
+}
+
+fn group_status(group: &TransferGroup) -> (&'static str, &'static str) {
+    let any = |state: &DownloadState| group.tracks.iter().any(|track| &track.state == state);
+    if group
+        .tracks
+        .iter()
+        .any(|track| matches!(track.state, DownloadState::Failed(_)))
+    {
+        return ("FAILED", "bg-red-500/20 text-red-300 border-red-500/40");
+    }
+    if any(&DownloadState::Stopped) || any(&DownloadState::Cancelled) {
+        return (
+            "STOPPED",
+            "bg-orange-500/20 text-orange-300 border-orange-500/40",
+        );
+    }
+    if any(&DownloadState::ImportSkipped) {
+        return (
+            "SKIPPED",
+            "bg-yellow-500/20 text-yellow-300 border-yellow-500/40",
+        );
+    }
+    let all_queued = !group.tracks.is_empty()
+        && group
+            .tracks
+            .iter()
+            .all(|track| matches!(track.state, DownloadState::Queued));
+    if all_queued {
+        return ("QUEUED", "bg-gray-600/20 text-gray-400 border-gray-500/40");
+    }
+    let Some(rank) = group
+        .tracks
+        .iter()
+        .filter(|track| !matches!(track.state, DownloadState::Queued))
+        .filter_map(|track| track_progress_rank(&track.state))
+        .min()
+    else {
+        return ("PENDING", "bg-gray-600/20 text-gray-400 border-gray-500/40");
+    };
+    match rank {
+        0 => ("QUEUED", "bg-gray-600/20 text-gray-400 border-gray-500/40"),
+        1 => (
+            "DOWNLOADING",
+            "bg-blue-500/20 text-blue-300 border-blue-500/40",
+        ),
+        2 => (
+            "DOWNLOADED",
+            "bg-blue-500/20 text-blue-300 border-blue-500/40",
+        ),
+        3 => (
+            "TAGGING",
+            "bg-beet-leaf/20 text-beet-leaf border-beet-leaf/40",
+        ),
+        _ => (
+            "TAGGED",
+            "bg-green-500/20 text-green-300 border-green-500/40",
+        ),
+    }
+}
+
 fn finished_count(group: &TransferGroup) -> usize {
     group
         .tracks
@@ -143,6 +213,9 @@ fn group_percent(group: &TransferGroup) -> f64 {
 pub fn Downloads(mut props: DownloadsProps) -> Element {
     let auth = use_auth();
     let mut expanded = use_signal(HashSet::<String>::new);
+    let mut busy = use_signal(HashSet::<String>::new);
+    let mut clearing = use_signal(|| false);
+    let mut clearing_failed = use_signal(|| false);
 
     use_future(move || async move {
         if !auth.is_logged_in() {
@@ -187,19 +260,43 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
         .count();
 
     let clear_finished = move |_| {
+        clearing.set(true);
         spawn(async move {
             let _ = auth.call(api::dismiss_finished_download_requests()).await;
+            let groups = group_tracks(&props.downloads.read());
+            let fully_tagged: HashSet<String> = groups
+                .iter()
+                .filter(|group| {
+                    group.id.is_some()
+                        && !group.tracks.is_empty()
+                        && group
+                            .tracks
+                            .iter()
+                            .all(|track| matches!(track.state, DownloadState::Imported))
+                })
+                .filter_map(|group| group.id.clone())
+                .collect();
+            let mut map = props.downloads.write();
+            map.retain(|_, file| match &file.batch_id {
+                Some(batch_id) => !fully_tagged.contains(batch_id),
+                None => true,
+            });
+            clearing.set(false);
         });
-        let mut map = props.downloads.write();
-        map.retain(|_, file| {
-            matches!(
-                file.state,
-                DownloadState::Queued
-                    | DownloadState::InProgress
-                    | DownloadState::Importing
-                    | DownloadState::Completed
-                    | DownloadState::Stopped
-            )
+    };
+
+    let clear_failed = move |_| {
+        clearing_failed.set(true);
+        spawn(async move {
+            if let Ok(removed) = auth.call(api::dismiss_failed_download_requests()).await {
+                let removed: HashSet<String> = removed.into_iter().collect();
+                let mut map = props.downloads.write();
+                map.retain(|_, file| match &file.batch_id {
+                    Some(batch_id) => !removed.contains(batch_id),
+                    None => true,
+                });
+            }
+            clearing_failed.set(false);
         });
     };
 
@@ -289,10 +386,18 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                 let active = has_active(group);
                 let stopped = has_stopped(group);
                 let failed = has_failed(group);
+                let (status_label, status_class) = group_status(group);
+                let is_tagging = group.tracks.iter().all(|track| track.source == "beets");
                 let stop_id = group_id.clone();
                 let resume_id = group_id.clone();
                 let retry_id = group_id.clone();
                 let remove_id = group_id.clone();
+                let busy_key = group_id.clone().unwrap_or_else(|| key.clone());
+                let is_busy = busy.read().contains(&busy_key);
+                let stop_busy = busy_key.clone();
+                let resume_busy = busy_key.clone();
+                let retry_busy = busy_key.clone();
+                let remove_busy = busy_key.clone();
 
                 rsx! {
                   div { key: "{key}", class: "bg-white/5 border border-white/5 rounded-lg overflow-hidden",
@@ -310,13 +415,24 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                       },
                       div { class: "flex items-start justify-between gap-2",
                         div { class: "min-w-0 flex-grow",
-                          h4 { class: "text-sm font-bold text-beet-leaf truncate", "{group.label}" }
+                          div { class: "flex items-center gap-2 min-w-0",
+                            h4 { class: "text-sm font-bold text-beet-leaf truncate", "{group.label}" }
+                            span {
+                              class: "text-[9px] font-mono px-1.5 py-0.5 rounded border uppercase shrink-0 {status_class}",
+                              "{status_label}"
+                            }
+                          }
                           p { class: "text-[10px] font-mono text-gray-500 uppercase tracking-widest",
                             "{finished}/{total} tracks"
                           }
                         }
-                        div { class: "flex items-center gap-1 shrink-0",
-                          if is_persisted && active {
+                        div {
+                          class: if is_busy { "flex items-center gap-1 shrink-0 pointer-events-none opacity-50" } else { "flex items-center gap-1 shrink-0" },
+                          onclick: move |evt: MouseEvent| evt.stop_propagation(),
+                          if is_busy {
+                            div { class: "w-4 h-4 animate-spin rounded-full border-2 border-transparent border-t-beet-accent border-b-beet-accent" }
+                          }
+                          if is_persisted && active && !is_tagging {
                             {
                               let request_id = stop_id.clone().unwrap_or_default();
                               rsx! {
@@ -327,10 +443,13 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                                   onclick: move |evt: MouseEvent| {
                                       evt.stop_propagation();
                                       let request_id = request_id.clone();
+                                      let busy_key = stop_busy.clone();
+                                      busy.write().insert(busy_key.clone());
                                       spawn(async move {
                                           let _ = auth
                                               .call(api::stop_download_request(RequestAction { request_id }))
                                               .await;
+                                          busy.write().remove(&busy_key);
                                       });
                                   },
                                   svg {
@@ -345,7 +464,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                               }
                             }
                           }
-                          if is_persisted && !active && stopped {
+                          if is_persisted && !active && stopped && !is_tagging {
                             {
                               let request_id = resume_id.clone().unwrap_or_default();
                               rsx! {
@@ -356,10 +475,13 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                                   onclick: move |evt: MouseEvent| {
                                       evt.stop_propagation();
                                       let request_id = request_id.clone();
+                                      let busy_key = resume_busy.clone();
+                                      busy.write().insert(busy_key.clone());
                                       spawn(async move {
                                           let _ = auth
                                               .call(api::resume_download_request(RequestAction { request_id }))
                                               .await;
+                                          busy.write().remove(&busy_key);
                                       });
                                   },
                                   svg {
@@ -374,7 +496,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                               }
                             }
                           }
-                          if is_persisted && failed {
+                          if is_persisted && failed && !is_tagging {
                             {
                               let request_id = retry_id.clone().unwrap_or_default();
                               rsx! {
@@ -385,10 +507,13 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                                   onclick: move |evt: MouseEvent| {
                                       evt.stop_propagation();
                                       let request_id = request_id.clone();
+                                      let busy_key = retry_busy.clone();
+                                      busy.write().insert(busy_key.clone());
                                       spawn(async move {
                                           let _ = auth
                                               .call(api::retry_download_request(RequestAction { request_id }))
                                               .await;
+                                          busy.write().remove(&busy_key);
                                       });
                                   },
                                   svg {
@@ -407,7 +532,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                               }
                             }
                           }
-                          if is_persisted {
+                          if is_persisted && !(is_tagging && active) {
                             {
                               let request_id = remove_id.clone().unwrap_or_default();
                               rsx! {
@@ -419,6 +544,8 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                                       evt.stop_propagation();
                                       let request_id = request_id.clone();
                                       let mut downloads = props.downloads;
+                                      let busy_key = remove_busy.clone();
+                                      busy.write().insert(busy_key.clone());
                                       spawn(async move {
                                           if auth
                                               .call(api::remove_download_request(RequestAction {
@@ -431,6 +558,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                                                   .write()
                                                   .retain(|_, file| file.batch_id.as_deref() != Some(request_id.as_str()));
                                           }
+                                          busy.write().remove(&busy_key);
                                       });
                                   },
                                   svg {
@@ -486,10 +614,19 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
           }
           // Footer
           div { class: "p-4 border-t border-white/10 bg-black/20",
-            button {
-              class: "w-full py-2 text-xs font-mono uppercase tracking-widest text-center border border-white/10 hover:bg-white/5 text-gray-400 hover:text-white transition-colors cursor-pointer hover:border-red-500/30",
-              onclick: clear_finished,
-              "CLEAR COMPLETED"
+            div { class: "space-y-2",
+              button {
+                class: "w-full py-2 text-xs font-mono uppercase tracking-widest text-center border border-white/10 hover:bg-white/5 text-gray-400 hover:text-white transition-colors cursor-pointer hover:border-red-500/30 disabled:opacity-40 disabled:pointer-events-none",
+                disabled: clearing(),
+                onclick: clear_finished,
+                if clearing() { "CLEARING…" } else { "CLEAR COMPLETED" }
+              }
+              button {
+                class: "w-full py-2 text-xs font-mono uppercase tracking-widest text-center border border-white/10 hover:bg-red-900/20 text-gray-500 hover:text-red-300 transition-colors cursor-pointer hover:border-red-500/30 disabled:opacity-40 disabled:pointer-events-none",
+                disabled: clearing_failed(),
+                onclick: clear_failed,
+                if clearing_failed() { "CLEARING…" } else { "CLEAR FAILED" }
+              }
             }
           }
         }

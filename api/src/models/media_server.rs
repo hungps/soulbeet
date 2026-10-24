@@ -316,7 +316,8 @@ pub async fn local_to_remote(
     let mappings = MediaPathMappingRow::list_for_user(user_id, Some(kind)).await?;
     let mut best: Option<(usize, String)> = None;
     for mapping in mappings {
-        if let Some(remote) = replace_prefix(local_path, &mapping.local_path, &mapping.remote_path) {
+        if let Some(remote) = replace_prefix(local_path, &mapping.local_path, &mapping.remote_path)
+        {
             let score = normalize_prefix(&mapping.local_path).len();
             if best.as_ref().is_none_or(|(current, _)| score > *current) {
                 best = Some((score, remote));
@@ -335,7 +336,8 @@ pub async fn remote_to_local(
     let mappings = MediaPathMappingRow::list_for_user(user_id, Some(kind)).await?;
     let mut best: Option<(usize, String)> = None;
     for mapping in mappings {
-        if let Some(local) = replace_prefix(remote_path, &mapping.remote_path, &mapping.local_path) {
+        if let Some(local) = replace_prefix(remote_path, &mapping.remote_path, &mapping.local_path)
+        {
             let score = normalize_prefix(&mapping.remote_path).len();
             if best.as_ref().is_none_or(|(current, _)| score > *current) {
                 best = Some((score, local));

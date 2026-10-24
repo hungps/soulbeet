@@ -7,6 +7,7 @@
 > - Able to pick album releases
 > - Plex integration
 > - Selfhosted MusicBrainz support
+> - Library management, unknown release/track matching
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet)
 [![Docker Image Size](https://img.shields.io/docker/image-size/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet/tags)

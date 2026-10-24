@@ -141,7 +141,9 @@ pub(crate) async fn hydrate_album_tracks(query: &mut DownloadQuery) -> Result<()
 #[post("/api/download/search/start", _: AuthSession)]
 pub async fn start_download_search(data: DownloadQuery) -> Result<String, ServerFnError> {
     let mut data = data;
-    hydrate_album_tracks(&mut data).await.map_err(server_error)?;
+    hydrate_album_tracks(&mut data)
+        .await
+        .map_err(server_error)?;
 
     let backend = download_backend(data.backend.as_deref())
         .await
