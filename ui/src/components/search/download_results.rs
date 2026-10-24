@@ -1,6 +1,6 @@
 use dioxus::logger::tracing::info;
 use dioxus::prelude::*;
-use shared::download::{DownloadableGroup, DownloadableItem};
+use shared::download::{DownloadRequestContext, DownloadableGroup, DownloadableItem};
 use std::collections::HashSet;
 
 use crate::{use_auth, Checkbox};
@@ -68,8 +68,9 @@ pub struct Props {
     pub results: Vec<DownloadableGroup>,
     pub is_searching: bool,
     pub is_downloading: Signal<bool>,
+    pub request: DownloadRequestContext,
     #[props(into)]
-    pub on_download: EventHandler<(Vec<DownloadableItem>, String)>,
+    pub on_download: EventHandler<(Vec<DownloadableItem>, String, DownloadRequestContext)>,
     #[props(into)]
     pub on_back: EventHandler<()>,
 }
@@ -80,6 +81,8 @@ struct AlbumResultItemProps {
     selected_tracks: Signal<HashSet<String>>,
     on_album_select_all: EventHandler<DownloadableGroup>,
     on_track_toggle: EventHandler<String>,
+    on_download_group: EventHandler<DownloadableGroup>,
+    can_download: bool,
     is_best: bool,
     starts_expanded: bool,
 }
@@ -119,6 +122,7 @@ fn TrackItem(props: TrackItemProps) -> Element {
 #[component]
 fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
     let album = props.album.clone();
+    let group_for_download = album.clone();
     let mut is_expanded = use_signal(|| props.starts_expanded);
 
     rsx! {
@@ -143,6 +147,30 @@ fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
                     }
                     p { class: "text-sm text-gray-400 font-mono",
                         "{album.artist.clone().unwrap_or_default()} - Quality: {album.quality}, {album.item_count} tracks, Score: {album.score:.2}"
+                    }
+                }
+
+                // Download the whole release
+                button {
+                    class: "p-1.5 rounded-full hover:bg-white/10 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed shrink-0",
+                    aria_label: "Download release",
+                    title: "Download this release",
+                    disabled: !props.can_download,
+                    onclick: move |evt: MouseEvent| {
+                        evt.stop_propagation();
+                        props.on_download_group.call(group_for_download.clone());
+                    },
+                    svg {
+                        class: "w-4 h-4 text-gray-400",
+                        fill: "none",
+                        stroke: "currentColor",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            stroke_width: "2",
+                            d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4",
+                        }
                     }
                 }
 
@@ -235,6 +263,22 @@ pub fn DownloadResults(props: Props) -> Element {
         }
     };
 
+    let handle_download_group = EventHandler::new({
+        let request = props.request.clone();
+        let on_download = props.on_download;
+        move |group: DownloadableGroup| {
+            if *is_downloading.read() || selected_folder.read().is_empty() {
+                return;
+            }
+            let items = group.items.clone();
+            if items.is_empty() {
+                return;
+            }
+            is_downloading.set(true);
+            on_download.call((items, selected_folder(), request.clone()));
+        }
+    });
+
     let handle_download = move |_| {
         // Prevent double-clicks by checking if already downloading
         if *is_downloading.read() {
@@ -261,7 +305,7 @@ pub fn DownloadResults(props: Props) -> Element {
 
         props
             .on_download
-            .call((items_to_download, selected_folder()));
+            .call((items_to_download, selected_folder(), props.request.clone()));
     };
 
     rsx! {
@@ -321,6 +365,8 @@ pub fn DownloadResults(props: Props) -> Element {
                         selected_tracks,
                         on_album_select_all: handle_album_select_all,
                         on_track_toggle: handle_track_toggle,
+                        on_download_group: handle_download_group,
+                        can_download: !selected_folder.read().is_empty() && !*is_downloading.read(),
                         is_best: idx == 0,
                         starts_expanded: idx == 0,
                     }

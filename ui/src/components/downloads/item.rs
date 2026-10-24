@@ -55,6 +55,12 @@ pub fn DownloadItem(file: DownloadProgress, on_cancel: EventHandler<DownloadProg
             "bg-orange-500/20 text-orange-300",
             "CANCEL",
         ),
+        DownloadState::Stopped => (
+            "Stopped",
+            "border-orange-500/50",
+            "bg-orange-500/20 text-orange-300",
+            "STOP",
+        ),
     };
 
     let percent = file.percent as i32;

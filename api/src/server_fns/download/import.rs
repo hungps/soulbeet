@@ -45,7 +45,7 @@ pub async fn import_group(
             ..e.clone()
         })
         .collect();
-    let _ = tx.send(DownloadEvent::Progress(importing_entries));
+    super::requests::broadcast_progress(&tx, importing_entries).await;
 
     let importer = match music_importer(None).await {
         Ok(imp) => imp,
@@ -59,7 +59,7 @@ pub async fn import_group(
                     ..entry.clone()
                 })
                 .collect();
-            let _ = tx.send(DownloadEvent::Progress(failed_entries));
+            super::requests::broadcast_progress(&tx, failed_entries).await;
             return;
         }
     };
@@ -75,7 +75,7 @@ pub async fn import_group(
                     ..e.clone()
                 })
                 .collect();
-            let _ = tx.send(DownloadEvent::Progress(imported_entries));
+            super::requests::broadcast_progress(&tx, imported_entries).await;
 
             let user_id = user_id.to_string();
             let scan_target = target_path.clone();
@@ -95,7 +95,7 @@ pub async fn import_group(
                     ..e.clone()
                 })
                 .collect();
-            let _ = tx.send(DownloadEvent::Progress(skipped_entries));
+            super::requests::broadcast_progress(&tx, skipped_entries).await;
 
             for entry in &entries {
                 cleanup_failed_file(&entry.item).await;
@@ -111,7 +111,7 @@ pub async fn import_group(
                     ..e.clone()
                 })
                 .collect();
-            let _ = tx.send(DownloadEvent::Progress(failed_entries));
+            super::requests::broadcast_progress(&tx, failed_entries).await;
 
             for entry in &entries {
                 cleanup_failed_file(&entry.item).await;
@@ -127,7 +127,7 @@ pub async fn import_group(
                     ..e.clone()
                 })
                 .collect();
-            let _ = tx.send(DownloadEvent::Progress(failed_entries));
+            super::requests::broadcast_progress(&tx, failed_entries).await;
 
             for entry in &entries {
                 cleanup_failed_file(&entry.item).await;
@@ -143,7 +143,7 @@ pub async fn import_group(
                     ..entry.clone()
                 })
                 .collect();
-            let _ = tx.send(DownloadEvent::Progress(failed_entries));
+            super::requests::broadcast_progress(&tx, failed_entries).await;
 
             for entry in &entries {
                 cleanup_failed_file(&entry.item).await;

@@ -3,6 +3,7 @@ pub mod deletion_review;
 pub mod discovery_candidate;
 pub mod discovery_history;
 pub mod discovery_playlist;
+pub mod download_request;
 pub mod engine_report;
 pub mod folder;
 pub mod media_server;

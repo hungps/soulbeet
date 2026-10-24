@@ -28,6 +28,79 @@ impl DownloadQuery {
         self.backend = Some(backend.into());
         self
     }
+
+    /// Identity of the release this query targets. Downloads issued for the
+    /// same release join one request session.
+    pub fn request_context(&self) -> DownloadRequestContext {
+        if let Some(album) = &self.album {
+            return DownloadRequestContext {
+                key: format!("album:{}", album.id),
+                label: album.title.clone(),
+                artist: Some(album.artist.clone()),
+            };
+        }
+
+        if let Some(track) = self.tracks.first() {
+            let key = track
+                .album_id
+                .as_ref()
+                .map(|id| format!("album:{id}"))
+                .unwrap_or_else(|| format!("track:{}", track.id));
+            return DownloadRequestContext {
+                key,
+                label: track
+                    .album_title
+                    .clone()
+                    .unwrap_or_else(|| track.title.clone()),
+                artist: Some(track.artist.clone()),
+            };
+        }
+
+        DownloadRequestContext::default()
+    }
+}
+
+/// Identity of the release a manual or automatic download belongs to.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DownloadRequestContext {
+    /// Stable key of the release (metadata album ID when known).
+    pub key: String,
+    /// Human-readable release title.
+    pub label: String,
+    /// Release artist, when known.
+    #[serde(default)]
+    pub artist: Option<String>,
+}
+
+/// A persisted request session shown as one expandable card in the transfer panel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DownloadRequestSummary {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub artist: Option<String>,
+    pub target_folder: String,
+    /// `active`, `stopped` or `completed`.
+    pub state: String,
+    pub tracks: Vec<DownloadRequestTrack>,
+}
+
+/// Persisted state of one track inside a request session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DownloadRequestTrack {
+    pub item: String,
+    pub source: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub size: u64,
+    pub quality: String,
+    pub transferred: u64,
+    pub percent: f64,
+    pub speed: f64,
+    pub state: DownloadState,
+    pub error: Option<String>,
+    pub transfer_id: Option<String>,
 }
 
 impl From<Track> for DownloadQuery {
@@ -120,6 +193,23 @@ pub enum DownloadState {
     ImportSkipped,
     Failed(String),
     Cancelled,
+    /// The whole request was stopped by the user and can be resumed.
+    Stopped,
+}
+
+impl DownloadState {
+    /// Whether this state is final for a request session. Downloaded files
+    /// still waiting to be imported are not final.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            DownloadState::Imported
+                | DownloadState::ImportSkipped
+                | DownloadState::Failed(_)
+                | DownloadState::Cancelled
+                | DownloadState::Stopped
+        )
+    }
 }
 
 /// Progress of a single download
@@ -259,6 +349,11 @@ pub enum DownloadEvent {
     },
     /// Auto-download lifecycle events (displayed inline on search rows, not in download panel)
     AutoDownload(AutoDownloadEvent),
+    /// A request was removed together with all of its tracks.
+    RequestRemoved {
+        request_id: String,
+        items: Vec<String>,
+    },
 }
 
 /// Events from the auto-download pipeline, sent over WebSocket
@@ -285,9 +380,7 @@ pub enum AutoDownloadEvent {
         track_count: usize,
     },
     /// Download queued with the picked source
-    Downloading {
-        batch_id: String,
-    },
+    Downloading { batch_id: String },
     /// Best score below threshold, client should show manual source picker
     FallbackToManual {
         batch_id: String,
@@ -296,8 +389,57 @@ pub enum AutoDownloadEvent {
         threshold: f64,
     },
     /// Auto-download pipeline failed
-    Failed {
-        batch_id: String,
-        error: String,
-    },
+    Failed { batch_id: String, error: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::{Album, Track};
+
+    fn track(album_id: Option<&str>) -> Track {
+        Track {
+            id: "recording".to_string(),
+            title: "A Track".to_string(),
+            artist: "An Artist".to_string(),
+            album_id: album_id.map(str::to_string),
+            album_title: Some("An Album".to_string()),
+            release_date: None,
+            duration: None,
+            mbid: None,
+            release_mbid: None,
+        }
+    }
+
+    #[test]
+    fn album_queries_share_the_release_key_across_editions() {
+        let album = |id: &str| Album {
+            id: id.to_string(),
+            title: "An Album".to_string(),
+            artist: "An Artist".to_string(),
+            release_date: None,
+            mbid: None,
+            cover_url: None,
+            country: None,
+            media: None,
+            track_count: None,
+        };
+
+        let first = DownloadQuery::new(Vec::new()).album(album("release-1"));
+        let second = DownloadQuery::new(Vec::new()).album(album("release-2"));
+        assert_ne!(first.request_context().key, second.request_context().key);
+    }
+
+    #[test]
+    fn track_queries_use_the_album_identity_when_known() {
+        let context = DownloadQuery::from(track(Some("release-1"))).request_context();
+        assert_eq!(context.key, "album:release-1");
+        assert_eq!(context.label, "An Album");
+    }
+
+    #[test]
+    fn track_queries_fall_back_to_the_recording_identity() {
+        let context = DownloadQuery::from(track(None)).request_context();
+        assert_eq!(context.key, "track:recording");
+    }
 }

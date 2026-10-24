@@ -155,6 +155,21 @@ fn WebNavbar() -> Element {
                 DownloadEvent::AutoDownload(auto_event) => {
                     auto_download_signal.set(Some(auto_event));
                 }
+                DownloadEvent::RequestRemoved {
+                    request_id,
+                    items,
+                } => {
+                    let mut map = downloads.write();
+                    for item in items {
+                        map.remove(&item);
+                    }
+                    map.retain(|_, file| file.batch_id.as_deref() != Some(request_id.as_str()));
+                    let active = !map.is_empty();
+                    drop(map);
+                    if *has_downloads.peek() != active {
+                        has_downloads.set(active);
+                    }
+                }
             }
         },
     );

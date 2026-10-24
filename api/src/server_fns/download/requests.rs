@@ -1,0 +1,501 @@
+//! Request sessions: one card in the transfer panel per release. A manual
+//! download creates a request on first use and later downloads for the same
+//! release attach to it.
+
+use serde::{Deserialize, Serialize};
+use shared::download::DownloadRequestSummary;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestAction {
+    pub request_id: String,
+}
+
+#[cfg(feature = "server")]
+use std::collections::HashMap;
+#[cfg(feature = "server")]
+use std::path::PathBuf;
+#[cfg(feature = "server")]
+use std::sync::LazyLock;
+
+#[cfg(feature = "server")]
+use dioxus::logger::tracing::{info, warn};
+use dioxus::prelude::*;
+#[cfg(feature = "server")]
+use shared::download::{
+    DownloadEvent, DownloadProgress, DownloadRequestContext, DownloadState, DownloadableItem,
+    QueuedDownload,
+};
+#[cfg(feature = "server")]
+use tokio::sync::{broadcast, RwLock};
+#[cfg(feature = "server")]
+use tokio_util::sync::CancellationToken;
+
+#[cfg(feature = "server")]
+use crate::config::CONFIG;
+#[cfg(feature = "server")]
+use crate::globals::{get_or_create_user_channel, register_user_task, unregister_user_task};
+#[cfg(feature = "server")]
+use crate::models::download_request::{
+    state_is_terminal_key, DownloadRequestRow, DownloadRequestTrackRow,
+};
+#[cfg(feature = "server")]
+use crate::server_fns::server_error;
+#[cfg(feature = "server")]
+use crate::services::download_backend;
+#[cfg(feature = "server")]
+use crate::AuthSession;
+
+#[cfg(feature = "server")]
+use super::monitor::DownloadMonitor;
+#[cfg(feature = "server")]
+use super::utils::resolve_download_path;
+
+#[cfg(feature = "server")]
+static REQUEST_TOKENS: LazyLock<RwLock<HashMap<String, CancellationToken>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+#[cfg(feature = "server")]
+pub(crate) async fn request_token(username: &str, request_id: &str) -> CancellationToken {
+    let mut tokens = REQUEST_TOKENS.write().await;
+    if let Some(token) = tokens.get(request_id) {
+        if !token.is_cancelled() {
+            return token.clone();
+        }
+    }
+    let (_, user_token) = get_or_create_user_channel(username).await;
+    let token = user_token.child_token();
+    tokens.insert(request_id.to_string(), token.clone());
+    token
+}
+
+#[cfg(feature = "server")]
+pub async fn cancel_request_token(request_id: &str) {
+    let tokens = REQUEST_TOKENS.read().await;
+    if let Some(token) = tokens.get(request_id) {
+        token.cancel();
+    }
+}
+
+#[cfg(feature = "server")]
+pub async fn forget_request_token(request_id: &str) {
+    REQUEST_TOKENS.write().await.remove(request_id);
+}
+
+/// Broadcast progress and persist the rows the event belongs to.
+#[cfg(feature = "server")]
+pub async fn broadcast_progress(
+    tx: &broadcast::Sender<DownloadEvent>,
+    entries: Vec<DownloadProgress>,
+) {
+    let mut touched: Vec<String> = Vec::new();
+    for entry in &entries {
+        if let Some(request_id) = &entry.batch_id {
+            let _ = DownloadRequestTrackRow::update_progress(request_id, entry).await;
+            if !touched.contains(request_id) {
+                touched.push(request_id.clone());
+            }
+        }
+    }
+    for request_id in touched {
+        if let Ok(true) = DownloadRequestRow::mark_completed_if_idle(&request_id).await {
+            forget_request_token(&request_id).await;
+        }
+    }
+    let _ = tx.send(DownloadEvent::Progress(entries));
+}
+
+#[cfg(feature = "server")]
+pub async fn open_request(
+    user_id: &str,
+    context: &DownloadRequestContext,
+    target_folder: &str,
+    backend: Option<&str>,
+) -> Result<DownloadRequestRow, String> {
+    if let Some(existing) = DownloadRequestRow::find_open(user_id, &context.key).await? {
+        if existing.target_folder != target_folder {
+            DownloadRequestRow::update_target_folder(&existing.id, target_folder).await?;
+        }
+        DownloadRequestRow::set_state(&existing.id, "active").await?;
+        return Ok(existing);
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    DownloadRequestRow::create(id.as_str(), user_id, context, target_folder, backend).await
+}
+
+/// Insert the items that are not already part of the request. Returns the new
+/// items, i.e. the only ones that may be enqueued at the backend.
+#[cfg(feature = "server")]
+pub async fn insert_new_items(
+    request: &DownloadRequestRow,
+    items: Vec<DownloadableItem>,
+) -> Result<Vec<DownloadableItem>, String> {
+    let mut inserted = Vec::new();
+    for item in items {
+        if DownloadRequestTrackRow::insert_if_new(&request.id, &item).await? {
+            inserted.push(item);
+        }
+    }
+    Ok(inserted)
+}
+
+/// Persist the backend's enqueue answers and broadcast their initial state.
+/// Returns the accepted downloads, in the order they were enqueued.
+#[cfg(feature = "server")]
+pub async fn record_queued(
+    request: &DownloadRequestRow,
+    items: &[DownloadableItem],
+    queued: &[QueuedDownload],
+    tx: &broadcast::Sender<DownloadEvent>,
+) -> Vec<QueuedDownload> {
+    let mut accepted = Vec::new();
+    let mut entries = Vec::new();
+
+    for item in items {
+        let answer = queued.iter().find(|q| q.item == item.id || q.id == item.id);
+
+        match answer {
+            Some(q) if q.error.is_none() => {
+                let _ = DownloadRequestTrackRow::set_queued(
+                    &request.id,
+                    &item.id,
+                    &q.id,
+                    &q.source,
+                    &q.item,
+                    &DownloadState::Queued,
+                    None,
+                )
+                .await;
+                let mut entry = DownloadProgress::queued(
+                    q.id.clone(),
+                    q.source.clone(),
+                    q.item.clone(),
+                    q.size,
+                );
+                entry.backend = request.backend.clone();
+                entries.push(entry.with_batch(request.id.clone(), request.label.clone()));
+                accepted.push(q.clone());
+            }
+            Some(q) => {
+                let error = q.error.clone().unwrap_or_default();
+                let _ = DownloadRequestTrackRow::mark_failed(&request.id, &item.id, &error).await;
+                let mut entry =
+                    DownloadProgress::failed(q.id.clone(), q.source.clone(), q.item.clone(), error);
+                entry.backend = request.backend.clone();
+                entries.push(entry.with_batch(request.id.clone(), request.label.clone()));
+            }
+            None => {
+                let error = "Not reported in the backend enqueue response".to_string();
+                let _ = DownloadRequestTrackRow::mark_failed(&request.id, &item.id, &error).await;
+                let mut entry = DownloadProgress::failed(
+                    item.id.clone(),
+                    item.source.clone(),
+                    item.id.clone(),
+                    error,
+                );
+                entry.backend = request.backend.clone();
+                entries.push(entry.with_batch(request.id.clone(), request.label.clone()));
+            }
+        }
+    }
+
+    if !entries.is_empty() {
+        broadcast_progress(tx, entries).await;
+    }
+
+    accepted
+}
+
+#[cfg(feature = "server")]
+pub async fn start_monitor(
+    username: &str,
+    user_id: &str,
+    request: &DownloadRequestRow,
+    accepted: Vec<QueuedDownload>,
+) {
+    if accepted.is_empty() {
+        return;
+    }
+
+    let (tx, _) = get_or_create_user_channel(username).await;
+    let _user_token = register_user_task(username).await;
+    let token = request_token(username, &request.id).await;
+    let sources = accepted.iter().map(|q| q.source.clone()).collect();
+    let filenames = accepted.iter().map(|q| q.item.clone()).collect();
+    let target = PathBuf::from(&request.target_folder);
+    let batch_id = Some(request.id.clone());
+    let batch_label = Some(request.label.clone());
+    let username = username.to_string();
+    let user_id = user_id.to_string();
+
+    let mut monitor = DownloadMonitor::new(
+        sources,
+        filenames,
+        target,
+        tx,
+        token,
+        username.clone(),
+        user_id,
+        batch_id,
+        batch_label,
+    );
+
+    tokio::spawn(async move {
+        monitor.run().await;
+        unregister_user_task(&username).await;
+    });
+}
+
+#[cfg(feature = "server")]
+fn progress_from_track(
+    request: &DownloadRequestRow,
+    track: &DownloadRequestTrackRow,
+    state: DownloadState,
+    error: Option<String>,
+) -> DownloadProgress {
+    let mut entry = DownloadProgress {
+        id: track.transfer_id.clone().unwrap_or_default(),
+        source: track.source.clone(),
+        item: track.item_key.clone(),
+        size: track.size.max(0) as u64,
+        transferred: track.transferred.max(0) as u64,
+        state,
+        percent: track.percent,
+        speed: track.speed,
+        error,
+        backend: request.backend.clone(),
+        batch_id: Some(request.id.clone()),
+        batch_label: Some(request.label.clone()),
+    };
+    if entry.id.is_empty() {
+        entry.id = track.item_key.clone();
+    }
+    entry
+}
+
+#[cfg(feature = "server")]
+async fn owned_request(id: &str, user_id: &str) -> Result<DownloadRequestRow, ServerFnError> {
+    DownloadRequestRow::get_for_user(id, user_id)
+        .await
+        .map_err(server_error)?
+        .ok_or_else(|| server_error("Download request not found"))
+}
+
+#[cfg(feature = "server")]
+async fn cancel_tracks(
+    request: &DownloadRequestRow,
+    tracks: &[DownloadRequestTrackRow],
+    remove: bool,
+) -> Result<(), String> {
+    let backend = download_backend(request.backend.as_deref())
+        .await
+        .map_err(|e| format!("download backend not available: {e}"))?;
+
+    let sources: Vec<String> = tracks
+        .iter()
+        .filter(|t| !t.state_is_terminal())
+        .map(|t| t.source.clone())
+        .collect();
+    let transfers = if sources.is_empty() {
+        Vec::new()
+    } else {
+        backend
+            .get_downloads_for(&sources)
+            .await
+            .unwrap_or_default()
+    };
+
+    for track in tracks.iter().filter(|t| !t.state_is_terminal()) {
+        let id = track
+            .transfer_id
+            .as_ref()
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .cloned()
+            .or_else(|| {
+                transfers
+                    .iter()
+                    .find(|dl| dl.source == track.source && dl.item == track.item_key)
+                    .map(|dl| dl.id.clone())
+            });
+        let Some(id) = id else {
+            continue;
+        };
+        if let Err(e) = backend.cancel_download(&track.source, &id, remove).await {
+            warn!(
+                "Could not cancel transfer {} for request {}: {}",
+                id, request.id, e
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+async fn requeue(
+    request: &DownloadRequestRow,
+    tracks: Vec<DownloadRequestTrackRow>,
+    tx: &broadcast::Sender<DownloadEvent>,
+) -> Result<Vec<QueuedDownload>, String> {
+    let mut items = Vec::new();
+    for track in &tracks {
+        items.push(track.to_item());
+    }
+
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let backend = download_backend(request.backend.as_deref())
+        .await
+        .map_err(|e| format!("download backend not available: {e}"))?;
+    let queued = backend
+        .download(items.clone())
+        .await
+        .map_err(|e| format!("download queue failed: {e}"))?;
+
+    let accepted = record_queued(request, &items, &queued, tx).await;
+    DownloadRequestRow::set_state(&request.id, "active").await?;
+    Ok(accepted)
+}
+
+#[get("/api/downloads/requests", auth: AuthSession)]
+pub async fn list_download_requests() -> Result<Vec<DownloadRequestSummary>, ServerFnError> {
+    let requests = DownloadRequestRow::list_for_user(&auth.0.sub)
+        .await
+        .map_err(server_error)?;
+    let mut summaries = Vec::with_capacity(requests.len());
+    for request in requests {
+        let tracks = DownloadRequestTrackRow::list_for_request(&request.id)
+            .await
+            .map_err(server_error)?;
+        summaries.push(request.to_summary(tracks));
+    }
+    Ok(summaries)
+}
+
+#[post("/api/downloads/requests/stop", auth: AuthSession)]
+pub async fn stop_download_request(action: RequestAction) -> Result<(), ServerFnError> {
+    let request = owned_request(&action.request_id, &auth.0.sub).await?;
+    DownloadRequestRow::set_state(&request.id, "stopped")
+        .await
+        .map_err(server_error)?;
+    cancel_request_token(&request.id).await;
+
+    let tracks = DownloadRequestTrackRow::list_for_request(&request.id)
+        .await
+        .map_err(server_error)?;
+    cancel_tracks(&request, &tracks, false)
+        .await
+        .map_err(server_error)?;
+    DownloadRequestTrackRow::mark_stopped(&request.id)
+        .await
+        .map_err(server_error)?;
+
+    let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
+    let entries: Vec<DownloadProgress> = tracks
+        .iter()
+        .filter(|t| !t.state_is_terminal())
+        .map(|t| progress_from_track(&request, t, DownloadState::Stopped, None))
+        .collect();
+    if !entries.is_empty() {
+        broadcast_progress(&tx, entries).await;
+    }
+    info!("User {} stopped request {}", auth.0.username, request.id);
+    Ok(())
+}
+
+#[post("/api/downloads/requests/resume", auth: AuthSession)]
+pub async fn resume_download_request(action: RequestAction) -> Result<(), ServerFnError> {
+    let request = owned_request(&action.request_id, &auth.0.sub).await?;
+    let tracks = DownloadRequestTrackRow::list_for_request(&request.id)
+        .await
+        .map_err(server_error)?;
+    let pending: Vec<_> = tracks
+        .into_iter()
+        .filter(|t| {
+            matches!(
+                t.state.as_str(),
+                "stopped" | "cancelled" | "queued" | "in_progress" | "completed" | "importing"
+            )
+        })
+        .collect();
+    let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
+    let accepted = requeue(&request, pending, &tx)
+        .await
+        .map_err(server_error)?;
+    start_monitor(&auth.0.username, &auth.0.sub, &request, accepted).await;
+    Ok(())
+}
+
+#[post("/api/downloads/requests/retry", auth: AuthSession)]
+pub async fn retry_download_request(action: RequestAction) -> Result<(), ServerFnError> {
+    let request = owned_request(&action.request_id, &auth.0.sub).await?;
+    let tracks = DownloadRequestTrackRow::list_for_request(&request.id)
+        .await
+        .map_err(server_error)?;
+    let failed: Vec<_> = tracks.into_iter().filter(|t| t.state == "failed").collect();
+    let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
+    let accepted = requeue(&request, failed, &tx).await.map_err(server_error)?;
+    start_monitor(&auth.0.username, &auth.0.sub, &request, accepted).await;
+    Ok(())
+}
+
+#[post("/api/downloads/requests/remove", auth: AuthSession)]
+pub async fn remove_download_request(action: RequestAction) -> Result<(), ServerFnError> {
+    let request = owned_request(&action.request_id, &auth.0.sub).await?;
+    cancel_request_token(&request.id).await;
+    let tracks = DownloadRequestTrackRow::list_for_request(&request.id)
+        .await
+        .map_err(server_error)?;
+    cancel_tracks(&request, &tracks, true)
+        .await
+        .map_err(server_error)?;
+
+    let download_base = CONFIG.download_path().clone();
+    for track in &tracks {
+        if let Some(path) = resolve_download_path(&track.item_key, &download_base) {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                warn!("Could not remove downloaded file {}: {}", path, e);
+            }
+        }
+    }
+
+    DownloadRequestRow::delete(&request.id)
+        .await
+        .map_err(server_error)?;
+    forget_request_token(&request.id).await;
+
+    let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
+    let _ = tx.send(DownloadEvent::RequestRemoved {
+        request_id: request.id.clone(),
+        items: tracks.iter().map(|t| t.item_key.clone()).collect(),
+    });
+    info!("User {} removed request {}", auth.0.username, request.id);
+    Ok(())
+}
+
+#[post("/api/downloads/requests/dismiss-finished", auth: AuthSession)]
+pub async fn dismiss_finished_download_requests() -> Result<(), ServerFnError> {
+    let removed = DownloadRequestRow::delete_finished(&auth.0.sub)
+        .await
+        .map_err(server_error)?;
+    if removed.is_empty() {
+        return Ok(());
+    }
+    let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
+    for request_id in removed {
+        forget_request_token(&request_id).await;
+        let _ = tx.send(DownloadEvent::RequestRemoved {
+            request_id,
+            items: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+impl DownloadRequestTrackRow {
+    pub fn state_is_terminal(&self) -> bool {
+        state_is_terminal_key(&self.state)
+    }
+}

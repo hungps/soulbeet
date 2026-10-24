@@ -39,7 +39,7 @@ const ALBUM_FETCH_LIMIT: u8 = 100;
 fn build_client(env_var: &str, default_host: &str) -> MusicBrainzClient {
     let version = env!("CARGO_PKG_VERSION");
     let mut client = MusicBrainzClient::new(&format!(
-        "Soulbeet/{version} ( https://github.com/terry90/soulbeet )"
+        "Lidarr/3.1.6.5078"
     ))
     .expect("Failed to create MusicBrainz client - invalid user agent format");
     let configured = std::env::var(env_var).ok();

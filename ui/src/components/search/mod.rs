@@ -19,7 +19,7 @@ use api::models::folder::Folder;
 use dioxus::logger::tracing::{info, warn};
 use dioxus::prelude::*;
 use shared::download::{
-    AutoDownloadEvent, DownloadQuery, DownloadableGroup, DownloadableItem,
+    AutoDownloadEvent, DownloadQuery, DownloadRequestContext, DownloadableGroup, DownloadableItem,
     SearchState as DownloadSearchState,
 };
 use shared::metadata::{
@@ -79,6 +79,7 @@ pub fn Search() -> Element {
     let mut filter_options = use_signal(SearchFilterOptions::default);
     let mut filter_provider = use_signal(String::new);
     let mut selected_edition = use_signal::<HashMap<String, usize>>(HashMap::new);
+    let mut download_request_context = use_signal::<Option<DownloadRequestContext>>(|| None);
 
     use_effect(move || {
         let provider = settings.default_provider();
@@ -342,6 +343,7 @@ pub fn Search() -> Element {
 
     // Start an auto_download for a specific folder
     let mut start_auto_download = move |item_id: String, query: DownloadQuery, folder: Folder| {
+        download_request_context.set(Some(query.request_context()));
         download_states.write().insert(item_id.clone(), DownloadRowState::Searching);
 
         // Propagate to expanded track rows (D-09)
@@ -421,6 +423,7 @@ pub fn Search() -> Element {
     };
 
     let download = move |query: DownloadQuery| async move {
+        download_request_context.set(Some(query.request_context()));
         loading.set(true);
         download_options.set(Some(vec![]));
 
@@ -477,12 +480,17 @@ pub fn Search() -> Element {
         loading.set(false);
     };
 
-    let download_tracks = move |(items, folder): (Vec<DownloadableItem>, String)| async move {
+    let download_tracks = move |(items, folder, request): (
+        Vec<DownloadableItem>,
+        String,
+        DownloadRequestContext,
+    )| async move {
         match auth
             .call(api::download(api::DownloadRequest {
                 items,
                 target_folder: folder,
                 backend: None,
+                request,
             }))
             .await
         {
@@ -753,6 +761,7 @@ pub fn Search() -> Element {
             results,
             is_searching: loading(),
             is_downloading,
+            request: download_request_context.read().clone().unwrap_or_default(),
             on_download: move |data| {
                 spawn(download_tracks(data));
             },

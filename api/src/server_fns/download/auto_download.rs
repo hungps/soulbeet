@@ -17,6 +17,8 @@ use std::time::Duration;
 #[cfg(feature = "server")]
 use crate::globals::{get_or_create_user_channel, register_user_task, unregister_user_task};
 #[cfg(feature = "server")]
+use crate::models::download_request::{DownloadRequestRow, DownloadRequestTrackRow};
+#[cfg(feature = "server")]
 use crate::services::{available_download_backends, download_backend};
 #[cfg(feature = "server")]
 use crate::AuthSession;
@@ -71,13 +73,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
         .query
         .album
         .as_ref()
-        .map(|a| {
-            format!(
-                "{} - {}",
-                &a.artist,
-                &a.title
-            )
-        })
+        .map(|a| format!("{} - {}", &a.artist, &a.title))
         .unwrap_or_else(|| {
             req.query
                 .tracks
@@ -122,6 +118,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
     let folder_path = req.folder_path.clone();
     let album = req.query.album.clone();
     let tracks = req.query.tracks.clone();
+    let request_context = req.query.request_context();
     let task_username = username.clone();
     let task_user_id = auth.0.sub.clone();
 
@@ -217,8 +214,11 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
         }
 
         // Sort by score descending
-        all_groups
-            .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        all_groups.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let best_score = all_groups[0].score;
 
@@ -290,9 +290,33 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
 
         // Queue download with the backend
         let items = picked.items.clone();
+        let request = match DownloadRequestRow::create(
+            &batch_id,
+            &task_user_id,
+            &request_context,
+            &folder_path,
+            None,
+        )
+        .await
+        {
+            Ok(request) => {
+                for item in &items {
+                    let _ = DownloadRequestTrackRow::insert_if_new(&request.id, item).await;
+                }
+                Some(request)
+            }
+            Err(e) => {
+                warn!("Could not persist download request {}: {}", batch_id, e);
+                None
+            }
+        };
+
         let backend = match download_backend(None).await {
             Ok(b) => b,
             Err(e) => {
+                if let Some(request) = &request {
+                    let _ = DownloadRequestRow::delete(&request.id).await;
+                }
                 let _ = tx.send(DownloadEvent::AutoDownload(AutoDownloadEvent::Failed {
                     batch_id: batch_id.clone(),
                     error: format!("Download backend not available: {}", e),
@@ -301,9 +325,22 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             }
         };
 
-        let queued = match backend.download(items).await {
+        let queued = match backend.download(items.clone()).await {
             Ok(q) => q,
             Err(e) => {
+                if let Some(request) = &request {
+                    if let Ok(tracks) = DownloadRequestTrackRow::list_for_request(&request.id).await
+                    {
+                        for track in tracks {
+                            let _ = DownloadRequestTrackRow::mark_failed(
+                                &request.id,
+                                &track.item_key,
+                                &e.to_string(),
+                            )
+                            .await;
+                        }
+                    }
+                }
                 let _ = tx.send(DownloadEvent::AutoDownload(AutoDownloadEvent::Failed {
                     batch_id: batch_id.clone(),
                     error: format!("Download queue failed: {}", e),
@@ -312,25 +349,44 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             }
         };
 
-        let (failed, successful): (Vec<_>, Vec<_>) =
-            queued.iter().cloned().partition(|d| d.error.is_some());
+        let successful = match &request {
+            Some(request) => super::requests::record_queued(request, &items, &queued, &tx).await,
+            None => {
+                let (failed, successful): (Vec<_>, Vec<_>) =
+                    queued.iter().cloned().partition(|d| d.error.is_some());
 
-        // Send failed entries as progress events
-        if !failed.is_empty() {
-            let failed_entries: Vec<DownloadProgress> = failed
-                .iter()
-                .map(|d| {
-                    DownloadProgress::failed(
-                        d.id.clone(),
-                        d.source.clone(),
-                        d.item.clone(),
-                        d.error.clone().unwrap_or_default(),
-                    )
-                    .with_batch(batch_id.clone(), batch_label.clone())
-                })
-                .collect();
-            let _ = tx.send(DownloadEvent::Progress(failed_entries));
-        }
+                if !failed.is_empty() {
+                    let failed_entries: Vec<DownloadProgress> = failed
+                        .iter()
+                        .map(|d| {
+                            DownloadProgress::failed(
+                                d.id.clone(),
+                                d.source.clone(),
+                                d.item.clone(),
+                                d.error.clone().unwrap_or_default(),
+                            )
+                            .with_batch(batch_id.clone(), batch_label.clone())
+                        })
+                        .collect();
+                    let _ = tx.send(DownloadEvent::Progress(failed_entries));
+                }
+
+                let queued_entries: Vec<DownloadProgress> = successful
+                    .iter()
+                    .map(|d| {
+                        DownloadProgress::queued(
+                            d.id.clone(),
+                            d.source.clone(),
+                            d.item.clone(),
+                            d.size,
+                        )
+                        .with_batch(batch_id.clone(), batch_label.clone())
+                    })
+                    .collect();
+                let _ = tx.send(DownloadEvent::Progress(queued_entries));
+                successful
+            }
+        };
 
         if successful.is_empty() {
             let _ = tx.send(DownloadEvent::AutoDownload(AutoDownloadEvent::Failed {
@@ -341,24 +397,14 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
         }
 
         // Send Downloading event
-        let _ = tx.send(DownloadEvent::AutoDownload(AutoDownloadEvent::Downloading {
-            batch_id: batch_id.clone(),
-        }));
+        let _ = tx.send(DownloadEvent::AutoDownload(
+            AutoDownloadEvent::Downloading {
+                batch_id: batch_id.clone(),
+            },
+        ));
 
-        // Send initial Queued progress for each track (with batch fields per D-10, D-11)
-        let queued_entries: Vec<DownloadProgress> = successful
-            .iter()
-            .map(|d| {
-                DownloadProgress::queued(d.id.clone(), d.source.clone(), d.item.clone(), d.size)
-                    .with_batch(batch_id.clone(), batch_label.clone())
-            })
-            .collect();
-        let _ = tx.send(DownloadEvent::Progress(queued_entries));
-
-        let download_sources: Vec<String> =
-            successful.iter().map(|d| d.source.clone()).collect();
-        let download_filenames: Vec<String> =
-            successful.iter().map(|d| d.item.clone()).collect();
+        let download_sources: Vec<String> = successful.iter().map(|d| d.source.clone()).collect();
+        let download_filenames: Vec<String> = successful.iter().map(|d| d.item.clone()).collect();
 
         // Pool slots must line up with the monitor's slots, which follow
         // `successful`, not `picked.items`.
@@ -373,6 +419,11 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
 
         // Register task and run monitor (per D-05: normal DownloadProgress takes over)
         let task_cancellation = register_user_task(&task_username).await;
+        let task_cancellation = if request.is_some() {
+            super::requests::request_token(&task_username, &batch_id).await
+        } else {
+            task_cancellation
+        };
 
         let mut monitor = DownloadMonitor::new(
             download_sources,

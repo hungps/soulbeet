@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use super::failover::{SourcePool, MAX_SOURCES_PER_TRACK};
 use super::process::process_downloads;
 use crate::config::CONFIG;
+use crate::models::download_request::DownloadRequestTrackRow;
 use crate::services::download_backend;
 
 /// Poll interval for checking download status (2 seconds).
@@ -209,7 +210,7 @@ impl DownloadMonitor {
     /// restart resolves on its own, but they must be fused by time: while no
     /// list can be read, no per-track deadline is ever evaluated and the
     /// monitor polls for the life of the process (#78).
-    fn fail_if_backend_stalled(&mut self) -> bool {
+    async fn fail_if_backend_stalled(&mut self) -> bool {
         if self.last_readable_poll.elapsed() <= BACKEND_STALL_TIMEOUT {
             return false;
         }
@@ -218,7 +219,7 @@ impl DownloadMonitor {
             BACKEND_STALL_TIMEOUT.as_secs() / 60
         );
         warn!("{} - giving up on batch {:?}", reason, self.filenames());
-        self.fail_unprocessed_tracks(&reason);
+        self.fail_unprocessed_tracks(&reason).await;
         true
     }
 
@@ -282,6 +283,9 @@ impl DownloadMonitor {
 
         let entry = DownloadProgress::queued(queued.id, queued.source, queued.item, queued.size);
         let entry = self.stamp_batch(vec![entry]).remove(0);
+        if let Some(request_id) = &self.batch_id {
+            let _ = DownloadRequestTrackRow::rebind(request_id, &previous_item, &entry).await;
+        }
         // One slot is still one download, so the panel replaces the abandoned
         // peer's row instead of gaining a second one for the same track.
         let _ = self.tx.send(DownloadEvent::Replaced {
@@ -348,7 +352,7 @@ impl DownloadMonitor {
                 break;
             }
 
-            if self.fail_if_backend_stalled() {
+            if self.fail_if_backend_stalled().await {
                 break;
             }
 
@@ -366,7 +370,8 @@ impl DownloadMonitor {
                         backend_failures, MAX_BACKEND_FAILURES, e
                     );
                     if backend_failures >= MAX_BACKEND_FAILURES {
-                        self.fail_unprocessed_tracks("Download backend unavailable");
+                        self.fail_unprocessed_tracks("Download backend unavailable")
+                            .await;
                         break;
                     }
                     interval.tick().await;
@@ -414,7 +419,8 @@ impl DownloadMonitor {
                     if invalid_responses >= MAX_INVALID_RESPONSES {
                         self.fail_unprocessed_tracks(&format!(
                             "Could not read slskd downloads list: {e}"
-                        ));
+                        ))
+                        .await;
                         break;
                     }
                 }
@@ -433,6 +439,22 @@ impl DownloadMonitor {
         // batches and delete their finished-but-unprocessed entries.
         if let Ok(backend) = download_backend(None).await {
             self.remove_batch_transfers(&backend).await;
+        }
+
+        if let Some(request_id) = &self.batch_id {
+            if !self.cancellation_token.is_cancelled() {
+                match crate::models::download_request::DownloadRequestRow::mark_completed_if_idle(
+                    request_id,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        super::requests::forget_request_token(request_id).await;
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!("Could not update request {} state: {}", request_id, e),
+                }
+            }
         }
 
         info!(
@@ -502,7 +524,7 @@ impl DownloadMonitor {
 
         // Send status update to UI
         if !batch_status.is_empty() {
-            self.send_status_update(&batch_status);
+            self.send_status_update(&batch_status).await;
             *consecutive_empty = 0;
         }
 
@@ -632,15 +654,12 @@ impl DownloadMonitor {
     }
 
     /// Send status update to UI via broadcast channel.
-    fn send_status_update(&self, batch_status: &[DownloadProgress]) {
-        let entries = self.stamp_batch(batch_status.to_vec());
-        if let Err(e) = self.tx.send(DownloadEvent::Progress(entries)) {
-            if self.tx.receiver_count() == 0 {
-                info!("No receivers for download updates, but continuing monitoring");
-            } else {
-                warn!("Failed to send download status update: {:?}", e);
-            }
+    async fn send_status_update(&self, batch_status: &[DownloadProgress]) {
+        if self.cancellation_token.is_cancelled() {
+            return;
         }
+        let entries = self.stamp_batch(batch_status.to_vec());
+        super::requests::broadcast_progress(&self.tx, entries).await;
     }
 
     /// Apply batch_id and batch_label to a set of progress entries.
@@ -693,7 +712,7 @@ impl DownloadMonitor {
                         ..download.clone()
                     };
                     let entries = self.stamp_batch(vec![timeout_entry]);
-                    let _ = self.tx.send(DownloadEvent::Progress(entries));
+                    super::requests::broadcast_progress(&self.tx, entries).await;
                     self.track_states[slot].processed = true;
                     continue;
                 }
@@ -799,7 +818,7 @@ impl DownloadMonitor {
 
         if !failed.is_empty() {
             let entries = self.stamp_batch(failed);
-            let _ = self.tx.send(DownloadEvent::Progress(entries));
+            super::requests::broadcast_progress(&self.tx, entries).await;
         }
     }
 
@@ -837,14 +856,14 @@ impl DownloadMonitor {
 
         if !failed.is_empty() {
             let entries = self.stamp_batch(failed);
-            let _ = self.tx.send(DownloadEvent::Progress(entries));
+            super::requests::broadcast_progress(&self.tx, entries).await;
         }
         !retried
     }
 
     /// Mark every unprocessed track as failed and notify the UI. Used when
     /// monitoring must stop early so downloads are never left dangling.
-    fn fail_unprocessed_tracks(&mut self, reason: &str) {
+    async fn fail_unprocessed_tracks(&mut self, reason: &str) {
         let mut failed: Vec<DownloadProgress> = Vec::new();
         for slot in 0..self.tracked_files.len() {
             if !self.track_states[slot].processed {
@@ -854,7 +873,7 @@ impl DownloadMonitor {
         }
         if !failed.is_empty() {
             let entries = self.stamp_batch(failed);
-            let _ = self.tx.send(DownloadEvent::Progress(entries));
+            super::requests::broadcast_progress(&self.tx, entries).await;
         }
     }
 
@@ -1145,10 +1164,16 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let mut m = monitor_on(tx, vec!["peer_a", "peer_a"], vec!["a.flac", "b.flac"]);
 
-        assert!(!m.fail_if_backend_stalled(), "gave up while slskd was fine");
+        assert!(
+            !m.fail_if_backend_stalled().await,
+            "gave up while slskd was fine"
+        );
 
         m.last_readable_poll = ago(BACKEND_STALL_TIMEOUT + Duration::from_secs(1));
-        assert!(m.fail_if_backend_stalled(), "polled a dead backend forever");
+        assert!(
+            m.fail_if_backend_stalled().await,
+            "polled a dead backend forever"
+        );
 
         assert!(
             m.track_states.iter().all(|s| s.processed),

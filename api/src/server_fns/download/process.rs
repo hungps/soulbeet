@@ -105,7 +105,7 @@ pub async fn process_downloads(
                         error: Some("Could not resolve file path".into()),
                         ..download
                     };
-                    let _ = tx.send(DownloadEvent::Progress(vec![failed_entry]));
+                    super::requests::broadcast_progress(&tx, vec![failed_entry]).await;
                 }
             }
 
@@ -157,7 +157,7 @@ pub async fn process_downloads(
                         error: Some("Could not resolve file path".into()),
                         ..download
                     };
-                    let _ = tx.send(DownloadEvent::Progress(vec![failed_entry]));
+                    super::requests::broadcast_progress(&tx, vec![failed_entry]).await;
                 }
             }
         }

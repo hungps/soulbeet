@@ -33,15 +33,15 @@ pub struct Props {
 
 fn edition_label(edition: &Album) -> String {
     let mut parts = vec![edition.title.clone()];
-    for extra in [
-        edition.country.clone(),
-        edition.medium_label(),
-        edition.release_date.clone(),
-    ] {
-        if let Some(value) = extra {
-            parts.push(value);
-        }
-    }
+    parts.extend(
+        [
+            edition.country.clone(),
+            edition.medium_label(),
+            edition.release_date.clone(),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     parts.join(" · ")
 }
 

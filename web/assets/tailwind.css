@@ -1910,6 +1910,14 @@
         border-color: color-mix(in oklab, var(--color-beet-accent) 30%, transparent);
       }
     }
+    .hover\:border-beet-accent\/40:hover {
+      border-color: color-mix(in srgb, #ff00ff 40%, transparent);
+    }
+    @supports (color: color-mix(in lab, red, red)) {
+      .hover\:border-beet-accent\/40:hover {
+        border-color: color-mix(in oklab, var(--color-beet-accent) 40%, transparent);
+      }
+    }
     .hover\:border-beet-accent\/50:hover {
       border-color: color-mix(in srgb, #ff00ff 50%, transparent);
     }
@@ -1964,6 +1972,22 @@
     .hover\:bg-beet-leaf:hover {
       background-color: var(--color-beet-leaf);
     }
+    .hover\:bg-beet-leaf\/10:hover {
+      background-color: color-mix(in srgb, #00ff9d 10%, transparent);
+    }
+    @supports (color: color-mix(in lab, red, red)) {
+      .hover\:bg-beet-leaf\/10:hover {
+        background-color: color-mix(in oklab, var(--color-beet-leaf) 10%, transparent);
+      }
+    }
+    .hover\:bg-blue-500\/10:hover {
+      background-color: color-mix(in srgb, oklch(62.3% 0.214 259.815) 10%, transparent);
+    }
+    @supports (color: color-mix(in lab, red, red)) {
+      .hover\:bg-blue-500\/10:hover {
+        background-color: color-mix(in oklab, var(--color-blue-500) 10%, transparent);
+      }
+    }
     .hover\:bg-fuchsia-400:hover {
       background-color: var(--color-fuchsia-400);
     }
@@ -1973,6 +1997,14 @@
     @supports (color: color-mix(in lab, red, red)) {
       .hover\:bg-green-800\/50:hover {
         background-color: color-mix(in oklab, var(--color-green-800) 50%, transparent);
+      }
+    }
+    .hover\:bg-orange-500\/10:hover {
+      background-color: color-mix(in srgb, oklch(70.5% 0.213 47.604) 10%, transparent);
+    }
+    @supports (color: color-mix(in lab, red, red)) {
+      .hover\:bg-orange-500\/10:hover {
+        background-color: color-mix(in oklab, var(--color-orange-500) 10%, transparent);
       }
     }
     .hover\:bg-red-500\/10:hover {
@@ -2061,6 +2093,9 @@
   }
   .disabled\:bg-gray-600:disabled {
     background-color: var(--color-gray-600);
+  }
+  .disabled\:opacity-30:disabled {
+    opacity: 30%;
   }
   .disabled\:shadow-none:disabled {
     --tw-shadow: 0 0 #0000;

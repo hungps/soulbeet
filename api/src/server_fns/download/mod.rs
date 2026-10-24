@@ -1,9 +1,9 @@
 use dioxus::fullstack::{WebSocketOptions, Websocket};
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
-use shared::download::{DownloadEvent, DownloadableItem, QueuedDownload};
 #[cfg(feature = "server")]
 use shared::download::DownloadProgress;
+use shared::download::{DownloadEvent, DownloadRequestContext, DownloadableItem, QueuedDownload};
 
 #[cfg(feature = "server")]
 use dioxus::logger::tracing::{info, warn};
@@ -14,16 +14,16 @@ use tokio::sync::broadcast;
 use crate::{server_fns::server_error, AuthSession};
 
 #[cfg(feature = "server")]
-use crate::globals::{
-    cleanup_stale_channels, get_or_create_user_channel, register_user_task, unregister_user_task,
-    USER_CHANNELS,
-};
+use crate::globals::{cleanup_stale_channels, get_or_create_user_channel, USER_CHANNELS};
 #[cfg(feature = "server")]
 use crate::services::download_backend;
 
 // Local modules
 pub mod auto_download;
 pub use auto_download::{auto_download, AutoDownloadRequest, AutoDownloadResult};
+
+pub mod requests;
+pub use requests::*;
 
 #[cfg(feature = "server")]
 pub mod failover;
@@ -40,9 +40,6 @@ pub mod utils;
 // stay private to this one.
 #[cfg(all(test, feature = "server"))]
 pub(crate) mod test_support;
-
-#[cfg(feature = "server")]
-use self::monitor::DownloadMonitor;
 
 #[cfg(feature = "server")]
 async fn do_download(
@@ -133,27 +130,39 @@ pub struct CancelDownloadRequest {
 #[post("/api/downloads/cancel", auth: AuthSession)]
 pub async fn cancel_download(req: CancelDownloadRequest) -> Result<(), ServerFnError> {
     let username = auth.0.username;
+    let user_id = auth.0.sub.clone();
 
     let backend = download_backend(req.backend.as_deref())
         .await
         .map_err(|e| server_error(format!("download backend not available: {}", e)))?;
 
+    let transfer_id = if uuid::Uuid::parse_str(&req.id).is_ok() {
+        req.id.clone()
+    } else {
+        backend
+            .get_downloads_for(std::slice::from_ref(&req.source))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|dl| dl.source == req.source && dl.item == req.item)
+            .map(|dl| dl.id)
+            .unwrap_or_else(|| req.id.clone())
+    };
+
     backend
-        .cancel_download(&req.source, &req.id, false)
+        .cancel_download(&req.source, &transfer_id, false)
         .await
         .map_err(server_error)?;
 
     info!(
         "User {} cancelled download {} from {}",
-        username, req.id, req.source
+        username, transfer_id, req.source
     );
 
-    // Send cancelled state to UI via broadcast channel
-    let (tx, _) = get_or_create_user_channel(&username).await;
-    let cancelled = DownloadProgress {
+    let mut cancelled = DownloadProgress {
         id: req.id,
         source: req.source,
-        item: req.item,
+        item: req.item.clone(),
         size: 0,
         transferred: 0,
         state: shared::download::DownloadState::Cancelled,
@@ -164,7 +173,33 @@ pub async fn cancel_download(req: CancelDownloadRequest) -> Result<(), ServerFnE
         batch_id: None,
         batch_label: None,
     };
-    let _ = tx.send(DownloadEvent::Progress(vec![cancelled]));
+
+    if let Ok(Some(track)) =
+        crate::models::download_request::DownloadRequestTrackRow::find_by_item(&user_id, &req.item)
+            .await
+    {
+        let _ = crate::models::download_request::DownloadRequestTrackRow::set_state(
+            &track.request_id,
+            &track.item_key,
+            &cancelled.state,
+            None,
+        )
+        .await;
+        if let Ok(Some(request)) =
+            crate::models::download_request::DownloadRequestRow::get_for_user(
+                &track.request_id,
+                &user_id,
+            )
+            .await
+        {
+            cancelled.batch_id = Some(request.id);
+            cancelled.batch_label = Some(request.label);
+        }
+    }
+
+    // Send cancelled state to UI via broadcast channel
+    let (tx, _) = get_or_create_user_channel(&username).await;
+    requests::broadcast_progress(&tx, vec![cancelled]).await;
 
     Ok(())
 }
@@ -175,11 +210,14 @@ pub struct DownloadRequest {
     pub target_folder: String,
     #[serde(default)]
     pub backend: Option<String>,
+    #[serde(default)]
+    pub request: DownloadRequestContext,
 }
 
 #[post("/api/downloads/queue", auth: AuthSession)]
 pub async fn download(req: DownloadRequest) -> Result<Vec<QueuedDownload>, ServerFnError> {
     let username = auth.0.username;
+    let user_id = auth.0.sub;
 
     let target_path_buf = std::path::Path::new(&req.target_folder).to_path_buf();
     if let Err(e) = tokio::fs::create_dir_all(&target_path_buf).await {
@@ -189,75 +227,64 @@ pub async fn download(req: DownloadRequest) -> Result<Vec<QueuedDownload>, Serve
         )));
     }
 
-    let res = do_download(req.items, req.backend.as_deref()).await?;
+    let context = if req.request.key.is_empty() {
+        let first = req.items.first();
+        DownloadRequestContext {
+            key: format!(
+                "album:{}",
+                first.map(|item| item.album.as_str()).unwrap_or_default()
+            ),
+            label: first
+                .map(|item| item.album.clone())
+                .unwrap_or_else(|| "Unknown release".to_string()),
+            artist: first.map(|item| item.artist.clone()),
+        }
+    } else {
+        req.request
+    };
 
-    let (failed, successful): (Vec<_>, Vec<_>) =
-        res.iter().cloned().partition(|d| d.error.is_some());
+    let request = requests::open_request(
+        &user_id,
+        &context,
+        &req.target_folder,
+        req.backend.as_deref(),
+    )
+    .await
+    .map_err(server_error)?;
+
+    let new_items = requests::insert_new_items(&request, req.items)
+        .await
+        .map_err(server_error)?;
+    if new_items.is_empty() {
+        info!("Request {} already holds every selected track", request.id);
+        return Ok(Vec::new());
+    }
+
+    let res = match do_download(new_items.clone(), req.backend.as_deref()).await {
+        Ok(res) => res,
+        Err(e) => {
+            for item in &new_items {
+                let _ = crate::models::download_request::DownloadRequestTrackRow::mark_failed(
+                    &request.id,
+                    &item.id,
+                    &e.to_string(),
+                )
+                .await;
+            }
+            return Err(e);
+        }
+    };
 
     let (tx, _) = get_or_create_user_channel(&username).await;
+    let accepted = requests::record_queued(&request, &new_items, &res, &tx).await;
+    requests::start_monitor(&username, &user_id, &request, accepted).await;
 
-    let backend_id = req.backend;
-
-    if !failed.is_empty() {
-        let failed_entries: Vec<DownloadProgress> = failed
-            .iter()
-            .map(|d| {
-                let mut p = DownloadProgress::failed(
-                    d.id.clone(),
-                    d.source.clone(),
-                    d.item.clone(),
-                    d.error.clone().unwrap_or_default(),
-                );
-                p.backend = backend_id.clone();
-                p
-            })
-            .collect();
-        let _ = tx.send(DownloadEvent::Progress(failed_entries));
-    }
-
-    let download_sources: Vec<String> = successful.iter().map(|d| d.source.clone()).collect();
-    let download_filenames: Vec<String> = successful.iter().map(|d| d.item.clone()).collect();
-    let target_path = target_path_buf;
-
-    if download_filenames.is_empty() {
-        return Ok(res);
-    }
-
-    // Send initial "Queued" state immediately so UI shows the downloads right away
-    let queued_entries: Vec<DownloadProgress> = successful
-        .iter()
-        .map(|d| {
-            let mut p =
-                DownloadProgress::queued(d.id.clone(), d.source.clone(), d.item.clone(), d.size);
-            p.backend = backend_id.clone();
-            p
-        })
-        .collect();
-    let _ = tx.send(DownloadEvent::Progress(queued_entries));
-
-    info!("Started monitoring downloads: {:?}", download_filenames);
-
-    // Register this task for cleanup tracking
-    let task_username = username.clone();
-    let task_user_id = auth.0.sub.clone();
-    let task_cancellation = register_user_task(&username).await;
-
-    // Spawn the monitoring task
-    tokio::spawn(async move {
-        let mut monitor = DownloadMonitor::new(
-            download_sources,
-            download_filenames,
-            target_path,
-            tx,
-            task_cancellation,
-            task_username.clone(),
-            task_user_id,
-            None, // batch_id - will be set by auto_download in Plan 02
-            None, // batch_label - will be set by auto_download in Plan 02
-        );
-        monitor.run().await;
-        unregister_user_task(&task_username).await;
-    });
+    info!(
+        "Started {} downloads for request {} ({})",
+        new_items.len(),
+        request.id,
+        request.label
+    );
 
     Ok(res)
 }
