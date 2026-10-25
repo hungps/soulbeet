@@ -1108,8 +1108,8 @@ pub async fn generate_discovery_playlist_internal(
 ///
 /// Navidrome gets a smart playlist with a filepath rule that auto-updates as
 /// its library scans. Plex has no path-filtered smart playlists through its
-/// API, so its playlist is materialised from the pending discovery tracks and
-/// replaced on every reconciliation.
+/// API, so its playlist is materialised from the tracks in the profile's
+/// discovery folder and replaced on every reconciliation.
 #[cfg(feature = "server")]
 pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> {
     let settings = UserSettings::get(user_id).await?;
@@ -1120,7 +1120,7 @@ pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> 
         Some(id) => id.clone(),
         None => return Ok(()),
     };
-    Folder::get_by_id(&folder_id)
+    let folder = Folder::get_by_id(&folder_id)
         .await?
         .ok_or("Discovery folder not found")?;
 
@@ -1175,29 +1175,30 @@ pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> 
             &profile_name,
         );
 
-        let paths: Vec<String> =
+        let pending =
             DiscoveryTrackRow::get_pending_by_folder_and_profile(&folder_id, &profile_name)
                 .await
                 .unwrap_or_default()
-                .into_iter()
-                .map(|track| track.path)
-                .collect();
+                .len();
 
-        let mut mapped_paths = Vec::with_capacity(paths.len());
-        for path in paths {
-            match crate::models::media_server::local_to_remote(user_id, server.kind(), &path).await
-            {
-                Ok(Some(remote)) => mapped_paths.push(remote),
-                _ => mapped_paths.push(path),
-            }
-        }
+        let profile_path = folder.discovery_profile_path(&profile_name);
+        let mapped_profile_path = match crate::models::media_server::local_to_remote(
+            user_id,
+            server.kind(),
+            &profile_path,
+        )
+        .await
+        {
+            Ok(Some(remote)) => remote,
+            _ => profile_path,
+        };
 
         let comment = format!("Soulbeet discovery ({})", profile_name);
         let spec = soulbeet::PlaylistSpec {
             name: &playlist_name,
             comment: &comment,
             profile: &profile_name,
-            paths: &mapped_paths,
+            folder: &mapped_profile_path,
             library: &library,
         };
 
@@ -1224,7 +1225,7 @@ pub async fn reconcile_discovery_playlists(user_id: &str) -> Result<(), String> 
                 );
             }
             Ok(None) => {
-                if server.kind() == MediaServerKind::Navidrome || mapped_paths.is_empty() {
+                if server.kind() == MediaServerKind::Navidrome || pending == 0 {
                     if let Some(id) = &old_id {
                         let _ = server.delete_playlist(id).await;
                     }

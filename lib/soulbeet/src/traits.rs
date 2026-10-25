@@ -418,9 +418,10 @@ pub struct PlaylistSpec<'a> {
     pub comment: &'a str,
     /// Discovery profile name (`Conservative`, `Balanced`, `Adventurous`).
     pub profile: &'a str,
-    /// Absolute local paths of the tracks currently pending for this profile.
-    pub paths: &'a [String],
-    /// The server's full track list, used to resolve paths to server item ids.
+    /// The profile's discovery folder, mapped to the server's path.
+    pub folder: &'a str,
+    /// The server's full track list, used to resolve folder contents to server
+    /// item ids.
     pub library: &'a [MediaTrack],
 }
 
@@ -450,8 +451,9 @@ pub trait MediaServer: Send + Sync {
         false
     }
 
-    /// Whether `reconcile_playlist` needs the full track list to resolve
-    /// local paths to server item ids (Plex). Navidrome uses a path filter.
+    /// Whether `reconcile_playlist` needs the full track list to resolve the
+    /// discovery folder to server item ids (Plex). Navidrome uses a path
+    /// filter and resolves it on its own.
     fn needs_library(&self) -> bool {
         false
     }

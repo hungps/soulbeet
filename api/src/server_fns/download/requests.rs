@@ -11,6 +11,11 @@ pub struct RequestAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingAction {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadRequestsOverview {
     pub requests: Vec<DownloadRequestSummary>,
     pub pending: Vec<PendingRequestSummary>,
@@ -664,6 +669,25 @@ pub async fn remove_download_request(action: RequestAction) -> Result<(), Server
         items: removed_items,
     });
     info!("User {} removed request {}", auth.0.username, request.id);
+    Ok(())
+}
+
+#[post("/api/downloads/requests/pending/cancel", auth: AuthSession)]
+pub async fn cancel_pending_request(action: PendingAction) -> Result<(), ServerFnError> {
+    if crate::globals::cancel_pending_search(&auth.0.username, &action.id) {
+        info!(
+            "User {} cancelled the running search for {}",
+            auth.0.username, action.id
+        );
+        return Ok(());
+    }
+    LibraryRequestRow::delete_for_user(&action.id, &auth.0.sub)
+        .await
+        .map_err(server_error)?;
+    info!(
+        "User {} cancelled the queued request {}",
+        auth.0.username, action.id
+    );
     Ok(())
 }
 

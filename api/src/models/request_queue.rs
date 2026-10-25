@@ -88,6 +88,16 @@ impl LibraryRequestRow {
         Ok(())
     }
 
+    pub async fn delete_for_user(id: &str, user_id: &str) -> Result<bool, String> {
+        let result = sqlx::query("DELETE FROM library_request_queue WHERE id = ? AND user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .execute(&*DB)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn delete_matching(
         user_id: &str,
         label: &str,

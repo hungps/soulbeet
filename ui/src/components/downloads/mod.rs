@@ -501,6 +501,38 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                       if is_searching {
                         div { class: "w-4 h-4 mt-0.5 shrink-0 animate-spin rounded-full border-2 border-transparent border-t-beet-accent border-b-beet-accent" }
                       }
+                      button {
+                        class: "p-1.5 rounded-md transition-colors cursor-pointer text-gray-400 hover:text-red-300 hover:bg-red-500/10 shrink-0",
+                        title: "Cancel request",
+                        aria_label: "Cancel request",
+                        onclick: {
+                            let id = entry.id.clone();
+                            move |_| {
+                                let id = id.clone();
+                                spawn(async move {
+                                    if let Err(e) = auth
+                                        .call(api::cancel_pending_request(api::PendingAction { id: id.clone() }))
+                                        .await
+                                    {
+                                        warn!("Could not cancel pending request: {:?}", e);
+                                    }
+                                    pending.write().retain(|entry| entry.id != id);
+                                });
+                            }
+                        },
+                        svg {
+                          class: "w-4 h-4",
+                          fill: "none",
+                          stroke: "currentColor",
+                          view_box: "0 0 24 24",
+                          path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            stroke_width: "2",
+                            d: "M6 18L18 6M6 6l12 12",
+                          }
+                        }
+                      }
                     }
                   }
                 }

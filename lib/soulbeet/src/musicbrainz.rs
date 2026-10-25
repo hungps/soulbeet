@@ -1,8 +1,8 @@
 use musicbrainz_rs::{
     entity::{
         artist_credit::ArtistCredit,
-        recording::{Recording, RecordingSearchQuery},
-        release::{Release, ReleaseSearchQuery},
+        recording::Recording,
+        release::Release,
         release_group::{ReleaseGroup, ReleaseGroupPrimaryType, ReleaseGroupSecondaryType},
     },
     Fetch, MusicBrainzClient, Search,
@@ -194,14 +194,78 @@ pub enum SearchType {
     Album,
 }
 
-fn album_search_query(artist: Option<&str>, query: &str) -> String {
-    let mut release_query = ReleaseSearchQuery::query_builder();
-    if let Some(artist) = artist {
-        release_query.artist(artist).and();
+/// One user word as a Lucene term. Reserved characters (`+`, `-`, `(`, `:`, ...)
+/// are quoted so they stay literal instead of becoming query operators.
+fn lucene_term(word: &str) -> String {
+    let escaped = word.replace('\\', "\\\\").replace('"', "\\\"");
+    if escaped.chars().all(char::is_alphanumeric) {
+        escaped
+    } else {
+        format!("\"{escaped}\"")
     }
-    let mut title_query = ReleaseSearchQuery::query_builder();
-    title_query.release(query).or().alias(query);
-    release_query.expr(&mut title_query).build()
+}
+
+/// A user value as an AND-ed Lucene clause, e.g. `Metaphor ReFantazio` becomes
+/// `release:(Metaphor AND ReFantazio)`. Every word has to match, in any order;
+/// punctuation-only words are dropped unless they are the whole value, so `+`
+/// still finds Ed Sheeran's "+".
+fn field_clause(field: &str, value: &str) -> Option<String> {
+    let mut terms: Vec<String> = value
+        .split_whitespace()
+        .filter(|word| word.chars().any(char::is_alphanumeric))
+        .map(lucene_term)
+        .collect();
+    if terms.is_empty() {
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        terms.push(lucene_term(value));
+    }
+    Some(format!("{field}:({})", terms.join(" AND ")))
+}
+
+/// MusicBrainz search parameters for the given clauses.
+///
+/// The whole Lucene query is percent-encoded: MusicBrainz decodes it before
+/// parsing, so a `+` left in the URL (Ed Sheeran's "+") would arrive as a
+/// space and silently empty the clause it belongs to.
+fn search_params(clauses: &[String]) -> Option<String> {
+    let query = clauses.join(" AND ");
+    (!query.is_empty()).then(|| {
+        format!(
+            "query={}",
+            url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>()
+        )
+    })
+}
+
+/// Albums matching the query text, or every album of the artist when the
+/// search box is empty.
+fn album_search_params(artist: Option<&str>, query: &str) -> Option<String> {
+    let mut clauses = Vec::new();
+    if let Some(artist) = field_clause("artist", artist.unwrap_or_default()) {
+        clauses.push(artist);
+    }
+    if let (Some(release), Some(alias)) =
+        (field_clause("release", query), field_clause("alias", query))
+    {
+        clauses.push(format!("({release} OR {alias})"));
+    }
+    search_params(&clauses)
+}
+
+/// Tracks matching the query text, or every track of the artist when the
+/// search box is empty.
+fn track_search_params(artist: Option<&str>, query: &str) -> Option<String> {
+    let mut clauses = Vec::new();
+    if let Some(artist) = field_clause("artist", artist.unwrap_or_default()) {
+        clauses.push(artist);
+    }
+    if let Some(recording) = field_clause("recording", query) {
+        clauses.push(recording);
+    }
+    search_params(&clauses)
 }
 
 fn query_tokens(query: &str) -> Vec<String> {
@@ -476,15 +540,14 @@ impl MusicBrainzProvider {
 
         match search_type {
             SearchType::Track => {
+                let Some(params) = track_search_params(artist, query) else {
+                    return Ok(results);
+                };
                 let limit = limit.min(100) as u8;
                 let search_results = with_retry("MusicBrainz track search", || {
-                    let mut recording_query = RecordingSearchQuery::query_builder();
-                    if let Some(artist) = artist {
-                        recording_query.artist_name(artist).and();
-                    }
-                    let search_query = recording_query.recording(query).build();
+                    let params = params.clone();
                     async move {
-                        Recording::search(search_query)
+                        Recording::search(params)
                             .limit(limit)
                             .with_releases()
                             .with_ratings()
@@ -543,10 +606,13 @@ impl MusicBrainzProvider {
                 }
             }
             SearchType::Album => {
+                let Some(params) = album_search_params(artist, query) else {
+                    return Ok(results);
+                };
                 let search_results = with_retry("MusicBrainz album search", || {
-                    let search_query = album_search_query(artist, query);
+                    let params = params.clone();
                     async move {
-                        Release::search(search_query)
+                        Release::search(params)
                             .limit(ALBUM_FETCH_LIMIT)
                             .with_release_groups()
                             .execute_with_client(client)
@@ -590,7 +656,14 @@ impl MusicBrainzProvider {
 
                     let accum = groups.entry(group_id).or_insert_with(|| GroupAccum {
                         title: group.title.clone(),
-                        artist: format_artist_credit(&group.artist_credit),
+                        // Release search results carry the credited artists on the
+                        // release, not on the nested release group.
+                        artist: format_artist_credit(
+                            &group
+                                .artist_credit
+                                .clone()
+                                .or_else(|| release.artist_credit.clone()),
+                        ),
                         editions: HashMap::new(),
                     });
 
@@ -850,16 +923,18 @@ mod tests {
     #[test]
     fn album_query_searches_release_and_alias_titles() {
         assert_eq!(
-            album_search_query(None, "Metaphor ReFantazio"),
-            "query=(release:\"Metaphor ReFantazio\" OR alias:\"Metaphor ReFantazio\")"
+            album_search_params(None, "Metaphor ReFantazio").as_deref(),
+            Some(
+                "query=%28release%3A%28Metaphor+AND+ReFantazio%29+OR+alias%3A%28Metaphor+AND+ReFantazio%29%29"
+            )
         );
     }
 
     #[test]
     fn album_query_keeps_the_artist_term_as_an_and() {
         assert_eq!(
-            album_search_query(Some("Shoji Meguro"), "Metaphor"),
-            "query=artist:\"Shoji Meguro\" AND (release:Metaphor OR alias:Metaphor)"
+            album_search_params(Some("Shoji Meguro"), "Metaphor").as_deref(),
+            Some("query=artist%3A%28Shoji+AND+Meguro%29+AND+%28release%3A%28Metaphor%29+OR+alias%3A%28Metaphor%29%29")
         );
     }
 
@@ -1019,5 +1094,43 @@ mod tests {
         assert!(options.is_supported());
         assert!(options.release_types.contains(&"Album".to_string()));
         assert!(options.media_formats.contains(&"CD".to_string()));
+    }
+
+    #[test]
+    fn album_search_quotes_titles_with_reserved_characters() {
+        assert_eq!(
+            album_search_params(Some("Ed Sheeran"), "+").as_deref(),
+            Some("query=artist%3A%28Ed+AND+Sheeran%29+AND+%28release%3A%28%22%2B%22%29+OR+alias%3A%28%22%2B%22%29%29")
+        );
+    }
+
+    #[test]
+    fn album_search_without_query_text_lists_the_artist() {
+        assert_eq!(
+            album_search_params(Some("Ed Sheeran"), "  ").as_deref(),
+            Some("query=artist%3A%28Ed+AND+Sheeran%29")
+        );
+    }
+
+    #[test]
+    fn track_search_without_query_text_lists_the_artist() {
+        assert_eq!(
+            track_search_params(Some("Ed Sheeran"), "").as_deref(),
+            Some("query=artist%3A%28Ed+AND+Sheeran%29")
+        );
+    }
+
+    #[test]
+    fn search_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            track_search_params(None, "Guns N' \"Rose\" \\ Co").as_deref(),
+            Some("query=recording%3A%28Guns+AND+%22N%27%22+AND+%22%5C%22Rose%5C%22%22+AND+Co%29")
+        );
+    }
+
+    #[test]
+    fn search_without_artist_or_query_has_no_params() {
+        assert!(album_search_params(None, "").is_none());
+        assert!(track_search_params(Some(" "), "").is_none());
     }
 }

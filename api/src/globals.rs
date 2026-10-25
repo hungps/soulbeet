@@ -154,6 +154,47 @@ pub fn pending_requests_for(username: &str) -> Vec<shared::download::PendingRequ
         .unwrap_or_default()
 }
 
+/// Cancellation handles for running source searches, keyed by `user:batch`.
+#[cfg(feature = "server")]
+pub static PENDING_SEARCHES: LazyLock<std::sync::Mutex<HashMap<String, CancellationToken>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "server")]
+fn pending_searches() -> std::sync::MutexGuard<'static, HashMap<String, CancellationToken>> {
+    PENDING_SEARCHES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(feature = "server")]
+fn pending_search_key(username: &str, id: &str) -> String {
+    format!("{username}:{id}")
+}
+
+#[cfg(feature = "server")]
+pub fn register_pending_search(username: &str, id: &str) -> CancellationToken {
+    let token = CancellationToken::new();
+    pending_searches().insert(pending_search_key(username, id), token.clone());
+    token
+}
+
+#[cfg(feature = "server")]
+pub fn clear_pending_search(username: &str, id: &str) {
+    pending_searches().remove(&pending_search_key(username, id));
+}
+
+/// Stop a running source search, returning whether one was running.
+#[cfg(feature = "server")]
+pub fn cancel_pending_search(username: &str, id: &str) -> bool {
+    let token = pending_searches().remove(&pending_search_key(username, id));
+    let Some(token) = token else {
+        return false;
+    };
+    token.cancel();
+    clear_pending_request(username, id);
+    true
+}
+
 /// Get or create a user channel, returning the sender and cancellation token
 #[cfg(feature = "server")]
 pub async fn get_or_create_user_channel(

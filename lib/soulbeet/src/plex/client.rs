@@ -226,26 +226,42 @@ impl PlexClient {
         Ok(id)
     }
 
-    pub async fn music_section_key(&self) -> Result<String> {
+    pub async fn music_section_keys(&self) -> Result<Vec<String>> {
         if let Some(section) = &self.music_section {
-            return Ok(section.clone());
+            return Ok(vec![section.clone()]);
         }
         let envelope: PlexEnvelope<PlexSectionsContainer> =
             self.get_json("library/sections", &[]).await?;
-        envelope
+        let sections: Vec<String> = envelope
             .media_container
             .directories
             .into_iter()
-            .find(|d| d.r#type == MUSIC_SECTION_TYPE)
+            .filter(|d| d.r#type == MUSIC_SECTION_TYPE)
             .map(|d| d.key)
-            .ok_or_else(|| SoulseekError::Api {
+            .collect();
+        if sections.is_empty() {
+            return Err(SoulseekError::Api {
                 status: 404,
                 message: "Plex has no music library configured".to_string(),
-            })
+            });
+        }
+        Ok(sections)
     }
 
     async fn fetch_all_metadata(&self, item_type: &str) -> Result<Vec<PlexMetadata>> {
-        let section = self.music_section_key().await?;
+        let mut all = Vec::new();
+        for section in self.music_section_keys().await? {
+            let mut section_items = self.fetch_section_metadata(&section, item_type).await?;
+            all.append(&mut section_items);
+        }
+        Ok(all)
+    }
+
+    async fn fetch_section_metadata(
+        &self,
+        section: &str,
+        item_type: &str,
+    ) -> Result<Vec<PlexMetadata>> {
         let path = format!("library/sections/{}/all", section);
         let mut all = Vec::new();
         let mut start = 0u32;
@@ -488,26 +504,26 @@ impl PlexClient {
     }
 
     pub async fn refresh_section(&self, path: Option<&str>) -> Result<()> {
-        let section = self.music_section_key().await?;
         let query: Vec<(&str, String)> = path
             .map(|p| vec![("path", p.to_string())])
             .unwrap_or_default();
-        let resp = self
-            .send(
-                Method::GET,
-                &format!("library/sections/{}/refresh", section),
-                &query,
-            )
-            .await
-            .map_err(map_auth_error)?;
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(SoulseekError::Api {
-                status: resp.status().as_u16(),
-                message: format!("Plex scan request failed: {}", resp.status()),
-            })
+        for section in self.music_section_keys().await? {
+            let resp = self
+                .send(
+                    Method::GET,
+                    &format!("library/sections/{}/refresh", section),
+                    &query,
+                )
+                .await
+                .map_err(map_auth_error)?;
+            if !resp.status().is_success() {
+                return Err(SoulseekError::Api {
+                    status: resp.status().as_u16(),
+                    message: format!("Plex scan request failed: {}", resp.status()),
+                });
+            }
         }
+        Ok(())
     }
 }
 
@@ -542,58 +558,33 @@ fn map_track(track: PlexMetadata) -> MediaTrack {
 }
 
 fn normalize_path(path: &str) -> String {
-    path.replace('\\', "/").to_lowercase()
+    path.replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
-fn file_name(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+/// Plex and Soulbeet often mount the same library at different roots, so a
+/// folder is matched by the tail of its path. Two segments are used
+/// (`Discovery/<Profile>`) because the last one alone is too weak a match.
+fn folder_needle(folder: &str) -> String {
+    let normalized = normalize_path(folder);
+    let tail: Vec<&str> = normalized.rsplit('/').take(2).collect();
+    format!("/{}/", tail.into_iter().rev().collect::<Vec<_>>().join("/"))
 }
 
-fn trailing_segments(a: &str, b: &str) -> usize {
-    a.rsplit('/')
-        .zip(b.rsplit('/'))
-        .take_while(|(left, right)| left == right)
-        .count()
-}
-
-fn match_score(wanted: &str, candidate: &str) -> Option<u8> {
-    let wanted = normalize_path(wanted);
-    let candidate = normalize_path(candidate);
-    if wanted == candidate {
-        return Some(3);
-    }
-
-    let shared = trailing_segments(&wanted, &candidate);
-    if shared >= 2 {
-        Some(2)
-    } else if file_name(&wanted) == file_name(&candidate) {
-        Some(1)
-    } else {
-        None
-    }
-}
-
-/// Resolve local discovery paths to Plex rating keys. Paths are matched by
-/// suffix first (containers often mount the same library at different roots),
-/// then by file name.
-pub(crate) fn resolve_rating_keys(paths: &[String], library: &[MediaTrack]) -> Vec<String> {
-    let mut keys = Vec::new();
-    for path in paths {
-        let best = library
-            .iter()
-            .filter_map(|track| {
-                let candidate = track.path.as_deref()?;
-                match_score(path, candidate).map(|score| (score, track))
-            })
-            .max_by_key(|(score, _)| *score);
-
-        if let Some((_, track)) = best {
-            if !keys.contains(&track.id) {
-                keys.push(track.id.clone());
-            }
-        }
-    }
-    keys
+/// Rating keys of the library tracks that live under the discovery folder.
+/// Resolving by folder instead of by saved file paths keeps the playlist
+/// correct after beets renames the imported files.
+pub(crate) fn resolve_folder_keys(folder: &str, library: &[MediaTrack]) -> Vec<String> {
+    let needle = folder_needle(folder);
+    library
+        .iter()
+        .filter(|track| {
+            track
+                .path
+                .as_deref()
+                .is_some_and(|path| normalize_path(path).contains(&needle))
+        })
+        .map(|track| track.id.clone())
+        .collect()
 }
 
 fn select_playlist_id(container: PlexPlaylistsContainer, title: &str) -> Option<String> {
@@ -669,11 +660,11 @@ impl MediaServer for PlexClient {
     }
 
     async fn reconcile_playlist(&self, spec: &PlaylistSpec<'_>) -> Result<Option<String>> {
-        let keys = resolve_rating_keys(spec.paths, spec.library);
+        let keys = resolve_folder_keys(spec.folder, spec.library);
         if keys.is_empty() {
             warn!(
-                "No Plex tracks matched for profile '{}', skipping playlist",
-                spec.profile
+                "No Plex tracks under '{}' for profile '{}', skipping playlist",
+                spec.folder, spec.profile
             );
             return Ok(None);
         }
@@ -715,37 +706,51 @@ mod tests {
     }
 
     #[test]
-    fn matches_exact_paths_before_file_names() {
+    fn resolves_the_profile_folder_when_the_library_root_differs() {
         let library = vec![
-            track("1", "/music/A/one/song.flac"),
-            track("2", "/data/music/B/two/song.flac"),
+            track("1", "/plex/music/Artist/Album/song.flac"),
+            track(
+                "2",
+                "/medias/music-discovery/Discovery/Balanced/Artist/Album/song.flac",
+            ),
+            track(
+                "3",
+                "/medias/music-discovery/Discovery/Adventurous/Artist/Album/song.flac",
+            ),
         ];
-        let keys = resolve_rating_keys(&["/data/music/B/two/song.flac".to_string()], &library);
+        let keys = resolve_folder_keys(
+            "/Volumes/medias/music-discovery/Discovery/Balanced",
+            &library,
+        );
         assert_eq!(keys, vec!["2".to_string()]);
     }
 
     #[test]
-    fn matches_by_file_name_when_roots_differ() {
-        let library = vec![
-            track("1", "/plex/music/Artist/Album/unique.flac"),
-            track("2", "/plex/music/Other/Album/other.flac"),
-        ];
-        let keys = resolve_rating_keys(&["/music/Artist/Album/unique.flac".to_string()], &library);
+    fn matches_the_folder_regardless_of_case_and_trailing_slashes() {
+        let library = vec![track(
+            "1",
+            "/data/Music/Discovery/Fresh Picks/Artist/Album/song.flac",
+        )];
+        let keys = resolve_folder_keys("/volumes/music/Discovery/fresh picks/", &library);
         assert_eq!(keys, vec!["1".to_string()]);
     }
 
     #[test]
-    fn deduplicates_and_keeps_order() {
-        let library = vec![track("1", "/music/a.flac"), track("2", "/music/b.flac")];
-        let keys = resolve_rating_keys(
-            &[
-                "/music/b.flac".to_string(),
-                "/music/a.flac".to_string(),
-                "/music/b.flac".to_string(),
-            ],
-            &library,
-        );
-        assert_eq!(keys, vec!["2".to_string(), "1".to_string()]);
+    fn keeps_tracks_of_other_profiles_out_of_the_playlist() {
+        let library = vec![
+            track("1", "/music/Discovery/Conservative/Artist/Album/song.flac"),
+            track("2", "/music/Discovery/Conservative Deluxe/Artist/song.flac"),
+        ];
+        let keys = resolve_folder_keys("/music/Discovery/Conservative", &library);
+        assert_eq!(keys, vec!["1".to_string()]);
+    }
+
+    #[test]
+    fn skips_library_tracks_without_a_path() {
+        let mut without_path = track("1", "/unused");
+        without_path.path = None;
+        let library = vec![without_path];
+        assert!(resolve_folder_keys("/music/Discovery/Balanced", &library).is_empty());
     }
 
     #[test]

@@ -168,6 +168,8 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
         },
     );
 
+    let cancellation = crate::globals::register_pending_search(&username, &batch_id);
+
     tokio::spawn(async move {
         let _pending_request = PendingRequestGuard::new(&task_username, &batch_id);
         // Send Searching event
@@ -191,6 +193,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
                 let backend = Arc::clone(backend);
                 let album = album.clone();
                 let tracks = tracks.clone();
+                let cancellation = cancellation.clone();
                 async move {
                     // Start search
                     let search_id = match backend.start_search(album.as_ref(), &tracks).await {
@@ -209,6 +212,10 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
                     let deadline = tokio::time::Instant::now() + SEARCH_TIMEOUT;
                     let mut latest_groups = Vec::<DownloadableGroup>::new();
                     loop {
+                        if cancellation.is_cancelled() {
+                            info!("Backend {} search cancelled by the user", id);
+                            return (id, Vec::<DownloadableGroup>::new());
+                        }
                         if tokio::time::Instant::now() >= deadline {
                             warn!("Backend {} search timed out", id);
                             break;
@@ -244,6 +251,11 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             .collect();
 
         let results = futures::future::join_all(search_futures).await;
+
+        if cancellation.is_cancelled() {
+            crate::globals::clear_pending_request(&task_username, &batch_id);
+            return;
+        }
 
         // Merge all results into a single list sorted by score (per D-07)
         let mut all_groups: Vec<DownloadableGroup> = results
@@ -598,5 +610,6 @@ impl PendingRequestGuard {
 impl Drop for PendingRequestGuard {
     fn drop(&mut self) {
         crate::globals::clear_pending_request(&self.username, &self.id);
+        crate::globals::clear_pending_search(&self.username, &self.id);
     }
 }
