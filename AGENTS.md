@@ -147,7 +147,12 @@ npm run fixtures && docker compose -f compose.e2e.yml up -d --build
 npx playwright test
 ```
 
-Native stack without Docker: `e2e/scripts/dev-stack.sh up|down`.
+Native stack without Docker: `e2e/scripts/dev-stack.sh up|down` (Linux and macOS;
+it builds a pinned beets venv at `e2e/.runtime/beets-venv` with Python 3.11/3.12 and
+runs the servers with `HOME=.runtime/home`, so a local beets config cannot leak in).
+It serves the binary from `dx bundle --package web --release`, so re-bundle after
+Rust/UI changes; for UI-only work `dx serve --package web --platform web` plus
+`npm run stubs` is faster and needs no bundle.
 
 Production image: `Dockerfile`, tiers `light` (default), `medium`, `full` from
 `build/tiers/*.env`; `:latest` aliases `:light`. The build runs `dx bundle --package web --release`
