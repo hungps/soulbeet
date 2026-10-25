@@ -338,11 +338,21 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
         spawn(async move {
             if let Ok(removed) = auth.call(api::dismiss_failed_download_requests()).await {
                 let removed: HashSet<String> = removed.into_iter().collect();
+                let mut cleared = Vec::new();
                 let mut map = props.downloads.write();
-                map.retain(|_, file| match &file.batch_id {
-                    Some(batch_id) => !removed.contains(batch_id),
-                    None => true,
+                map.retain(|item, file| match &file.batch_id {
+                    Some(batch_id) if removed.contains(batch_id) => {
+                        cleared.push(item.clone());
+                        false
+                    }
+                    _ => true,
                 });
+                drop(map);
+                if !cleared.is_empty() {
+                    if let Err(e) = api::forget_import_retries(cleared).await {
+                        warn!("Could not drop import retries for cleared rows: {e}");
+                    }
+                }
             }
             clearing_failed.set(false);
         });

@@ -3,19 +3,21 @@
 > THIS FORK IS MADE WITH CLANKER, USE WITH CAUTION
 
 > What's added:
+> - Download queue per release: stop, resume, retry, remove, and parked requests retried later
 > - Filter album by release type and medium
 > - Able to pick album releases
 > - Plex integration
 > - Selfhosted MusicBrainz support
 > - Library management, unknown release/track matching
+> - slskd download path mapping
 
-[![Docker Pulls](https://img.shields.io/docker/pulls/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet)
-[![Docker Image Size](https://img.shields.io/docker/image-size/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet/tags)
-[![Docker Image Version](https://img.shields.io/docker/v/docccccc/soulbeet)](https://hub.docker.com/r/docccccc/soulbeet/tags)
+[![Docker Pulls](https://img.shields.io/docker/pulls/hungps/soulbeet)](https://hub.docker.com/r/hungps/soulbeet)
+[![Docker Image Size](https://img.shields.io/docker/image-size/hungps/soulbeet)](https://hub.docker.com/r/hungps/soulbeet/tags)
+[![Docker Image Version](https://img.shields.io/docker/v/hungps/soulbeet)](https://hub.docker.com/r/hungps/soulbeet/tags)
 
-[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/terry90/soulbeet/image-build-push.yml)](https://github.com/terry90/soulbeet/actions)
-[![GitHub License](https://img.shields.io/github/license/terry90/soulbeet)](https://github.com/terry90/soulbeet)
-[![GitHub Repo stars](https://img.shields.io/github/stars/terry90/soulbeet)](https://github.com/terry90/soulbeet)
+[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/hungps/soulbeet/e2e.yml?branch=develop&label=e2e)](https://github.com/hungps/soulbeet/actions)
+[![GitHub License](https://img.shields.io/github/license/hungps/soulbeet)](https://github.com/hungps/soulbeet)
+[![GitHub Repo stars](https://img.shields.io/github/stars/hungps/soulbeet)](https://github.com/hungps/soulbeet)
 
 Soulbeet is a self-hosted music downloader, library manager, and discovery engine. Search for music, download it, and let the app handle everything else: finding the best source, tagging, organizing, and keeping your library clean. Connect your scrobble history and Soulbeet will find new music for you automatically.
 
@@ -38,6 +40,20 @@ You search, you click download. Behind the scenes:
 2. **Navidrome** or **Plex** picks up the new files and makes them streamable.
 3. For discovery: **Last.fm / ListenBrainz** feed your listening history into the recommendation engine, which finds new tracks, downloads them, and pushes playlists to your media server.
 
+## Download Requests
+
+Every download becomes a request, shown in the **Downloads** drawer (the icon in the navbar).
+
+- One card per download. A card groups that download's files and shows how many have landed, plus a status: PENDING, QUEUED, DOWNLOADING, DOWNLOADED, TAGGING, TAGGED, SKIPPED, STOPPED or FAILED.
+- Expand a card (click it) for its per-file rows. Each row has its own badge — QUEUED, SLSK, DOWNLOADED, WAIT, BEETS, LIB, SKIP, ERR, CANCEL or STOP — the reason when it failed, and "Show beets output" for imports.
+- **Stop request** cancels the running transfers and keeps the rows; **Resume request** queues them again.
+- **Retry failed tracks** re-enqueues only the files that failed.
+- **Remove request** cancels what is still running, deletes that request's downloaded files from the download folder and drops its rows. Files already imported into a library stay there.
+- **Clear completed** / **Clear failed** dismiss finished cards. Clearing a row the server kept an import job for also drops that job, so its Retry import / match picker goes away.
+- Downloading a release that is still in flight does not enqueue a second copy: a manual download attaches to the open card and skips files it already queued, and an auto download drops its duplicate card so the running batch takes the files.
+
+When a search finds no source for a request, or nothing can be queued, the request is parked instead of failed: the search row shows **Requested** and the drawer shows **REQUESTED — Waiting to retry**. Soulbeet re-checks Soulseek for parked requests on the interval set in **Settings > Library > Retry unavailable requests** (off, 2h, 6h, 12h, 1 day or 1 week) and drops the parked request once a source is queued.
+
 ## Self-Hosting with Docker
 
 The recommended way to run Soulbeet is via Docker Compose. This ensures all dependencies (like `beets` and `python`) are correctly set up.
@@ -55,7 +71,7 @@ The recommended way to run Soulbeet is via Docker Compose. This ensures all depe
 ```yaml
 services:
   soulbeet:
-    image: docker.io/docccccc/soulbeet:latest
+    image: docker.io/hungps/soulbeet:latest
     restart: unless-stopped
     ports:
       - 9765:9765
@@ -69,34 +85,31 @@ services:
       - ./beets:/config
       - /path/to/slskd/downloads:/downloads
       - /path/to/music:/music
-    depends_on:
-      - slskd
-      - navidrome
 ```
 
-2.  **Important**: The `/downloads` volume must match between `slskd` and `soulbeet` so Soulbeet can see the files `slskd` downloaded. The `/music` volume must match between `soulbeet` and your media server (`navidrome` or `plex`) so it can see the organized library. Soulbeet requires **slskd 0.26 or newer** (downloads are enqueued through the batches API introduced in 0.26).
+slskd and your media server are not part of this snippet; point Soulbeet at them from the UI (see below).
+
+2.  **Important**: The `/downloads` volume must point at the same physical folder `slskd` writes to, so Soulbeet can see the files it downloaded. If the two containers mount it under different paths, set **slskd downloads path** and **Soulbeet downloads path** in **Settings > Config** and Soulbeet translates the paths slskd reports. The `/music` volume must point at the same folder your media server (`navidrome` or `plex`) indexes, so it can see the organized library; use the **path mappings** in **Settings > Media Server** when the two sides differ. Soulbeet requires **slskd 0.26 or newer** (downloads are enqueued through the batches API introduced in 0.26).
 
 3.  Seed the beets config. `BEETS_CONFIG` replaces the config shipped in the image, so start from a copy of it. Use the same tag as the `image:` line above, since the shipped `plugins:` line depends on the tier (see [Image Tiers](#image-tiers)), and copy it again after you change tier:
 
 ```bash
 TAG=latest # the tag on your image: line (latest, light, medium or full)
 mkdir -p beets
-docker create --name sb "docker.io/docccccc/soulbeet:$TAG"
+docker create --name sb "docker.io/hungps/soulbeet:$TAG"
 docker cp sb:/app/beets_config.yaml ./beets/config.yaml
 docker rm sb
 ```
 
-4.  **Important**: The `/downloads` volume must match between `slskd` and `soulbeet` so Soulbeet can see the files `slskd` downloaded. The `/music` volume must match between `soulbeet` and `navidrome` so Navidrome can see the organized library. Soulbeet requires **slskd 0.26 or newer** (downloads are enqueued through the batches API introduced in 0.26).
-
-5.  Run:
+4.  Run:
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ### Initial Setup
 
-1.  Open `http://localhost:9765` and log in with default admin/admin account
+1.  Open `http://localhost:9765` and log in with the default `admin` / `admin` account (change it in **Settings > Users**). Accounts are local; a media server is linked per user in the next steps.
 2.  In **Settings > Config**, connect slskd (URL + API key). [How to get an slskd API key](https://github.com/slskd/slskd/blob/master/docs/config.md#yaml-24).
 3.  In **Settings > Library**, add your music folders (e.g. `/music`).
 4.  In **Settings > Media Server**, choose the active server. Navidrome users can override the URL and credentials; Plex users can log in, pick a server from their plex.tv account, and toggle HTTPS. Add path mappings when Soulbeet and the media server mount the library at different paths.
@@ -154,6 +167,8 @@ When beets handled the import as one task (one track, or one album folder that b
 -   **Show matches**: the matches beets weighed for that import, with their score and what differs. Pick one, or paste a MusicBrainz link or ID (a recording for singletons, a release in album mode), then click **Import with this match**. beets applies exactly that match (`-S <id>`), however low its score.
 -   **Import as-is**: beets imports the files with their own tags (`-A`) and looks nothing up. Every file needs artist and title tags, and in album mode an album tag too. If one lacks them, nothing is imported and the row names the files that lack them: beets would file untagged music under empty names, and with `duplicate_action: remove` a second untagged import would replace the first.
 
+These offers come from the import job the server kept for the row, and that job lives in memory. The buttons show in the session that saw the import; after a page reload the row and its reason come back from the request list, but its **Retry import** / **Show matches** buttons do not. The job is dropped on restart, when you clear the row, and after 200 kept jobs per user.
+
 ### Image Tiers
 
 Soulbeet ships three image tiers: `:light` (default, MusicBrainz tagging only), `:medium` (adds AcoustID fingerprint matching via the `chroma` plugin), and `:full` (adds cover art, lyrics, ReplayGain, and more). `:latest` is an alias for `:light` so existing installs keep their current behavior. See [docs/beets-plugins.md](./docs/beets-plugins.md) for what each tier ships, how to switch, and how to drop in your own plugins.
@@ -164,7 +179,6 @@ Soulbeet ships three image tiers: `:light` (default, MusicBrainz tagging only), 
 
 - Per-folder duplicate detection
 - Independent library management for each user/folder
-- Cross-library duplicate detection
 
 #### Interacting with Your Library
 
@@ -186,11 +200,19 @@ docker exec -it <container_name> beet -l /music/Person1/.beets_library.db ls
 
 For more beets commands, see the [beets documentation](https://beets.readthedocs.io/en/stable/reference/cli.html).
 
+#### Library Indexing
+
+**Settings > Library** keeps a per-folder index that the Dashboard and the search results use (releases, track completeness, and whether a result is already in your library):
+
+- **Periodic scan**: re-index a folder and synchronise its beets database on a schedule (off, 2h, 6h, 12h, 1 day or 1 week). Every folder is also scanned once at startup.
+- **Native file watch**: re-index a folder as files change on disk, while the app is running.
+- **Retry unavailable requests**: how often parked download requests are re-checked on Soulseek (see [Download Requests](#download-requests)).
+
 #### Album Mode
 
 Enable **Album mode** in Settings > Config. Soulbeet then saves every download batch in its own folder named `<label> [<id>]` under the download path and imports that folder as an album instead of importing its files as singletons.
 
-This flag is only needed when you want album tags on your tracks. E.g: `albumartist` `mb_albumid` and so on..
+This option is only needed when you want album tags on your tracks. E.g: `albumartist` `mb_albumid` and so on..
 
 **Important for Album Mode:**
 Since `beets` is run in quiet mode (`-q`), it will skip any imports that require user intervention (e.g., if the metadata doesn't match confidently). A skipped album that beets read as one album can still be imported with a match you pick or as-is (see [Skipped Imports](#skipped-imports)). To ensure partial albums or less popular releases are imported correctly, you **must** configure your config file to be more permissive.
@@ -244,7 +266,7 @@ Your Soulbeet folder paths must point to the same physical directories that the 
 - Tracks are downloaded from Soulseek, imported via beets into the profile subdirectory, and tagged properly.
 - On Navidrome, a smart playlist is created (via the native API) for each profile, filtered by the folder path. The playlist auto-updates as Navidrome scans new files.
 - On Plex, a regular playlist is created from the tracks currently in the profile's `Discovery/` folder and replaced on every reconciliation (6-hour automation, and after each generation once Plex finishes scanning).
-- Every 6 hours, an automation task syncs ratings, creates playlists if missing, and regenerates expired discovery batches.
+- Every 6 hours (after a 30 s startup delay) the automation rechecks Navidrome's ReportRealPath, syncs ratings, recreates missing playlists, regenerates recommendations, expires old discovery tracks and refills the gaps. It does nothing while no media server is linked.
 
 #### Auto-Delete
 
@@ -259,9 +281,10 @@ When enabled (Settings > Library > Auto-delete), 1-star tracks are deleted from 
     ```
 3.  Run the app:
     ```bash
-    dx serve --platform web
+    dx serve --package web --platform web
     ```
-4.  Run the tests (the Python tests need Python 3.11+ with beets and pytest installed):
+4.  Local imports need beets **2.8 to 2.11** on `PATH`; the image pins `beets==2.11.0` (see `build/requirements-beets.txt`). A newer beets is reported as **Broken** in Settings > Config, because the import driver hooks into beets internals. `BEETS_PYTHON` overrides the interpreter read from the `beet` shebang.
+5.  Run the tests (the Python tests need Python 3.11+ with beets and pytest installed):
     ```bash
     cargo test --workspace --features server,dioxus/server --lib
     cargo test -p soulbeet --lib

@@ -44,7 +44,7 @@ pub fn Footer() -> Element {
                 // Up to date
                 rsx! {
                   a {
-                    href: "https://hub.docker.com/repository/docker/docccccc/soulbeet",
+                    href: "https://hub.docker.com/repository/docker/hungps/soulbeet",
                     target: "_blank",
                     class: "text-green-800",
                     "[ v{local} • up to date ]"
@@ -54,7 +54,7 @@ pub fn Footer() -> Element {
                 // Newer version available
                 rsx! {
                   a {
-                    href: "https://hub.docker.com/repository/docker/docccccc/soulbeet",
+                    href: "https://hub.docker.com/repository/docker/hungps/soulbeet",
                     target: "_blank",
                     class: "text-amber-800 hover:text-amber-500 transition-colors cursor-pointer",
                     title: "Newer version {remote} available",
@@ -89,13 +89,13 @@ pub fn Footer() -> Element {
           {version}
           a {
             class: "hover:text-beet-accent transition-colors",
-            href: "https://hub.docker.com/repository/docker/docccccc/soulbeet",
+            href: "https://hub.docker.com/repository/docker/hungps/soulbeet",
             target: "_blank",
             "[ Docker Hub ]"
           }
           a {
             class: "hover:text-beet-accent transition-colors",
-            href: "https://github.com/terry90/soulbeet",
+            href: "https://github.com/hungps/soulbeet",
             target: "_blank",
             "[ Github ]"
           }

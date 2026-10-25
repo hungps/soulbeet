@@ -406,9 +406,28 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             p
         };
 
+        // A repeat click whose files a running batch already holds joins that
+        // batch: its monitor imports them and owns their rows, so this run's
+        // request would only be a second card stuck at Queued.
+        let joined_elsewhere = matches!(watcher, Watcher::Joined(_))
+            && request
+                .as_ref()
+                .is_some_and(|request| batch.owner.batch_id != request.id);
+        if joined_elsewhere {
+            if let Some(request) = &request {
+                let _ = DownloadRequestRow::delete(&request.id).await;
+                let _ = tx.send(DownloadEvent::RequestRemoved {
+                    request_id: request.id.clone(),
+                    items: Vec::new(),
+                });
+            }
+        }
+
         let successful = match &request {
-            Some(request) => super::requests::record_queued(request, &items, &results, &tx).await,
-            None => {
+            Some(request) if !joined_elsewhere => {
+                super::requests::record_queued(request, &items, &results, &tx).await
+            }
+            _ => {
                 let failed_entries: Vec<DownloadProgress> = results
                     .iter()
                     .filter_map(|d| {
@@ -459,7 +478,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             }));
         }
 
-        if successful.is_empty() {
+        if successful.is_empty() && !joined_elsewhere {
             let _ = LibraryRequestRow::enqueue(
                 &task_user_id,
                 &queue_folder_id,
