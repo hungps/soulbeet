@@ -11,13 +11,14 @@ use shared::download::{DownloadProgress, DownloadState, QueuedDownload};
 #[cfg(feature = "server")]
 use crate::globals::get_or_create_user_channel;
 #[cfg(feature = "server")]
+use crate::import_queue::IMPORT_QUEUE;
+#[cfg(feature = "server")]
 use crate::models::download_request::{DownloadRequestRow, DownloadRequestTrackRow};
 #[cfg(feature = "server")]
 use crate::models::folder::Folder;
 #[cfg(feature = "server")]
 use crate::models::user::User;
-#[cfg(feature = "server")]
-use crate::server_fns::download::process::process_downloads;
+use crate::server_fns::download::process::import_job as make_import_job;
 #[cfg(feature = "server")]
 use crate::server_fns::download::requests::{broadcast_progress, record_queued, start_monitor};
 #[cfg(feature = "server")]
@@ -106,12 +107,7 @@ async fn recover_request(request: DownloadRequestRow) -> Result<(), String> {
     let target = PathBuf::from(&request.target_folder);
 
     if !importable.is_empty() && resumable.is_empty() {
-        spawn_import(
-            import_entries(&request, &importable),
-            target.clone(),
-            tx.clone(),
-            user.id.clone(),
-        );
+        import_tracks(&request, &importable, &target, &user.username, &tx).await;
     }
 
     if !resumable.is_empty() {
@@ -136,7 +132,7 @@ async fn recover_request(request: DownloadRequestRow) -> Result<(), String> {
                     source: download.source.clone(),
                     item: download.item.clone(),
                     size: download.size,
-                    error: None,
+                    status: shared::download::EnqueueStatus::Enqueued,
                 });
             } else {
                 missing.push(item.clone());
@@ -145,21 +141,27 @@ async fn recover_request(request: DownloadRequestRow) -> Result<(), String> {
         }
 
         if !missing.is_empty() {
-            queued.extend(backend.download(missing).await.map_err(|e| e.to_string())?);
+            let destination = shared::download::batch_folder(&request.label, &request.id);
+            queued.extend(
+                backend
+                    .download(missing, &destination)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            );
         }
 
         let accepted = record_queued(&request, &items, &queued, &tx).await;
         DownloadRequestRow::set_state(&request.id, "active").await?;
         if !accepted.is_empty() {
-            start_monitor(&user.username, &user.id, &request, accepted).await;
+            start_monitor(&user.username, &request, accepted).await;
         }
         if !importable.is_empty() {
             let request = request.clone();
             let target = target.clone();
             let import_tx = tx.clone();
-            let user_id = user.id.clone();
+            let username = user.username.clone();
             tokio::spawn(async move {
-                import_after_settled(request, target, import_tx, user_id).await;
+                import_after_settled(request, target, import_tx, username).await;
             });
         }
     }
@@ -192,23 +194,71 @@ fn import_entries(
             backend: request.backend.clone(),
             batch_id: Some(request.id.clone()),
             batch_label: Some(request.label.clone()),
+            local_path: None,
+            import_output: None,
+            retryable: false,
+            can_choose_import: false,
         })
         .collect()
 }
 
 #[cfg(feature = "server")]
-fn spawn_import(
-    entries: Vec<DownloadProgress>,
-    target: PathBuf,
-    tx: tokio::sync::broadcast::Sender<shared::download::DownloadEvent>,
-    user_id: String,
+async fn import_tracks(
+    request: &DownloadRequestRow,
+    tracks: &[DownloadRequestTrackRow],
+    target: &std::path::Path,
+    username: &str,
+    tx: &tokio::sync::broadcast::Sender<shared::download::DownloadEvent>,
 ) {
-    if entries.is_empty() {
+    if tracks.is_empty() {
         return;
     }
-    tokio::spawn(async move {
-        process_downloads(entries, target, tx, user_id).await;
-    });
+    let download_base = crate::models::app_config::AppConfig::download_path().await;
+    let slskd_base = crate::models::app_config::AppConfig::slskd_download_path().await;
+    let album_mode = crate::models::app_config::AppConfig::is_album_mode().await;
+
+    let mut groups: Vec<(PathBuf, Vec<DownloadProgress>)> = Vec::new();
+    for track in tracks {
+        let entry = import_entries(request, std::slice::from_ref(track))
+            .pop()
+            .expect("entry for track");
+        let Some(path) =
+            resolve_download_path_mapped(&track.item_key, &download_base, slskd_base.as_deref())
+        else {
+            let mut gone = entry;
+            gone.state = DownloadState::Imported;
+            let _ = DownloadRequestTrackRow::set_state(
+                &request.id,
+                &track.item_key,
+                &DownloadState::Imported,
+                None,
+            )
+            .await;
+            broadcast_progress(tx, vec![gone]).await;
+            continue;
+        };
+        let path = PathBuf::from(path);
+        let source = match album_mode {
+            true => path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or(path),
+            false => path,
+        };
+        match groups.iter_mut().find(|(dir, _)| *dir == source) {
+            Some((_, rows)) => rows.push(entry),
+            None => groups.push((source, vec![entry])),
+        }
+    }
+
+    for (source, rows) in groups {
+        let mode = match album_mode {
+            true => soulbeet::ImportMode::Album,
+            false => soulbeet::ImportMode::Singleton,
+        };
+        let job = make_import_job(source, mode, rows, target, username, &download_base);
+        IMPORT_QUEUE.submit(job).await;
+    }
 }
 
 #[cfg(feature = "server")]
@@ -216,7 +266,7 @@ async fn import_after_settled(
     request: DownloadRequestRow,
     target: PathBuf,
     tx: tokio::sync::broadcast::Sender<shared::download::DownloadEvent>,
-    user_id: String,
+    username: String,
 ) {
     for _ in 0..1440 {
         let Ok(tracks) = DownloadRequestTrackRow::list_for_request(&request.id).await else {
@@ -237,37 +287,7 @@ async fn import_after_settled(
         if importable.is_empty() {
             return;
         }
-
-        let download_base = crate::models::app_config::AppConfig::download_path().await;
-        let slskd_base = crate::models::app_config::AppConfig::slskd_download_path().await;
-        let mut entries = Vec::new();
-        for track in importable {
-            let exists = resolve_download_path_mapped(
-                &track.item_key,
-                &download_base,
-                slskd_base.as_deref(),
-            )
-            .is_some();
-            if exists {
-                entries.extend(import_entries(&request, std::slice::from_ref(&track)));
-            } else {
-                let mut entry = import_entries(&request, std::slice::from_ref(&track))
-                    .pop()
-                    .expect("entry for track");
-                entry.state = DownloadState::Imported;
-                let _ = DownloadRequestTrackRow::set_state(
-                    &request.id,
-                    &track.item_key,
-                    &DownloadState::Imported,
-                    None,
-                )
-                .await;
-                broadcast_progress(&tx, vec![entry]).await;
-            }
-        }
-        if !entries.is_empty() {
-            process_downloads(entries, target, tx, user_id).await;
-        }
+        import_tracks(&request, &importable, &target, &username, &tx).await;
         return;
     }
 }

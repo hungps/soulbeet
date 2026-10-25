@@ -581,6 +581,10 @@ fn tag_progress(
         backend: Some("beets".to_string()),
         batch_id: Some(request.id.clone()),
         batch_label: Some(request.label.clone()),
+        local_path: None,
+        import_output: None,
+        retryable: false,
+        can_choose_import: false,
     }
 }
 

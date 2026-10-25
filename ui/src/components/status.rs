@@ -1,6 +1,17 @@
 use dioxus::prelude::*;
 use shared::media_server::MediaServerKind;
-use shared::system::{MediaServerStatus, SystemHealth};
+use shared::system::{HealthLevel, MediaServerStatus, SystemHealth};
+
+/// The status dot class and chip text for an importer health level.
+pub fn importer_chip(level: HealthLevel) -> (&'static str, &'static str) {
+    let dot = match level {
+        HealthLevel::Ready => "bg-beet-accent",
+        HealthLevel::Degraded => "bg-yellow-500",
+        HealthLevel::Broken => "bg-red-500",
+        HealthLevel::Checking => "bg-gray-500 animate-pulse",
+    };
+    (dot, level.chip())
+}
 
 #[component]
 pub fn SystemStatus(
@@ -22,6 +33,14 @@ pub fn SystemStatus(
         MediaServerStatus::Offline => None,
     };
 
+    let (beets_dot, beets_chip) = importer_chip(health.importer.level);
+    let beets_hint = health
+        .importer
+        .issues
+        .first()
+        .map(|issue| issue.title.clone())
+        .unwrap_or_default();
+
     let user_not_linked = matches!(
         media_status,
         MediaServerStatus::InvalidCredentials | MediaServerStatus::Unknown
@@ -42,18 +61,9 @@ pub fn SystemStatus(
             "DOWNLOADER OFFLINE"
           }
         }
-        span { class: "flex items-center gap-2",
-          span {
-            class: format!(
-                "w-2 h-2 rounded-full {}",
-                if health.beets_ready { "bg-beet-accent" } else { "bg-red-500" },
-            ),
-          }
-          if health.beets_ready {
-            "BEETS READY"
-          } else {
-            "BEETS MISSING"
-          }
+        span { class: "flex items-center gap-2", title: beets_hint,
+          span { class: "w-2 h-2 rounded-full {beets_dot}" }
+          "BEETS {beets_chip}"
         }
         span {
           class: "flex items-center gap-2",
@@ -73,5 +83,27 @@ pub fn SystemStatus(
           }
         }
       }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn importer_chip_texts() {
+        assert_eq!(
+            importer_chip(HealthLevel::Ready),
+            ("bg-beet-accent", "READY")
+        );
+        assert_eq!(
+            importer_chip(HealthLevel::Degraded),
+            ("bg-yellow-500", "WARN")
+        );
+        assert_eq!(importer_chip(HealthLevel::Broken), ("bg-red-500", "BROKEN"));
+        assert_eq!(
+            importer_chip(HealthLevel::Checking),
+            ("bg-gray-500 animate-pulse", "CHECKING")
+        );
     }
 }

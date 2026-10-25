@@ -7,7 +7,7 @@ use shared::system::BackendInfo;
 #[cfg(feature = "server")]
 use crate::services::{
     available_download_backends, available_importers, available_metadata_providers,
-    download_backend, evict_media_server, media_server_for_user, music_importer,
+    download_backend, evict_media_server, media_server_for_user,
 };
 #[cfg(feature = "server")]
 use crate::AuthSession;
@@ -23,10 +23,7 @@ pub async fn get_system_health() -> Result<SystemHealth, ServerFnError> {
             Err(_) => false,
         };
 
-        let beets_ready = match music_importer(None).await {
-            Ok(importer) => importer.health_check().await,
-            Err(_) => false,
-        };
+        let importer = crate::importer_health::snapshot().await;
 
         let media_server_online = match media_server_for_user(&auth.0.sub).await {
             Ok(server) => match server.ping().await {
@@ -48,7 +45,7 @@ pub async fn get_system_health() -> Result<SystemHealth, ServerFnError> {
 
         Ok(SystemHealth {
             downloader_online,
-            beets_ready,
+            importer,
             media_server_online,
         })
     }

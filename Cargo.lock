@@ -4127,6 +4127,7 @@ dependencies = [
  "env_logger",
  "futures",
  "itertools",
+ "libc",
  "md5",
  "musicbrainz_rs",
  "percent-encoding",
@@ -4142,6 +4143,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -4907,6 +4909,8 @@ dependencies = [
  "api",
  "chrono",
  "dioxus",
+ "dioxus-html",
+ "dioxus-ssr",
  "futures",
  "gloo-timers",
  "serde_json",

@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod beets;
 pub mod engine;
 pub mod error;
@@ -18,6 +19,7 @@ pub use navidrome::{NavidromeClient, NavidromeClientBuilder};
 pub use plex::{PlexClient, PlexClientBuilder};
 pub use services::{Services, ServicesBuilder};
 pub use traits::{
-    CandidateGenerator, DownloadBackend, FallbackMetadataProvider, ImportResult, MediaServer,
-    MetadataProvider, MusicImporter, PlaylistSpec, ScrobbleProvider,
+    CandidateGenerator, DownloadBackend, DriverChoice, FallbackMetadataProvider, ImportMode,
+    ImportOutcome, ImportResult, MediaServer, MetadataProvider, MusicImporter, PlaylistSpec,
+    ScrobbleProvider, SkipReason, TaskCount, TimeoutKind,
 };

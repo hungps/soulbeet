@@ -93,7 +93,12 @@ fn tv_url(base: &str, path: &str) -> Result<Url> {
     Ok(Url::parse(&normalized)?.join(path)?)
 }
 
-fn client_request(client: &Client, method: reqwest::Method, url: Url, client_id: &str) -> reqwest::RequestBuilder {
+fn client_request(
+    client: &Client,
+    method: reqwest::Method,
+    url: Url,
+    client_id: &str,
+) -> reqwest::RequestBuilder {
     client
         .request(method, url)
         .header("X-Plex-Product", "Soulbeet")
@@ -204,8 +209,8 @@ pub async fn list_servers(
         plex_tv_url,
         "api/v2/resources?includeHttps=1&includeRelay=1",
     )?;
-    let request = client_request(&client, reqwest::Method::GET, url, client_id)
-        .header("X-Plex-Token", token);
+    let request =
+        client_request(&client, reqwest::Method::GET, url, client_id).header("X-Plex-Token", token);
     let resources: Vec<RawResource> = send_json(request, "list servers").await?;
 
     let mut servers = Vec::new();

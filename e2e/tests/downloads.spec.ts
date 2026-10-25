@@ -3,10 +3,15 @@
 // autotags against the MusicBrainz stub -> files land in the library tree.
 
 import { expect, test } from '@playwright/test';
-import { freshSession, openDownloadsPanel, performSearch, waitForTransferRow } from '../helpers/app.js';
-import { expectFileAppears, fileExists, importedTrackPath } from '../helpers/files.js';
+import {
+  freshSession,
+  openDownloadsPanel,
+  performSearch,
+  waitForTransferRow,
+} from '../helpers/app.js';
+import { expectFileAppears, importedTrackPath, listFilesRecursive } from '../helpers/files.js';
 import { glassAtlas, senders } from '../fixtures/dataset.js';
-import { join } from 'node:path';
+import { basename } from 'node:path';
 import { downloadsDirOnHost } from '../helpers/env.js';
 
 test.describe.configure({ timeout: 180_000 });
@@ -25,8 +30,8 @@ test('downloads and imports a single track', async ({ context, page }) => {
     'Music\\FLAC\\Static Harbor\\Glass Atlas\\01 - Northern Line.flac',
   );
 
-  // Badge walks the pipeline and ends at TAGGED (imported into the library).
-  await expect(item.getByText('TAGGED', { exact: true })).toBeVisible({ timeout: 120_000 });
+  // Badge walks the pipeline and ends at LIB (imported into the library).
+  await expect(item.getByText('LIB', { exact: true })).toBeVisible({ timeout: 120_000 });
 
   const imported = importedTrackPath(
     folder.name,
@@ -37,10 +42,13 @@ test('downloads and imports a single track', async ({ context, page }) => {
   );
   await expectFileAppears(imported, 30_000);
 
-  // beets moved (not copied) the file out of the downloads area.
-  expect(fileExists(join(downloadsDirOnHost, 'Glass Atlas', '01 - Northern Line.flac'))).toBe(
-    false,
-  );
+  // beets moved (not copied) the file out of its batch folder, and slskd never
+  // had to write a renamed {name}_{ticks} copy next to an existing one.
+  const leftovers = listFilesRecursive(downloadsDirOnHost).filter((path) => {
+    const name = basename(path);
+    return name === '01 - Northern Line.flac' || /_\d{18}\./.test(name);
+  });
+  expect(leftovers).toEqual([]);
 });
 
 test('downloads and imports a full album from the album card', async ({ context, page }) => {

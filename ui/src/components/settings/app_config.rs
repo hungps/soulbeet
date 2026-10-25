@@ -1,12 +1,15 @@
 use dioxus::prelude::*;
 use shared::metadata::MusicBrainzServer;
 
+use super::connection_status_row::{beets_row, ConnectionStatusRow, ImporterDetails};
 use crate::friendly_error;
 use crate::settings_context::use_settings;
+use crate::use_system_health;
 
 #[component]
 pub fn AppConfigManager() -> Element {
     let mut settings = use_settings();
+    let health = use_system_health();
     let mut config_resource = use_resource(|| async { api::get_app_config().await });
 
     let config = match &*config_resource.read() {
@@ -140,6 +143,22 @@ pub fn AppConfigManager() -> Element {
                         }
                         p { class: "text-xs text-gray-500 font-mono",
                             "Both paths are optional. They translate a path slskd reports to the path Soulbeet has mounted locally."
+                        }
+                    }
+                }
+
+                // Beets importer
+                {
+                    let importer = health.importer();
+                    let row = beets_row(&importer);
+                    let has_details = !importer.issues.is_empty() || !importer.facts.is_empty();
+                    rsx! {
+                        ConnectionStatusRow {
+                            label: "Beets",
+                            dot_class: row.dot_class,
+                            summary: row.summary,
+                            note: row.note,
+                            details: has_details.then(|| rsx! { ImporterDetails { health: importer.clone() } }),
                         }
                     }
                 }

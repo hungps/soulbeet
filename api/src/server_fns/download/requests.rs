@@ -29,7 +29,7 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use shared::download::{
     DownloadEvent, DownloadProgress, DownloadRequestContext, DownloadState, DownloadableItem,
-    QueuedDownload,
+    EnqueueStatus, QueuedDownload,
 };
 #[cfg(feature = "server")]
 use tokio::sync::{broadcast, RwLock};
@@ -52,9 +52,13 @@ use crate::services::download_backend;
 use crate::AuthSession;
 
 #[cfg(feature = "server")]
-use super::monitor::DownloadMonitor;
+use super::enqueue::failed_reason;
+#[cfg(feature = "server")]
+use super::monitor::{DownloadMonitor, WatchedTransfer};
 #[cfg(feature = "server")]
 use super::utils::resolve_download_path_mapped;
+#[cfg(feature = "server")]
+use crate::transfer_registry::{BatchRef, TransferOwner};
 
 #[cfg(feature = "server")]
 static REQUEST_TOKENS: LazyLock<RwLock<HashMap<String, CancellationToken>>> =
@@ -161,7 +165,7 @@ pub async fn record_queued(
         let answer = queued.iter().find(|q| q.item == item.id || q.id == item.id);
 
         match answer {
-            Some(q) if q.error.is_none() => {
+            Some(q) if q.status == EnqueueStatus::Enqueued => {
                 let _ = DownloadRequestTrackRow::set_queued(
                     &request.id,
                     &item.id,
@@ -182,14 +186,41 @@ pub async fn record_queued(
                 entries.push(entry.with_batch(request.id.clone(), request.label.clone()));
                 accepted.push(q.clone());
             }
-            Some(q) => {
-                let error = q.error.clone().unwrap_or_default();
-                let _ = DownloadRequestTrackRow::mark_failed(&request.id, &item.id, &error).await;
-                let mut entry =
-                    DownloadProgress::failed(q.id.clone(), q.source.clone(), q.item.clone(), error);
-                entry.backend = request.backend.clone();
-                entries.push(entry.with_batch(request.id.clone(), request.label.clone()));
-            }
+            Some(q) => match failed_reason(&q.status) {
+                Some(error) => {
+                    let error = error.to_string();
+                    let _ =
+                        DownloadRequestTrackRow::mark_failed(&request.id, &item.id, &error).await;
+                    let mut entry = DownloadProgress::failed(
+                        q.id.clone(),
+                        q.source.clone(),
+                        q.item.clone(),
+                        error,
+                    );
+                    entry.backend = request.backend.clone();
+                    entries.push(entry.with_batch(request.id.clone(), request.label.clone()));
+                }
+                None => {
+                    let _ = DownloadRequestTrackRow::set_queued(
+                        &request.id,
+                        &item.id,
+                        &q.id,
+                        &q.source,
+                        &q.item,
+                        &DownloadState::Queued,
+                        None,
+                    )
+                    .await;
+                    let mut entry = DownloadProgress::queued(
+                        q.id.clone(),
+                        q.source.clone(),
+                        q.item.clone(),
+                        q.size,
+                    );
+                    entry.backend = request.backend.clone();
+                    entries.push(entry.with_batch(request.id.clone(), request.label.clone()));
+                }
+            },
             None => {
                 let error = "Not reported in the backend enqueue response".to_string();
                 let _ = DownloadRequestTrackRow::mark_failed(&request.id, &item.id, &error).await;
@@ -213,42 +244,87 @@ pub async fn record_queued(
 }
 
 #[cfg(feature = "server")]
+pub fn batch_for(request: &DownloadRequestRow) -> BatchRef {
+    BatchRef::new(
+        TransferOwner {
+            user_id: request.user_id.clone(),
+            batch_id: request.id.clone(),
+        },
+        request.label.clone(),
+        PathBuf::from(&request.target_folder),
+    )
+}
+
+#[cfg(feature = "server")]
 pub async fn start_monitor(
     username: &str,
-    user_id: &str,
     request: &DownloadRequestRow,
     accepted: Vec<QueuedDownload>,
 ) {
     if accepted.is_empty() {
         return;
     }
-
     let (tx, _) = get_or_create_user_channel(username).await;
+    start_monitor_on_batch(username, request, accepted, batch_for(request), tx).await;
+}
+
+#[cfg(feature = "server")]
+pub async fn spawn_monitor(
+    username: &str,
+    accepted: Vec<QueuedDownload>,
+    batch: BatchRef,
+    tx: broadcast::Sender<DownloadEvent>,
+) {
+    if accepted.is_empty() {
+        return;
+    }
+    let token = register_user_task(username).await;
+    let username = username.to_string();
+    let album_mode = crate::models::app_config::AppConfig::is_album_mode().await;
+    let download_base = crate::models::app_config::AppConfig::download_path().await;
+    tokio::spawn(async move {
+        let mut monitor = DownloadMonitor::new(
+            accepted.iter().map(WatchedTransfer::from).collect(),
+            batch.target.clone(),
+            tx,
+            token,
+            username.clone(),
+            batch,
+            album_mode,
+            download_base,
+        );
+        monitor.run().await;
+        unregister_user_task(&username).await;
+    });
+}
+
+#[cfg(feature = "server")]
+pub async fn start_monitor_on_batch(
+    username: &str,
+    request: &DownloadRequestRow,
+    accepted: Vec<QueuedDownload>,
+    batch: BatchRef,
+    tx: broadcast::Sender<DownloadEvent>,
+) {
+    if accepted.is_empty() {
+        return;
+    }
     let _user_token = register_user_task(username).await;
     let token = request_token(username, &request.id).await;
-    let sources = accepted.iter().map(|q| q.source.clone()).collect();
-    let filenames = accepted.iter().map(|q| q.item.clone()).collect();
-    let target = PathBuf::from(&request.target_folder);
-    let batch_id = Some(request.id.clone());
-    let batch_label = Some(request.label.clone());
     let username = username.to_string();
-    let user_id = user_id.to_string();
     let album_mode = crate::models::app_config::AppConfig::is_album_mode().await;
-
-    let mut monitor = DownloadMonitor::new(
-        sources,
-        filenames,
-        target,
-        tx,
-        token,
-        username.clone(),
-        user_id,
-        batch_id,
-        batch_label,
-        album_mode,
-    );
-
+    let download_base = crate::models::app_config::AppConfig::download_path().await;
     tokio::spawn(async move {
+        let mut monitor = DownloadMonitor::new(
+            accepted.iter().map(WatchedTransfer::from).collect(),
+            batch.target.clone(),
+            tx,
+            token,
+            username.clone(),
+            batch,
+            album_mode,
+            download_base,
+        );
         monitor.run().await;
         unregister_user_task(&username).await;
     });
@@ -274,6 +350,10 @@ fn progress_from_track(
         backend: request.backend.clone(),
         batch_id: Some(request.id.clone()),
         batch_label: Some(request.label.clone()),
+        local_path: None,
+        import_output: None,
+        retryable: false,
+        can_choose_import: false,
     };
     if entry.id.is_empty() {
         entry.id = track.item_key.clone();
@@ -356,8 +436,9 @@ pub(crate) async fn requeue(
     let backend = download_backend(request.backend.as_deref())
         .await
         .map_err(|e| format!("download backend not available: {e}"))?;
+    let destination = shared::download::batch_folder(&request.label, &request.id);
     let queued = backend
-        .download(items.clone())
+        .download(items.clone(), &destination)
         .await
         .map_err(|e| format!("download queue failed: {e}"))?;
 
@@ -491,7 +572,7 @@ pub async fn resume_download_request(action: RequestAction) -> Result<(), Server
     let accepted = requeue(&request, pending, &tx)
         .await
         .map_err(server_error)?;
-    start_monitor(&auth.0.username, &auth.0.sub, &request, accepted).await;
+    start_monitor(&auth.0.username, &request, accepted).await;
     Ok(())
 }
 
@@ -504,7 +585,7 @@ pub async fn retry_download_request(action: RequestAction) -> Result<(), ServerF
     let failed: Vec<_> = tracks.into_iter().filter(|t| t.state == "failed").collect();
     let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
     let accepted = requeue(&request, failed, &tx).await.map_err(server_error)?;
-    start_monitor(&auth.0.username, &auth.0.sub, &request, accepted).await;
+    start_monitor(&auth.0.username, &request, accepted).await;
     Ok(())
 }
 

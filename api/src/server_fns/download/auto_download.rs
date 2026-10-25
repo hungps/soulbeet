@@ -4,7 +4,8 @@ use shared::download::DownloadQuery;
 
 #[cfg(feature = "server")]
 use shared::download::{
-    AutoDownloadEvent, DownloadEvent, DownloadProgress, DownloadableGroup, SearchState,
+    AutoDownloadEvent, DownloadEvent, DownloadProgress, DownloadableGroup, EnqueueStatus,
+    SearchState,
 };
 
 #[cfg(feature = "server")]
@@ -19,16 +20,24 @@ use crate::globals::{get_or_create_user_channel, register_user_task, unregister_
 #[cfg(feature = "server")]
 use crate::models::download_request::{DownloadRequestRow, DownloadRequestTrackRow};
 #[cfg(feature = "server")]
+use crate::models::folder::Folder;
+#[cfg(feature = "server")]
 use crate::models::request_queue::LibraryRequestRow;
 #[cfg(feature = "server")]
 use crate::services::{available_download_backends, download_backend};
 #[cfg(feature = "server")]
+use crate::transfer_registry::{BatchRef, TransferOwner};
+#[cfg(feature = "server")]
 use crate::AuthSession;
 
 #[cfg(feature = "server")]
+use super::enqueue::{
+    deliver, enqueue_request, failed_reason, stopped_rows, RequestEnqueue, Watcher,
+};
+#[cfg(feature = "server")]
 use super::failover::{align_pool_tracks, SourcePool};
 #[cfg(feature = "server")]
-use super::monitor::DownloadMonitor;
+use super::monitor::{DownloadMonitor, WatchedTransfer};
 
 /// Score threshold for automatic source selection (per D-04).
 /// Below this, the client gets FallbackToManual with results attached.
@@ -63,6 +72,24 @@ pub enum AutoDownloadResult {
 #[post("/api/auto-download", auth: AuthSession)]
 pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResult, ServerFnError> {
     let username = auth.0.username;
+
+    if let Some(issue) = crate::importer_health::broken_issue().await {
+        return Ok(AutoDownloadResult::Error(issue.title));
+    }
+    let folder = match Folder::get_by_id(&req.folder_id).await {
+        Ok(Some(f))
+            if f.user_id == auth.0.sub
+                && std::path::Path::new(&req.folder_path) == std::path::Path::new(&f.path) =>
+        {
+            f
+        }
+        Ok(_) => return Ok(AutoDownloadResult::Error("Folder not found".to_string())),
+        Err(e) => {
+            warn!("Folder lookup for auto-download failed: {e}");
+            return Ok(AutoDownloadResult::Error("Folder not found".to_string()));
+        }
+    };
+
     let (tx, _) = get_or_create_user_channel(&username).await;
 
     let mut req = req;
@@ -117,7 +144,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
 
     // Spawn the entire search-score-pick-download pipeline onto a background task.
     // This avoids blocking the HTTP response during the search-poll loop (Research Pitfall 4).
-    let folder_path = req.folder_path.clone();
+    let folder_path = folder.path;
     let album = req.query.album.clone();
     let tracks = req.query.tracks.clone();
     let request_context = req.query.request_context();
@@ -305,7 +332,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             query_desc
         );
 
-        let batch_label = picked.title.clone();
+        let batch_label = super::auto_batch_label(&picked);
 
         // Create target directory
         let target_path_buf = std::path::Path::new(&folder_path).to_path_buf();
@@ -354,68 +381,83 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             }
         };
 
-        let queued = match backend.download(items.clone()).await {
-            Ok(q) => q,
-            Err(e) => {
-                if let Some(request) = &request {
-                    if let Ok(tracks) = DownloadRequestTrackRow::list_for_request(&request.id).await
-                    {
-                        for track in tracks {
-                            let _ = DownloadRequestTrackRow::mark_failed(
-                                &request.id,
-                                &track.item_key,
-                                &e.to_string(),
-                            )
-                            .await;
-                        }
-                    }
-                }
-                let _ = tx.send(DownloadEvent::AutoDownload(AutoDownloadEvent::Failed {
-                    batch_id: batch_id.clone(),
-                    error: format!("Download queue failed: {}", e),
-                }));
-                return;
+        let fresh = BatchRef::new(
+            TransferOwner {
+                user_id: task_user_id.clone(),
+                batch_id: batch_id.clone(),
+            },
+            batch_label.clone(),
+            target_path_buf,
+        );
+        let enq = enqueue_request(&backend, items.clone(), fresh).await;
+        let refusal = enq.refusal();
+        let RequestEnqueue {
+            batch,
+            results,
+            watcher,
+            error,
+            ..
+        } = enq;
+        let row = |p: DownloadProgress| {
+            let mut p = p.with_batch(batch.owner.batch_id.clone(), batch.label.clone());
+            if let Some(request) = &request {
+                p.backend = request.backend.clone();
             }
+            p
         };
 
         let successful = match &request {
-            Some(request) => super::requests::record_queued(request, &items, &queued, &tx).await,
+            Some(request) => super::requests::record_queued(request, &items, &results, &tx).await,
             None => {
-                let (failed, successful): (Vec<_>, Vec<_>) =
-                    queued.iter().cloned().partition(|d| d.error.is_some());
-
-                if !failed.is_empty() {
-                    let failed_entries: Vec<DownloadProgress> = failed
-                        .iter()
-                        .map(|d| {
-                            DownloadProgress::failed(
-                                d.id.clone(),
-                                d.source.clone(),
-                                d.item.clone(),
-                                d.error.clone().unwrap_or_default(),
-                            )
-                            .with_batch(batch_id.clone(), batch_label.clone())
-                        })
-                        .collect();
+                let failed_entries: Vec<DownloadProgress> = results
+                    .iter()
+                    .filter_map(|d| {
+                        let reason = failed_reason(&d.status)?;
+                        Some(row(DownloadProgress::failed(
+                            d.id.clone(),
+                            d.source.clone(),
+                            d.item.clone(),
+                            reason.to_string(),
+                        )))
+                    })
+                    .collect();
+                if !failed_entries.is_empty() {
                     let _ = tx.send(DownloadEvent::Progress(failed_entries));
                 }
-
-                let queued_entries: Vec<DownloadProgress> = successful
+                let queued_entries: Vec<DownloadProgress> = results
                     .iter()
+                    .filter(|d| d.status == EnqueueStatus::Enqueued)
                     .map(|d| {
-                        DownloadProgress::queued(
+                        row(DownloadProgress::queued(
                             d.id.clone(),
                             d.source.clone(),
                             d.item.clone(),
                             d.size,
-                        )
-                        .with_batch(batch_id.clone(), batch_label.clone())
+                        ))
                     })
                     .collect();
-                let _ = tx.send(DownloadEvent::Progress(queued_entries));
-                successful
+                if !queued_entries.is_empty() {
+                    let _ = tx.send(DownloadEvent::Progress(queued_entries));
+                }
+                results
+                    .iter()
+                    .filter(|d| d.status == EnqueueStatus::Enqueued)
+                    .cloned()
+                    .collect()
             }
         };
+
+        if let Some(e) = error {
+            let _ = tx.send(DownloadEvent::AutoDownload(AutoDownloadEvent::Failed {
+                batch_id: batch_id.clone(),
+                error: format!("Download queue failed: {}", e),
+            }));
+        } else if let Some(reason) = refusal {
+            let _ = tx.send(DownloadEvent::AutoDownload(AutoDownloadEvent::Failed {
+                batch_id: batch_id.clone(),
+                error: reason.to_string(),
+            }));
+        }
 
         if successful.is_empty() {
             let _ = LibraryRequestRow::enqueue(
@@ -431,7 +473,13 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
                 batch_id: batch_id.clone(),
                 error: "All downloads failed to queue — request saved for later retry".to_string(),
             }));
-            return;
+        } else {
+            // Send Downloading event
+            let _ = tx.send(DownloadEvent::AutoDownload(
+                AutoDownloadEvent::Downloading {
+                    batch_id: batch_id.clone(),
+                },
+            ));
         }
 
         let _ = LibraryRequestRow::delete_matching(
@@ -450,8 +498,26 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             },
         ));
 
-        let download_sources: Vec<String> = successful.iter().map(|d| d.source.clone()).collect();
-        let download_filenames: Vec<String> = successful.iter().map(|d| d.item.clone()).collect();
+        match watcher {
+            Watcher::Joined(reservation) => {
+                info!(
+                    "Auto-download: added {} tracks of '{}' to running batch {}",
+                    successful.len(),
+                    query_desc,
+                    batch.owner.batch_id
+                );
+                let lost = deliver(reservation, &successful, &backend, &batch).await;
+                if !lost.is_empty() {
+                    let _ = tx.send(DownloadEvent::Progress(stopped_rows(&lost, &batch)));
+                }
+                return;
+            }
+            Watcher::Own if successful.is_empty() && batch.inbox.close_if_idle() => return,
+            Watcher::Own => {}
+        }
+
+        let transfers: Vec<WatchedTransfer> =
+            successful.iter().map(WatchedTransfer::from).collect();
 
         // Pool slots must line up with the monitor's slots, which follow
         // `successful`, not `picked.items`.
@@ -460,7 +526,7 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
 
         info!(
             "Auto-download: queued {} tracks, starting monitor for '{}'",
-            download_filenames.len(),
+            transfers.len(),
             query_desc
         );
 
@@ -474,16 +540,14 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
 
         let album_mode = crate::models::app_config::AppConfig::is_album_mode().await;
         let mut monitor = DownloadMonitor::new(
-            download_sources,
-            download_filenames,
-            target_path_buf,
+            transfers,
+            batch.target.clone(),
             tx,
             task_cancellation,
             task_username.clone(),
-            task_user_id,
-            Some(batch_id),
-            Some(batch_label),
+            batch,
             album_mode,
+            crate::models::app_config::AppConfig::download_path().await,
         )
         .with_failover(pool);
         monitor.run().await;

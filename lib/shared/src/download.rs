@@ -213,6 +213,8 @@ pub enum DownloadState {
     Queued,
     InProgress,
     Completed,
+    /// Waiting for the library importer; payload is the jobs ahead, including the running one (always >= 1)
+    ImportQueued(u32),
     Importing,
     Imported,
     ImportSkipped,
@@ -268,6 +270,19 @@ pub struct DownloadProgress {
     /// Human-readable batch label (album name)
     #[serde(default)]
     pub batch_label: Option<String>,
+    /// Where the downloaded file sits on disk once known
+    #[serde(default)]
+    pub local_path: Option<String>,
+    /// Tail of the importer's output for this row
+    #[serde(default)]
+    pub import_output: Option<String>,
+    /// The server keeps this row's import job, so Retry import can resubmit it
+    #[serde(default)]
+    pub retryable: bool,
+    /// The kept job has the matches of a skipped automatic import, so the
+    /// user can pick one or import it as-is
+    #[serde(default)]
+    pub can_choose_import: bool,
 }
 
 impl DownloadProgress {
@@ -285,6 +300,10 @@ impl DownloadProgress {
             backend: None,
             batch_id: None,
             batch_label: None,
+            local_path: None,
+            import_output: None,
+            retryable: false,
+            can_choose_import: false,
         }
     }
 
@@ -302,6 +321,10 @@ impl DownloadProgress {
             backend: None,
             batch_id: None,
             batch_label: None,
+            local_path: None,
+            import_output: None,
+            retryable: false,
+            can_choose_import: false,
         }
     }
 
@@ -320,42 +343,139 @@ impl DownloadProgress {
         self.batch_label = Some(batch_label);
         self
     }
+
+    pub fn with_import_details(
+        mut self,
+        local_path: Option<String>,
+        import_output: Option<String>,
+    ) -> Self {
+        self.local_path = local_path;
+        self.import_output = import_output;
+        self
+    }
+}
+
+/// How a skipped import is run again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImportChoice {
+    /// Let beets decide, as the first import did.
+    Auto,
+    /// Import with the files' own tags.
+    AsIs,
+    /// One of the candidates beets found for this import.
+    Candidate { data_source: String, id: String },
+    /// A MusicBrainz link or ID as the user typed it.
+    MusicBrainz(String),
+}
+
+/// What the server still keeps for a row after it refused a retry or a
+/// matches request. A refusal carries it as its details, so the row offers
+/// only what the server can still do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeptImport {
+    /// Nothing: the kept import is gone.
+    Gone,
+    /// The import, with no matches to pick from.
+    WithoutMatches,
+    /// The import and its matches. Only the choice sent was refused.
+    WithMatches,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatchKind {
+    Track,
+    Album,
+}
+
+/// A match beets weighed for a skipped import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchCandidate {
+    pub data_source: String,
+    pub id: String,
+    pub artist: String,
+    /// The track title, or the album name for an album match.
+    pub title: String,
+    /// The album a track match belongs to.
+    pub album: Option<String>,
+    pub year: Option<u32>,
+    pub country: Option<String>,
+    pub disambig: Option<String>,
+    /// How close the match is, 1000 being exact.
+    pub per_mille: u16,
+    /// What differs, by beets' penalty names, the weightiest first.
+    pub differs: Vec<String>,
+    pub length_secs: Option<u32>,
+    /// How the files fit an album match's tracks.
+    pub tracks: Option<TrackFit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackFit {
+    pub matched: u32,
+    pub total: u32,
+    /// Files no track matched, which an import of this match leaves behind.
+    pub extra_files: u32,
+}
+
+/// The matches an import skipped for, best first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchChoices {
+    pub kind: MatchKind,
+    pub candidates: Vec<MatchCandidate>,
+}
+
+const MAX_LABEL_BYTES: usize = 200;
+
+/// Folder name for a download batch: `<label> [<first 8 alphanumerics of batch_id>]`,
+/// safe on Windows and Unix file systems.
+pub fn batch_folder(label: &str, batch_id: &str) -> String {
+    let mut label: String = label
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if label.len() > MAX_LABEL_BYTES {
+        let mut end = MAX_LABEL_BYTES;
+        while !label.is_char_boundary(end) {
+            end -= 1;
+        }
+        label.truncate(end);
+    }
+    let label = label.trim_end_matches(['.', ' ']);
+    let label = if label.is_empty() { "Download" } else { label };
+    let short: String = batch_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect();
+    format!("{label} [{short}]")
+}
+
+/// What the backend did with one file of an enqueue request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnqueueStatus {
+    Enqueued,
+    /// The backend already has an unfinished transfer of this file from this
+    /// peer and did not start another one.
+    AlreadyInFlight,
+    Failed(String),
 }
 
 /// Response from queueing downloads
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedDownload {
+    /// The backend's transfer id when `Enqueued`, else the remote filename.
     pub id: String,
     pub source: String,
     pub item: String,
     pub size: u64,
-    pub error: Option<String>,
-}
-
-impl QueuedDownload {
-    pub fn success(id: String, source: String, item: String, size: u64) -> Self {
-        Self {
-            id,
-            source,
-            item,
-            size,
-            error: None,
-        }
-    }
-
-    pub fn failed(id: String, source: String, item: String, error: String) -> Self {
-        Self {
-            id,
-            source,
-            item,
-            size: 0,
-            error: Some(error),
-        }
-    }
-
-    pub fn is_success(&self) -> bool {
-        self.error.is_none()
-    }
+    pub status: EnqueueStatus,
 }
 
 /// Wrapper for all download-related WebSocket events
@@ -468,5 +588,40 @@ mod tests {
     fn track_queries_fall_back_to_the_recording_identity() {
         let context = DownloadQuery::from(track(None)).request_context();
         assert_eq!(context.key, "track:recording");
+    }
+
+    #[test]
+    fn rows_from_older_servers_deserialize() {
+        let v = serde_json::json!({"id":"1","source":"p","item":"a.flac","size":1,"transferred":0,
+            "state":"Queued","percent":0.0,"error":null});
+        let row: DownloadProgress = serde_json::from_value(v).unwrap();
+        assert_eq!(row.local_path, None);
+        assert_eq!(row.import_output, None);
+    }
+
+    #[test]
+    fn import_queued_round_trips_and_sorts_between_completed_and_importing() {
+        let s = DownloadState::ImportQueued(2);
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::json!({"ImportQueued":2})
+        );
+        assert!(DownloadState::Completed < DownloadState::ImportQueued(1));
+        assert!(DownloadState::ImportQueued(1) < DownloadState::ImportQueued(3));
+        assert!(DownloadState::ImportQueued(9) < DownloadState::Importing);
+    }
+
+    #[test]
+    fn batch_folder_sanitizes_hostile_labels() {
+        let id = "1f2e3d4c-aaaa-bbbb-cccc-ddddeeeeffff";
+        assert_eq!(batch_folder("Blue Train", id), "Blue Train [1f2e3d4c]");
+        assert_eq!(batch_folder("AC/DC: Live?", id), "AC_DC_ Live_ [1f2e3d4c]");
+        assert_eq!(batch_folder("  dots... ", id), "dots [1f2e3d4c]");
+        assert_eq!(batch_folder("tab\there\u{7}", id), "tab_here_ [1f2e3d4c]");
+        assert_eq!(batch_folder("", id), "Download [1f2e3d4c]");
+        let long = batch_folder(&"é".repeat(300), id);
+        assert!(long.len() <= 200 + " [1f2e3d4c]".len());
+        assert!(long.ends_with(" [1f2e3d4c]"));
+        assert!(!long.contains('/'));
     }
 }

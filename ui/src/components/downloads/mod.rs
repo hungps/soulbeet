@@ -1,16 +1,20 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 
 use dioxus::logger::tracing::warn;
 use dioxus::prelude::*;
 use shared::download::{
-    DownloadProgress, DownloadRequestSummary, DownloadState, PendingRequestSummary,
+    DownloadProgress, DownloadRequestSummary, DownloadState, ImportChoice, KeptImport,
+    MatchChoices, PendingRequestSummary,
 };
 
 mod item;
+mod picker;
 use api::{CancelDownloadRequest, RequestAction};
 use item::DownloadItem;
 
-use crate::use_auth;
+use crate::{friendly_error, use_auth};
 
 #[derive(Props, Clone, PartialEq)]
 pub struct DownloadsProps {
@@ -257,8 +261,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
         }
     });
 
-    let active_downloads: Vec<DownloadProgress> =
-        props.downloads.read().values().cloned().collect();
+    let active_downloads = sorted_rows(&props.downloads.read());
     let groups = group_tracks(&props.downloads.read());
 
     let processing_count = active_downloads
@@ -268,6 +271,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                 f.state,
                 DownloadState::Queued
                     | DownloadState::InProgress
+                    | DownloadState::ImportQueued(_)
                     | DownloadState::Importing
                     | DownloadState::Completed
             )
@@ -310,11 +314,21 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                 })
                 .filter_map(|group| group.id.clone())
                 .collect();
+            let mut cleared = Vec::new();
             let mut map = props.downloads.write();
-            map.retain(|_, file| match &file.batch_id {
-                Some(batch_id) => !fully_tagged.contains(batch_id),
-                None => true,
+            map.retain(|item, file| match &file.batch_id {
+                Some(batch_id) if fully_tagged.contains(batch_id) => {
+                    cleared.push(item.clone());
+                    false
+                }
+                _ => true,
             });
+            drop(map);
+            if !cleared.is_empty() {
+                if let Err(e) = api::forget_import_retries(cleared).await {
+                    warn!("Could not drop import retries for cleared rows: {e}");
+                }
+            }
             clearing.set(false);
         });
     };
@@ -352,6 +366,34 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
             }
         });
     };
+
+    let mut fail =
+        move |item: &str, error: &ServerFnError, from_picker: bool| match downloads_signal
+            .write()
+            .get_mut(item)
+        {
+            Some(entry) => show_failure(entry, error, from_picker),
+            None => Failure::OnRow,
+        };
+    let import_again = use_callback(
+        move |(item, choice): (String, ImportChoice)| -> Pin<Box<dyn Future<Output = Result<(), Failure>>>> {
+            Box::pin(async move {
+                let from_picker = sent_by_picker(&choice);
+                api::retry_import(item.clone(), choice)
+                    .await
+                    .map_err(|e| fail(&item, &e, from_picker))
+            })
+        },
+    );
+    let load_choices = use_callback(
+        move |item: String| -> Pin<Box<dyn Future<Output = Result<MatchChoices, Failure>>>> {
+            Box::pin(async move {
+                api::import_choices(item.clone())
+                    .await
+                    .map_err(|e| fail(&item, &e, true))
+            })
+        },
+    );
 
     let close_modal = move |_| props.is_open.set(false);
 
@@ -684,7 +726,12 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                     if is_expanded {
                       div { class: "px-3 pb-3 space-y-2",
                         for file in group.tracks.iter() {
-                          DownloadItem { file: file.clone(), on_cancel: cancel_download }
+                          DownloadItem {
+                            file: file.clone(),
+                            on_cancel: cancel_download,
+                            on_import: import_again,
+                            on_load_choices: load_choices,
+                          }
                         }
                       }
                     }
@@ -715,6 +762,68 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
     }
 }
 
+/// Where a failed request from a row shows why.
+#[derive(Debug, Clone, PartialEq)]
+enum Failure {
+    /// On the row's reason line.
+    OnRow,
+    /// In the picker that sent it, which stays.
+    InPicker(String),
+}
+
+/// Picks and match loads come from the picker; Retry and as-is from the row.
+fn sent_by_picker(choice: &ImportChoice) -> bool {
+    matches!(
+        choice,
+        ImportChoice::Candidate { .. } | ImportChoice::MusicBrainz(_)
+    )
+}
+
+/// What a refusal says the server still keeps for the row. None when the
+/// request was not refused, or the refusal does not say.
+fn kept_after(error: &ServerFnError) -> Option<KeptImport> {
+    match error {
+        ServerFnError::ServerError {
+            code: api::REFUSAL_CODE,
+            details: Some(details),
+            ..
+        } => serde_json::from_value(details.clone()).ok(),
+        _ => None,
+    }
+}
+
+/// Takes away what the server says it no longer keeps for the row, and
+/// puts why on the reason line, unless the picker sent the request and
+/// stays, which then shows it so the skip reason stays readable.
+fn show_failure(row: &mut DownloadProgress, error: &ServerFnError, from_picker: bool) -> Failure {
+    match kept_after(error) {
+        Some(KeptImport::Gone) => {
+            row.retryable = false;
+            row.can_choose_import = false;
+        }
+        Some(KeptImport::WithoutMatches) => row.can_choose_import = false,
+        Some(KeptImport::WithMatches) | None => {}
+    }
+    let message = friendly_error(error);
+    if from_picker && row.retryable && row.can_choose_import {
+        return Failure::InPicker(message);
+    }
+    row.error = Some(message);
+    Failure::OnRow
+}
+
+/// Rows by state, then by item so rows with the same state keep their place.
+fn sorted_rows(downloads: &HashMap<String, DownloadProgress>) -> Vec<DownloadProgress> {
+    let mut rows: Vec<DownloadProgress> = downloads.values().cloned().collect();
+    rows.sort_by(|a, b| {
+        a.state
+            .partial_cmp(&b.state)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.item.cmp(&b.item))
+    });
+    rows
+}
+
 fn seed_request_tracks(
     request: &DownloadRequestSummary,
     map: &mut HashMap<String, DownloadProgress>,
@@ -738,7 +847,140 @@ fn seed_request_tracks(
                 backend: Some("soulseek".to_string()),
                 batch_id: Some(request.id.clone()),
                 batch_label: Some(request.label.clone()),
+                local_path: None,
+                import_output: None,
+                retryable: false,
+                can_choose_import: false,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dioxus::fullstack::RequestError;
+
+    fn row(item: &str, state: DownloadState) -> (String, DownloadProgress) {
+        let p =
+            DownloadProgress::queued(item.into(), "peer".into(), item.into(), 1).with_state(state);
+        (item.to_string(), p)
+    }
+
+    #[test]
+    fn equal_states_sort_by_item() {
+        let map: HashMap<String, DownloadProgress> = [
+            row("c", DownloadState::Imported),
+            row("a", DownloadState::Imported),
+            row("z", DownloadState::InProgress),
+            row("b", DownloadState::Imported),
+            row("d", DownloadState::ImportQueued(1)),
+        ]
+        .into_iter()
+        .collect();
+        let items: Vec<String> = sorted_rows(&map).into_iter().map(|r| r.item).collect();
+        assert_eq!(items, ["z", "d", "a", "b", "c"]);
+    }
+
+    fn kept_skip() -> DownloadProgress {
+        DownloadProgress {
+            error: Some("No close match (2 candidates)".into()),
+            retryable: true,
+            can_choose_import: true,
+            ..row("a", DownloadState::ImportSkipped).1
+        }
+    }
+
+    /// A refusal as the client gets it: built by the server's helper and
+    /// sent through JSON.
+    fn refused(message: &str, kept: KeptImport) -> ServerFnError {
+        let sent = serde_json::to_value(api::refusal_error_with(message, kept)).unwrap();
+        serde_json::from_value(sent).unwrap()
+    }
+
+    fn every_choice() -> [ImportChoice; 4] {
+        [
+            ImportChoice::Auto,
+            ImportChoice::AsIs,
+            ImportChoice::Candidate {
+                data_source: "MusicBrainz".into(),
+                id: "r1".into(),
+            },
+            ImportChoice::MusicBrainz("https://musicbrainz.org/release/x".into()),
+        ]
+    }
+
+    fn after(choice: &ImportChoice, error: &ServerFnError) -> (DownloadProgress, Failure) {
+        let mut row = kept_skip();
+        let failure = show_failure(&mut row, error, sent_by_picker(choice));
+        (row, failure)
+    }
+
+    #[test]
+    fn the_server_says_what_a_refusal_keeps() {
+        let kept = KeptImport::WithoutMatches;
+        assert_eq!(kept_after(&refused("x", kept)), Some(kept));
+        let plain = api::refusal_error("Folder not found");
+        assert_eq!(kept_after(&plain), None);
+    }
+
+    #[test]
+    fn a_refusal_that_dropped_the_job_takes_every_action_away() {
+        for message in ["Nothing to retry", "The kept files are gone"] {
+            for choice in every_choice() {
+                let (row, failure) = after(&choice, &refused(message, KeptImport::Gone));
+                assert_eq!(failure, Failure::OnRow, "{choice:?}");
+                assert_eq!(row.error.as_deref(), Some(message));
+                assert!(!row.retryable && !row.can_choose_import, "{choice:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_refusal_without_matches_keeps_only_retry() {
+        let message = "This import has no matches to pick from";
+        for choice in every_choice() {
+            let (row, failure) = after(&choice, &refused(message, KeptImport::WithoutMatches));
+            assert_eq!(failure, Failure::OnRow, "{choice:?}");
+            assert_eq!(row.error.as_deref(), Some(message));
+            assert!(row.retryable && !row.can_choose_import, "{choice:?}");
+        }
+        // A match load refused the same way takes the picker too.
+        let mut row = kept_skip();
+        show_failure(
+            &mut row,
+            &refused(message, KeptImport::WithoutMatches),
+            true,
+        );
+        assert!(row.retryable && !row.can_choose_import);
+    }
+
+    #[test]
+    fn a_refused_pick_keeps_every_action_and_shows_why_in_the_picker() {
+        let text = "Track imports need a MusicBrainz recording, not a release";
+        for choice in every_choice().into_iter().filter(sent_by_picker) {
+            let (row, failure) = after(&choice, &refused(text, KeptImport::WithMatches));
+            assert_eq!(failure, Failure::InPicker(text.into()), "{choice:?}");
+            assert_eq!(row.error.as_deref(), Some("No close match (2 candidates)"));
+            assert!(row.retryable && row.can_choose_import);
+        }
+    }
+
+    #[test]
+    fn an_unreachable_server_changes_no_action() {
+        let error = ServerFnError::Request(RequestError::Request("connection refused".into()));
+        let text = "Could not reach the server. Check your connection.";
+        let (row, failure) = after(&ImportChoice::Auto, &error);
+        assert_eq!(failure, Failure::OnRow);
+        assert_eq!(row.error.as_deref(), Some(text));
+        assert!(row.retryable && row.can_choose_import);
+
+        // A failed pick or match load keeps the skip reason.
+        let mut row = kept_skip();
+        assert_eq!(
+            show_failure(&mut row, &error, true),
+            Failure::InPicker(text.into())
+        );
+        assert_eq!(row, kept_skip());
     }
 }

@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use shared::library::{LibraryScanInterval, LibraryScanSettings};
 
 use crate::auth::use_auth;
-use crate::friendly_error;
+use crate::{friendly_error, FieldLook, TextInput};
 
 #[component]
 pub fn FolderManager() -> Element {
@@ -202,24 +202,20 @@ pub fn FolderManager() -> Element {
                     label { class: "block text-xs font-mono text-gray-400 mb-1 uppercase tracking-wider",
                         "Folder Name (e.g., 'Music/Common')"
                     }
-                    input {
-                        class: "w-full p-2 rounded bg-beet-dark border border-white/10 focus:border-beet-accent focus:outline-none text-white font-mono",
-                        value: "{folder_name}",
-                        oninput: move |e| folder_name.set(e.value()),
+                    TextInput {
+                        value: folder_name(),
+                        oninput: move |v| folder_name.set(v),
                         placeholder: "My Music",
-                        "type": "text",
                     }
                 }
                 div {
                     label { class: "block text-xs font-mono text-gray-400 mb-1 uppercase tracking-wider",
                         "Folder Path"
                     }
-                    input {
-                        class: "w-full p-2 rounded bg-beet-dark border border-white/10 focus:border-beet-accent focus:outline-none text-white font-mono",
-                        value: "{folder_path}",
-                        oninput: move |e| folder_path.set(e.value()),
+                    TextInput {
+                        value: folder_path(),
+                        oninput: move |v| folder_path.set(v),
                         placeholder: "/home/user/Music",
-                        "type": "text",
                     }
                 }
             }
@@ -247,16 +243,16 @@ pub fn FolderManager() -> Element {
                                     li { class: "bg-white/5 border border-white/5 p-3 rounded hover:border-beet-accent/30 transition-colors",
                                         if editing_folder_id() == Some(folder.id.clone()) {
                                             div { class: "flex flex-col gap-2",
-                                                input {
-                                                    class: "p-2 rounded bg-beet-dark border border-white/10 focus:border-beet-accent text-white font-mono text-sm",
-                                                    value: "{edit_folder_name}",
-                                                    oninput: move |e| edit_folder_name.set(e.value()),
+                                                TextInput {
+                                                    look: FieldLook::Compact,
+                                                    value: edit_folder_name(),
+                                                    oninput: move |v| edit_folder_name.set(v),
                                                     placeholder: "Name",
                                                 }
-                                                input {
-                                                    class: "p-2 rounded bg-beet-dark border border-white/10 focus:border-beet-accent text-white font-mono text-sm",
-                                                    value: "{edit_folder_path}",
-                                                    oninput: move |e| edit_folder_path.set(e.value()),
+                                                TextInput {
+                                                    look: FieldLook::Compact,
+                                                    value: edit_folder_path(),
+                                                    oninput: move |v| edit_folder_path.set(v),
                                                     placeholder: "Path",
                                                 }
                                                 div { class: "flex gap-2 mt-2",

@@ -163,6 +163,7 @@ pub fn Search(
     let mut album_cache = use_signal::<HashMap<String, AlbumWithTracks>>(HashMap::new);
     let mut download_options = use_signal::<Option<Vec<DownloadableGroup>>>(|| None);
     let mut is_downloading = use_signal(|| false);
+    let mut download_error = use_signal(String::new);
     let search_reset = try_use_context::<SearchReset>();
     let search_prefill = try_use_context::<SearchPrefill>();
     let search_url = try_use_context::<SearchUrlSync>();
@@ -697,6 +698,7 @@ pub fn Search(
 
         sync_url(query.album.as_ref().map(|album| album.id.clone()));
         loading.set(true);
+        download_error.set(String::new());
         download_options.set(Some(vec![]));
 
         let search_id = match auth.call(api::start_download_search(query)).await {
@@ -757,6 +759,7 @@ pub fn Search(
         String,
         DownloadRequestContext,
     )| async move {
+        download_error.set(String::new());
         match auth
             .call(api::download(api::DownloadRequest {
                 items,
@@ -767,7 +770,10 @@ pub fn Search(
             .await
         {
             Ok(_res) => info!("Downloads started"),
-            Err(e) => warn!("Failed to start downloads: {:?}", e),
+            Err(e) => {
+                warn!("Failed to start downloads: {:?}", e);
+                download_error.set(crate::friendly_error(&e));
+            }
         }
         is_downloading.set(false);
     };
@@ -776,6 +782,7 @@ pub fn Search(
         sync_url(None);
         source_item.set(None);
         loading.set(true);
+        download_error.set(String::new());
         download_options.set(None);
 
         let provider = Some(selected_provider());
@@ -1222,6 +1229,10 @@ pub fn Search(
             media_server: auth.media_server(),
         }
 
+        if !download_error().is_empty() {
+          p { class: "text-sm font-mono text-red-400 mt-4", "{download_error}" }
+        }
+
         // Results
         if let Some(results) = download_options.read().clone() {
           DownloadResults {
@@ -1265,6 +1276,7 @@ pub fn Search(
                 sync_url(None);
                 source_item.set(None);
                 download_options.set(None);
+                download_error.set(String::new());
                 loading.set(false);
             },
           }

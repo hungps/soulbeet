@@ -1,4 +1,5 @@
 mod app_config;
+mod connection_status_row;
 mod folder_manager;
 mod media_server;
 mod user_manager;

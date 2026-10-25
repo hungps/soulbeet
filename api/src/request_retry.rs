@@ -186,7 +186,8 @@ async fn retry_one(row: &LibraryRequestRow) -> Result<(), String> {
     }
 
     let backend = download_backend(None).await?;
-    let queued = match backend.download(picked.items.clone()).await {
+    let destination = shared::download::batch_folder(&request.label, &request.id);
+    let queued = match backend.download(picked.items.clone(), &destination).await {
         Ok(queued) => queued,
         Err(e) => {
             let _ = DownloadRequestRow::delete(&request.id).await;
@@ -205,13 +206,7 @@ async fn retry_one(row: &LibraryRequestRow) -> Result<(), String> {
         return Ok(());
     }
 
-    crate::server_fns::download::requests::start_monitor(
-        &user.username,
-        &user.id,
-        &request,
-        accepted,
-    )
-    .await;
+    crate::server_fns::download::requests::start_monitor(&user.username, &request, accepted).await;
     let _ = tx.send(DownloadEvent::AutoDownload(
         shared::download::AutoDownloadEvent::Downloading {
             batch_id: request.id.clone(),

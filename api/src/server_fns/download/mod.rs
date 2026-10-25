@@ -3,7 +3,12 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "server")]
 use shared::download::DownloadProgress;
-use shared::download::{DownloadEvent, DownloadRequestContext, DownloadableItem, QueuedDownload};
+#[cfg(feature = "server")]
+use shared::download::EnqueueStatus;
+use shared::download::{
+    DownloadEvent, DownloadRequestContext, DownloadableItem, ImportChoice, MatchChoices,
+    QueuedDownload,
+};
 
 #[cfg(feature = "server")]
 use dioxus::logger::tracing::{info, warn};
@@ -11,7 +16,10 @@ use dioxus::logger::tracing::{info, warn};
 use tokio::sync::broadcast;
 
 #[cfg(feature = "server")]
-use crate::{server_fns::server_error, AuthSession};
+use crate::{
+    server_fns::{refusal_error, refusal_error_with, server_error},
+    AuthSession,
+};
 
 #[cfg(feature = "server")]
 use crate::globals::{cleanup_stale_channels, get_or_create_user_channel, USER_CHANNELS};
@@ -26,9 +34,9 @@ pub mod requests;
 pub use requests::*;
 
 #[cfg(feature = "server")]
-pub mod failover;
+pub mod enqueue;
 #[cfg(feature = "server")]
-pub mod import;
+pub mod failover;
 #[cfg(feature = "server")]
 pub mod monitor;
 #[cfg(feature = "server")]
@@ -42,15 +50,39 @@ pub mod utils;
 pub(crate) mod test_support;
 
 #[cfg(feature = "server")]
-async fn do_download(
-    items: Vec<DownloadableItem>,
-    backend_id: Option<&str>,
-) -> Result<Vec<QueuedDownload>, ServerFnError> {
-    let backend = download_backend(backend_id)
-        .await
-        .map_err(|e| server_error(format!("download backend not available: {}", e)))?;
+use self::enqueue::{deliver, enqueue_request, stopped_rows, RequestEnqueue, Watcher};
+#[cfg(feature = "server")]
+use crate::transfer_registry::{BatchRef, TransferOwner};
+#[cfg(feature = "server")]
+use soulbeet::{error::SoulseekError, DownloadBackend};
+#[cfg(feature = "server")]
+use std::sync::Arc;
 
-    backend.download(items).await.map_err(server_error)
+/// Name for a manual download's batch: the album its items share, or the
+/// first item's title when they span albums.
+#[cfg(feature = "server")]
+fn manual_batch_label(items: &[DownloadableItem]) -> String {
+    match items.split_first() {
+        Some((first, rest))
+            if !first.album.trim().is_empty() && rest.iter().all(|i| i.album == first.album) =>
+        {
+            first.album.clone()
+        }
+        Some((first, _)) => first.title.clone(),
+        None => String::new(),
+    }
+}
+
+/// Name for an auto download's batch: the picked group's title, which a
+/// track search leaves empty since no album was searched for, else the same
+/// name a manual download of its items gets.
+#[cfg(feature = "server")]
+fn auto_batch_label(group: &shared::download::DownloadableGroup) -> String {
+    if group.title.trim().is_empty() {
+        manual_batch_label(&group.items)
+    } else {
+        group.title.clone()
+    }
 }
 
 /// WebSocket endpoint for real-time download updates.
@@ -172,6 +204,10 @@ pub async fn cancel_download(req: CancelDownloadRequest) -> Result<(), ServerFnE
         backend: req.backend,
         batch_id: None,
         batch_label: None,
+        local_path: None,
+        import_output: None,
+        retryable: false,
+        can_choose_import: false,
     };
 
     if let Ok(Some(track)) =
@@ -217,9 +253,18 @@ pub struct DownloadRequest {
 #[post("/api/downloads/queue", auth: AuthSession)]
 pub async fn download(req: DownloadRequest) -> Result<Vec<QueuedDownload>, ServerFnError> {
     let username = auth.0.username;
-    let user_id = auth.0.sub;
+    let user_id = auth.0.sub.clone();
 
-    let target_path_buf = std::path::Path::new(&req.target_folder).to_path_buf();
+    if let Some(issue) = crate::importer_health::broken_issue().await {
+        return Err(refusal_error(issue.title));
+    }
+    let folder =
+        crate::models::folder::Folder::find_for_user_by_path(&auth.0.sub, &req.target_folder)
+            .await
+            .map_err(server_error)?
+            .ok_or_else(|| refusal_error("Folder not found"))?;
+
+    let target_path_buf = std::path::Path::new(&folder.path).to_path_buf();
     if let Err(e) = tokio::fs::create_dir_all(&target_path_buf).await {
         return Err(server_error(format!(
             "Failed to create target directory: {}",
@@ -260,31 +305,246 @@ pub async fn download(req: DownloadRequest) -> Result<Vec<QueuedDownload>, Serve
         return Ok(Vec::new());
     }
 
-    let res = match do_download(new_items.clone(), req.backend.as_deref()).await {
-        Ok(res) => res,
-        Err(e) => {
-            for item in &new_items {
-                let _ = crate::models::download_request::DownloadRequestTrackRow::mark_failed(
-                    &request.id,
-                    &item.id,
-                    &e.to_string(),
-                )
-                .await;
-            }
-            return Err(e);
-        }
-    };
+    let backend = download_backend(req.backend.as_deref())
+        .await
+        .map_err(|e| server_error(format!("download backend not available: {}", e)))?;
+    let fresh = BatchRef::new(
+        TransferOwner {
+            user_id: user_id.clone(),
+            batch_id: request.id.clone(),
+        },
+        request.label.clone(),
+        target_path_buf,
+    );
+    let queued = queue_detached(backend, new_items, fresh, username, Some(request))
+        .await
+        .map_err(server_error)?;
+    match queued {
+        Queued { error: Some(e), .. } => Err(server_error(e)),
+        Queued {
+            refusal: Some(reason),
+            ..
+        } => Err(refusal_error(reason)),
+        Queued { results, .. } => Ok(results),
+    }
+}
+
+/// What a manual request's enqueue came to.
+#[cfg(feature = "server")]
+#[derive(Debug)]
+struct Queued {
+    results: Vec<QueuedDownload>,
+    error: Option<SoulseekError>,
+    /// Nothing was enqueued, for this reason.
+    refusal: Option<&'static str>,
+}
+
+/// Runs `queue_and_watch` as its own task. Registry keys are claimed from
+/// its start, and the client may disconnect at any await and drop the
+/// handler: dropping the task's handle does not stop it, so the request
+/// always gets as far as a monitor or a release.
+#[cfg(feature = "server")]
+async fn queue_detached(
+    backend: Arc<dyn DownloadBackend>,
+    items: Vec<DownloadableItem>,
+    fresh: BatchRef,
+    username: String,
+    request: Option<crate::models::download_request::DownloadRequestRow>,
+) -> Result<Queued, tokio::task::JoinError> {
+    tokio::spawn(queue_and_watch(backend, items, fresh, username, request)).await
+}
+
+/// Claims and enqueues a manual request's files, shows their rows, and hands
+/// the enqueued ones to a monitor: the running batch's when the request
+/// joined one, else a new one.
+#[cfg(feature = "server")]
+async fn queue_and_watch(
+    backend: Arc<dyn DownloadBackend>,
+    items: Vec<DownloadableItem>,
+    fresh: BatchRef,
+    username: String,
+    request: Option<crate::models::download_request::DownloadRequestRow>,
+) -> Queued {
+    let enq = enqueue_request(&backend, items.clone(), fresh).await;
+    let refusal = enq.refusal();
+    let RequestEnqueue {
+        batch,
+        results,
+        watcher,
+        error,
+        ..
+    } = enq;
 
     let (tx, _) = get_or_create_user_channel(&username).await;
-    let accepted = requests::record_queued(&request, &new_items, &res, &tx).await;
-    requests::start_monitor(&username, &user_id, &request, accepted).await;
+    let accepted = match &request {
+        Some(request) => requests::record_queued(request, &items, &results, &tx).await,
+        None => results
+            .iter()
+            .filter(|d| d.status == EnqueueStatus::Enqueued)
+            .cloned()
+            .collect(),
+    };
 
-    info!(
-        "Started {} downloads for request {} ({})",
-        new_items.len(),
-        request.id,
-        request.label
-    );
+    match watcher {
+        Watcher::Joined(reservation) => {
+            info!(
+                "Added {} downloads to running batch {}",
+                accepted.len(),
+                batch.owner.batch_id
+            );
+            let lost = deliver(reservation, &accepted, &backend, &batch).await;
+            if !lost.is_empty() {
+                let _ = tx.send(DownloadEvent::Progress(stopped_rows(&lost, &batch)));
+            }
+        }
+        Watcher::Own if accepted.is_empty() && batch.inbox.close_if_idle() => {}
+        // Starts empty when nothing was enqueued but another request joined
+        // the batch while this one was enqueueing.
+        Watcher::Own => match &request {
+            Some(request) => {
+                info!(
+                    "Started {} downloads for request {} ({})",
+                    accepted.len(),
+                    request.id,
+                    request.label
+                );
+                requests::start_monitor_on_batch(&username, request, accepted, batch, tx).await;
+            }
+            None => {
+                info!(
+                    "Started monitoring downloads: {:?}",
+                    accepted.iter().map(|d| &d.item).collect::<Vec<_>>()
+                );
+                requests::spawn_monitor(&username, accepted, batch, tx).await;
+            }
+        },
+    }
 
-    Ok(res)
+    Queued {
+        results,
+        error,
+        refusal,
+    }
+}
+
+/// Imports a failed or skipped row again, from the job kept for it, the way
+/// `choice` says.
+#[post("/api/downloads/retry-import", auth: AuthSession)]
+pub async fn retry_import(item: String, choice: ImportChoice) -> Result<(), ServerFnError> {
+    crate::import_queue::retry_import_for(&auth.0.username, &item, choice)
+        .await
+        .map_err(kept_import_refusal)
+}
+
+/// The matches a skipped row can be imported with.
+#[post("/api/downloads/import-choices", auth: AuthSession)]
+pub async fn import_choices(item: String) -> Result<MatchChoices, ServerFnError> {
+    crate::import_queue::import_choices_for(&auth.0.username, &item).map_err(kept_import_refusal)
+}
+
+/// A refused retry or matches request, with what stays kept for the row.
+#[cfg(feature = "server")]
+fn kept_import_refusal(refusal: crate::import_queue::Refusal) -> ServerFnError {
+    refusal_error_with(refusal.message, refusal.kept)
+}
+
+/// Drops the stored imports of rows the user cleared.
+#[post("/api/downloads/forget-retries", auth: AuthSession)]
+pub async fn forget_import_retries(items: Vec<String>) -> Result<(), ServerFnError> {
+    crate::import_queue::forget_retries(&auth.0.username, &items);
+    Ok(())
+}
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    use super::*;
+    use test_support::item;
+
+    #[test]
+    fn auto_label_is_the_group_title_else_its_items_name() {
+        let mut group = shared::download::DownloadableGroup {
+            source: "p".to_string(),
+            group_id: "g".to_string(),
+            title: "Glass Atlas".to_string(),
+            artist: None,
+            item_count: 1,
+            total_size: 0,
+            items: vec![item("p", "Northern Line", "1.flac")],
+            quality: "flac".to_string(),
+            score: 1.0,
+        };
+        assert_eq!(auto_batch_label(&group), "Glass Atlas");
+
+        // A track search: no album was searched for, so neither the group
+        // nor its items name one.
+        group.title = String::new();
+        group.items[0].album = String::new();
+        assert_eq!(auto_batch_label(&group), "Northern Line");
+    }
+
+    #[test]
+    fn manual_label_is_the_shared_album_else_the_first_title() {
+        let same_album = vec![item("p", "One", "1.flac"), item("p", "Two", "2.flac")];
+        assert_eq!(manual_batch_label(&same_album), "Come Over");
+
+        let mut mixed = same_album.clone();
+        mixed[1].album = "Other".to_string();
+        assert_eq!(manual_batch_label(&mixed), "One");
+
+        let mut no_album = same_album;
+        for i in &mut no_album {
+            i.album = " ".to_string();
+        }
+        assert_eq!(manual_batch_label(&no_album), "One");
+    }
+
+    #[tokio::test]
+    async fn a_request_dropped_mid_enqueue_still_hands_its_transfers_over() {
+        use crate::transfer_registry::TransferRegistry;
+        use test_support::{batch, key, ScriptedOutcome, StubBackend};
+
+        let stub = StubBackend::new(vec![ScriptedOutcome::Enqueued]);
+        let (reached, release) = stub.hold_downloads();
+        let backend: Arc<dyn DownloadBackend> = stub.clone();
+        let running = batch("Come Over");
+        TransferRegistry::global().claim(&[key(&backend, "p", "1.flac")], &running);
+        let fresh = BatchRef::new(
+            TransferOwner {
+                user_id: running.owner.user_id.clone(),
+                batch_id: uuid::Uuid::new_v4().to_string(),
+            },
+            "Come Over".to_string(),
+            running.target.clone(),
+        );
+        let items = vec![item("p", "One", "1.flac"), item("p", "Two", "2.flac")];
+
+        // The handler is dropped while slskd is still answering the enqueue,
+        // as when the client disconnects.
+        let handler = tokio::spawn(queue_detached(
+            backend,
+            items,
+            fresh,
+            "detached-request".to_string(),
+            None,
+        ));
+        reached.notified().await;
+        handler.abort();
+        assert!(handler.await.unwrap_err().is_cancelled());
+        release.notify_one();
+
+        let delivered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let slots = running.inbox.take();
+                if !slots.is_empty() {
+                    break slots;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the enqueued transfer never reached the running batch");
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].filename, "2.flac");
+        assert_eq!(delivered[0].transfer_id, "t-2.flac");
+    }
 }

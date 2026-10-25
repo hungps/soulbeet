@@ -1,11 +1,12 @@
 // Talks to the app's HTTP API directly for test setup (user registration,
 // login cookies, folders), so specs only exercise the UI flows they are
-// actually about.
+// actually about. URLs are relative so each project's baseURL picks the
+// instance.
 
 import { randomUUID } from 'node:crypto';
 import type { APIRequestContext, BrowserContext, Page } from '@playwright/test';
 import { expect } from '@playwright/test';
-import { baseUrl, metadataServerName, musicDirForApp } from './env.js';
+import { metadataServerName, musicDirForApp } from './env.js';
 
 export interface TestUser {
   username: string;
@@ -20,7 +21,7 @@ export function uniqueUser(prefix = 'user'): TestUser {
 }
 
 export async function registerUser(request: APIRequestContext, user: TestUser): Promise<void> {
-  const response = await request.post(`${baseUrl}/api/auth/register`, {
+  const response = await request.post('/api/auth/register', {
     data: { username: user.username, password: user.password },
   });
   expect(response.ok(), `register ${user.username}: ${response.status()}`).toBeTruthy();
@@ -31,7 +32,7 @@ export async function registerUser(request: APIRequestContext, user: TestUser): 
  * context. The login UI itself is covered by auth.spec.ts.
  */
 export async function loginViaApi(context: BrowserContext, user: TestUser): Promise<void> {
-  const response = await context.request.post(`${baseUrl}/api/auth/login`, {
+  const response = await context.request.post('/api/auth/login', {
     data: { username: user.username, password: user.password },
   });
   expect(response.ok(), `login ${user.username}: ${response.status()}`).toBeTruthy();
@@ -43,7 +44,7 @@ export async function createFolder(
   name: string,
 ): Promise<{ name: string; path: string }> {
   const path = `${musicDirForApp}/${name}`;
-  const response = await context.request.post(`${baseUrl}/api/folders`, {
+  const response = await context.request.post('/api/folders', {
     data: { name, path },
   });
   expect(response.ok(), `create folder ${name}: ${response.status()}`).toBeTruthy();
@@ -82,8 +83,13 @@ export async function performSearch(
     .selectOption({ label: metadataServerName });
   await page.getByRole('button', { name: type, exact: true }).filter({ visible: true }).click();
   await page.getByPlaceholder('Search artist, album or track...').fill(query);
-  await page.getByRole('button', { name: 'SEARCH' }).filter({ visible: true }).click();
+  await page.getByRole('button', { name: 'SEARCH', exact: true }).filter({ visible: true }).click();
   await expect(page.getByText('Search Results')).toBeVisible({ timeout: 45_000 });
+}
+
+export async function openDownloadsPanel(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Downloads', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Active Transfers' })).toBeVisible();
 }
 
 /** A registered, logged-in user with their own folder: the common baseline. */
@@ -100,20 +106,18 @@ export async function freshSession(
   return { user, folder };
 }
 
-/** Opens the downloads drawer and waits for it to render. */
-export async function openDownloadsPanel(page: Page): Promise<void> {
-  await page.getByRole('button', { name: 'Downloads', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Active Transfers' })).toBeVisible();
-}
-
 /**
  * Expands every collapsed transfer group. Per-file rows only exist in the DOM
  * while their group is open, so assertions on a file need this first.
  */
 export async function expandTransferGroups(page: Page): Promise<void> {
-  const collapsed = page.locator('[aria-expanded="false"]');
-  for (const header of await collapsed.all()) {
-    await header.click();
+  const drawer = page.locator('div.bg-beet-panel').filter({ hasText: 'Active Transfers' });
+  for (let guard = 0; guard < 20; guard++) {
+    const collapsed = drawer.locator('[aria-expanded="false"]').first();
+    if ((await collapsed.count()) === 0) {
+      return;
+    }
+    await collapsed.click();
   }
 }
 

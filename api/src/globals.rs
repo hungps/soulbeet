@@ -166,6 +166,19 @@ pub async fn get_or_create_user_channel(
     (channel.sender.clone(), channel.cancellation_token.clone())
 }
 
+/// Sends to the user's channel as it is now: `cleanup_stale_channels` may
+/// have replaced the one a long-running job saw at its start. Without a
+/// channel nobody is listening, so none is created.
+#[cfg(feature = "server")]
+pub async fn send_user_event(username: &str, event: DownloadEvent) -> bool {
+    let channels = USER_CHANNELS.read().await;
+    let Some(channel) = channels.get(username) else {
+        return false;
+    };
+    channel.touch();
+    channel.sender.send(event).is_ok()
+}
+
 /// Register a new task for a user and return the cancellation token
 #[cfg(feature = "server")]
 pub async fn register_user_task(username: &str) -> CancellationToken {
@@ -278,6 +291,15 @@ pub fn start_channel_cleanup_task() {
 
         // Start the automation task (sync ratings, discovery)
         tokio::spawn(async {
+            // A promote runs to the end in its own task, so a track can only
+            // be left Promoting by a previous process.
+            match crate::models::discovery_playlist::DiscoveryTrackRow::reset_stale_promoting()
+                .await
+            {
+                Ok(0) => {}
+                Ok(n) => info!("Reset {n} tracks left Promoting by a previous run"),
+                Err(e) => warn!("Could not reset tracks left Promoting: {e}"),
+            }
             // Wait 30s for server to be fully ready
             tokio::time::sleep(Duration::from_secs(30)).await;
             let mut interval = tokio::time::interval(Duration::from_secs(6 * 3600)); // 6 hours
@@ -306,15 +328,6 @@ async fn run_automation() {
     if connected_users.is_empty() {
         info!("Automation: no connected media-server users, skipping");
         return;
-    }
-
-    // Reset any tracks stuck in Promoting from a previous crash
-    if let Ok(reset_count) =
-        crate::models::discovery_playlist::DiscoveryTrackRow::reset_stale_promoting().await
-    {
-        if reset_count > 0 {
-            info!("Automation: reset {} stale Promoting tracks", reset_count);
-        }
     }
 
     // 0. Check ReportRealPath configuration for each user

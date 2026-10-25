@@ -7,11 +7,14 @@
 //! attempt budget; the waiters (`DownloadMonitor`, discovery's poll loop)
 //! decide *when* a transfer has definitively failed.
 
-use shared::download::{DownloadableGroup, DownloadableItem, QueuedDownload};
+use shared::download::{DownloadableGroup, DownloadableItem, EnqueueStatus, QueuedDownload};
 use soulbeet::DownloadBackend;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::{info, warn};
+
+use super::enqueue::{enqueue_claimed, transfer_key};
+use crate::transfer_registry::{BatchRef, TransferRegistry};
 
 /// Sources tried per track before it is declared failed: the peer picked at
 /// search time plus three alternates. slskd retries each peer 3 times on its
@@ -34,8 +37,7 @@ impl SourcePool {
     /// Alternates for a batch, indexed by the slot the caller will monitor.
     ///
     /// Callers pass the tracks in the exact order they were enqueued, which is
-    /// not the order they were searched: slskd groups an enqueue by peer and
-    /// destination directory and returns the groups in HashMap order, and
+    /// not the order they were searched: slskd groups an enqueue by peer, and
     /// items whose backend data will not parse are dropped before enqueue. A
     /// `None` entry keeps a slot aligned when its track cannot be recovered,
     /// and that slot simply gets no alternates.
@@ -101,26 +103,43 @@ impl SourcePool {
         Some(item)
     }
 
-    /// Enqueue this slot's next alternate, walking past the ones the backend
-    /// rejects outright (peer offline, file already in slskd's list) until one
-    /// is accepted or the slot runs dry. A rejected alternate still costs the
-    /// slot a source, so three dead peers in a row spend the whole budget
-    /// without a transfer ever being attempted. `None` means the slot is out
-    /// of sources or budget.
+    /// Enqueue this slot's next alternate into `batch`'s folder, walking past
+    /// the ones it cannot have (another batch owns the transfer, the peer is
+    /// offline, slskd is already fetching it) until one is accepted or the
+    /// slot runs dry. The accepted alternate's key stays claimed by `batch`.
+    /// A refused alternate still costs the slot a source, so three dead peers
+    /// in a row spend the whole budget without a transfer ever being
+    /// attempted. `None` means the slot is out of sources or budget.
     pub async fn enqueue_next(
         &mut self,
         slot: usize,
         backend: &Arc<dyn DownloadBackend>,
+        batch: &BatchRef,
     ) -> Option<QueuedDownload> {
         while let Some(item) = self.take_next(slot) {
             let source = item.source.clone();
-            match backend.download(vec![item]).await {
+            let key = transfer_key(backend.id(), &item.source, &item.id);
+            if TransferRegistry::global()
+                .claim(&[key], batch)
+                .claimed
+                .is_empty()
+            {
+                warn!(
+                    "Failover source {} skipped: another batch is downloading {}",
+                    source, item.id
+                );
+                continue;
+            }
+            match enqueue_claimed(backend, vec![item], batch).await {
                 Ok(queued) => {
-                    if let Some(ok) = queued.into_iter().find(|d| d.error.is_none()) {
+                    if let Some(ok) = queued
+                        .into_iter()
+                        .find(|d| d.status == EnqueueStatus::Enqueued)
+                    {
                         info!("Failover enqueued {} from {}", ok.item, ok.source);
                         return Some(ok);
                     }
-                    warn!("Failover source {} rejected the enqueue", source);
+                    warn!("Failover source {} refused the enqueue", source);
                 }
                 Err(e) => warn!("Failover enqueue to {} failed: {}", source, e),
             }
@@ -133,9 +152,9 @@ impl SourcePool {
 /// order the caller will monitor them.
 ///
 /// `queued` is neither the order nor the length of `items`: slskd groups an
-/// enqueue by peer and destination directory and returns the groups in
-/// HashMap order, items whose backend data will not parse are dropped before
-/// the request is sent, and rejected enqueues are filtered out by the caller.
+/// enqueue by peer, items whose backend data will not parse are dropped
+/// before the request is sent, and rejected enqueues are filtered out by the
+/// caller.
 /// Feeding `items` straight to `from_tracks` would hand slot N the alternates
 /// of a different track.
 ///
@@ -161,7 +180,10 @@ pub fn align_pool_tracks(
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::*;
-    use crate::server_fns::download::test_support::{group, item, ScriptedOutcome, StubBackend};
+    use crate::server_fns::download::test_support::{
+        batch, group, item, key, ScriptedOutcome, StubBackend,
+    };
+    use crate::transfer_registry::TransferRegistry;
     use shared::download::DownloadableItem;
     use soulbeet::DownloadBackend;
     use std::sync::Arc;
@@ -172,7 +194,7 @@ mod tests {
             source: source.to_string(),
             item: item.to_string(),
             size: 0,
-            error: None,
+            status: EnqueueStatus::Enqueued,
         }
     }
 
@@ -233,8 +255,7 @@ mod tests {
 
     #[test]
     fn align_pool_tracks_follows_the_enqueue_order() {
-        // slskd split the album by destination directory and returned the
-        // dirB group first. Returning `items` in search order here would give
+        // The enqueue came back with the dirB files first. Returning `items` in search order here would give
         // slot 0 the alternates for "One" while the monitor watches "Two".
         let items = searched();
         let accepted = vec![
@@ -275,7 +296,7 @@ mod tests {
     #[test]
     fn align_pool_tracks_skips_a_rejected_enqueue() {
         // "Two" came back with an error and the caller partitioned it out, and
-        // the survivors arrived in destination order rather than search order.
+        // the survivors arrived in another order than the search's.
         let items = searched();
         let accepted = vec![
             queued("peer_a", "dirB/03.flac"),
@@ -316,7 +337,7 @@ mod tests {
     #[test]
     fn from_tracks_slots_follow_the_given_order() {
         // The enqueue order is not the search order: slskd returns its enqueue
-        // results grouped by peer and destination directory, so slot 0 here is
+        // results grouped by peer, so slot 0 here is
         // the track the alternate group happens to list second. Slots must
         // follow the tracks handed in, never the order found in `rest`.
         let rest = vec![group(
@@ -418,7 +439,10 @@ mod tests {
         let mut pool = SourcePool::single(items);
         let backend: Arc<dyn DownloadBackend> = StubBackend::new(vec![ScriptedOutcome::Enqueued]);
 
-        let queued = pool.enqueue_next(0, &backend).await.expect("enqueued");
+        let queued = pool
+            .enqueue_next(0, &backend, &batch("X"))
+            .await
+            .expect("enqueued");
         assert_eq!(queued.source, "peer_b");
     }
 
@@ -430,11 +454,14 @@ mod tests {
             item("peer_c", "Wake Up", "c.flac"),
         ];
         let mut pool = SourcePool::single(items);
-        // peer_b's enqueue is rejected (Ok response, item.error set), peer_c's succeeds
+        // peer_b's enqueue is rejected (Ok response, item status Failed), peer_c's succeeds
         let backend: Arc<dyn DownloadBackend> =
             StubBackend::new(vec![ScriptedOutcome::Rejected, ScriptedOutcome::Enqueued]);
 
-        let queued = pool.enqueue_next(0, &backend).await.expect("enqueued");
+        let queued = pool
+            .enqueue_next(0, &backend, &batch("X"))
+            .await
+            .expect("enqueued");
         assert_eq!(queued.source, "peer_c");
     }
 
@@ -452,8 +479,107 @@ mod tests {
             ScriptedOutcome::Enqueued,
         ]);
 
-        let queued = pool.enqueue_next(0, &backend).await.expect("enqueued");
+        let queued = pool
+            .enqueue_next(0, &backend, &batch("X"))
+            .await
+            .expect("enqueued");
         assert_eq!(queued.source, "peer_c");
+    }
+
+    #[tokio::test]
+    async fn already_in_flight_alternate_is_skipped() {
+        let items = vec![
+            item("peer_a", "Wake Up", "a.flac"),
+            item("peer_b", "Wake Up", "b.flac"),
+            item("peer_c", "Wake Up", "c.flac"),
+        ];
+        let mut pool = SourcePool::single(items);
+        let backend: Arc<dyn DownloadBackend> = StubBackend::new(vec![
+            ScriptedOutcome::AlreadyInFlight,
+            ScriptedOutcome::Enqueued,
+        ]);
+
+        let queued = pool
+            .enqueue_next(0, &backend, &batch("X"))
+            .await
+            .expect("enqueued");
+        assert_eq!(queued.source, "peer_c");
+        assert_eq!(queued.id, "t-c.flac");
+        assert_eq!(pool.attempts_used(0), 3);
+    }
+
+    #[tokio::test]
+    async fn failover_enqueues_into_the_batch_folder() {
+        let items = vec![
+            item("peer_a", "Wake Up", "a.flac"),
+            item("peer_b", "Wake Up", "b.flac"),
+        ];
+        let mut pool = SourcePool::single(items);
+        let stub = StubBackend::new(vec![ScriptedOutcome::Enqueued]);
+        let backend: Arc<dyn DownloadBackend> = stub.clone();
+
+        pool.enqueue_next(0, &backend, &batch("X"))
+            .await
+            .expect("enqueued");
+        assert_eq!(stub.destinations(), vec!["X [12345678]".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_claimed_key_is_released_when_slskd_says_already_in_flight() {
+        let items = vec![
+            item("peer_a", "Wake Up", "a.flac"),
+            item("peer_b", "Wake Up", "b.flac"),
+            item("peer_c", "Wake Up", "c.flac"),
+        ];
+        let mut pool = SourcePool::single(items);
+        let backend: Arc<dyn DownloadBackend> = StubBackend::new(vec![
+            ScriptedOutcome::AlreadyInFlight,
+            ScriptedOutcome::Enqueued,
+        ]);
+        let mine = batch("X");
+        let someone_else = batch("Y").owner;
+
+        let queued = pool
+            .enqueue_next(0, &backend, &mine)
+            .await
+            .expect("enqueued");
+
+        assert_eq!(queued.source, "peer_c");
+        let registry = TransferRegistry::global();
+        assert!(
+            registry.may_adopt(&key(&backend, "peer_b", "b.flac"), &someone_else),
+            "the refused alternate's key was released"
+        );
+        assert!(registry.may_adopt(&key(&backend, "peer_c", "c.flac"), &mine.owner));
+        assert!(
+            !registry.may_adopt(&key(&backend, "peer_c", "c.flac"), &someone_else),
+            "the accepted alternate stays claimed by its batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_alternate_another_user_is_downloading_is_skipped() {
+        let items = vec![
+            item("peer_a", "Wake Up", "a.flac"),
+            item("peer_b", "Wake Up", "b.flac"),
+            item("peer_c", "Wake Up", "c.flac"),
+        ];
+        let mut pool = SourcePool::single(items);
+        let stub = StubBackend::new(vec![ScriptedOutcome::Enqueued]);
+        let backend: Arc<dyn DownloadBackend> = stub.clone();
+        let other = batch("Other");
+        TransferRegistry::global().claim(&[key(&backend, "peer_b", "b.flac")], &other);
+
+        let queued = pool
+            .enqueue_next(0, &backend, &batch("X"))
+            .await
+            .expect("enqueued");
+
+        assert_eq!(queued.source, "peer_c");
+        assert_eq!(stub.destinations().len(), 1, "peer_b was never asked");
+        assert!(
+            TransferRegistry::global().may_adopt(&key(&backend, "peer_b", "b.flac"), &other.owner)
+        );
     }
 
     #[tokio::test]
@@ -465,7 +591,7 @@ mod tests {
         let mut pool = SourcePool::single(items);
         let backend: Arc<dyn DownloadBackend> = StubBackend::new(vec![ScriptedOutcome::Rejected]);
 
-        assert!(pool.enqueue_next(0, &backend).await.is_none());
+        assert!(pool.enqueue_next(0, &backend, &batch("X")).await.is_none());
     }
 
     #[tokio::test]
@@ -485,7 +611,7 @@ mod tests {
             ScriptedOutcome::Rejected,
         ]);
 
-        assert!(pool.enqueue_next(0, &backend).await.is_none());
+        assert!(pool.enqueue_next(0, &backend, &batch("X")).await.is_none());
         assert_eq!(pool.attempts_used(0), MAX_SOURCES_PER_TRACK);
     }
 }

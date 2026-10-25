@@ -55,7 +55,7 @@ pub fn state_key(state: &DownloadState) -> &'static str {
         DownloadState::Queued => "queued",
         DownloadState::InProgress => "in_progress",
         DownloadState::Completed => "completed",
-        DownloadState::Importing => "importing",
+        DownloadState::ImportQueued(_) | DownloadState::Importing => "importing",
         DownloadState::Imported => "imported",
         DownloadState::ImportSkipped => "import_skipped",
         DownloadState::Failed(_) => "failed",
