@@ -651,6 +651,8 @@ pub async fn remove_download_request(action: RequestAction) -> Result<(), Server
         }
     }
 
+    let removed_items: Vec<String> = tracks.iter().map(|t| t.item_key.clone()).collect();
+    crate::import_queue::forget_retries(&auth.0.username, &removed_items).await;
     DownloadRequestRow::delete(&request.id)
         .await
         .map_err(server_error)?;
@@ -659,7 +661,7 @@ pub async fn remove_download_request(action: RequestAction) -> Result<(), Server
     let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
     let _ = tx.send(DownloadEvent::RequestRemoved {
         request_id: request.id.clone(),
-        items: tracks.iter().map(|t| t.item_key.clone()).collect(),
+        items: removed_items,
     });
     info!("User {} removed request {}", auth.0.username, request.id);
     Ok(())

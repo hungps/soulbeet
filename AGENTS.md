@@ -95,9 +95,9 @@ on disk with retry/backoff -> `IMPORT_QUEUE.submit` -> beets -> target folder.
 `auto_download` requires a source score >= `0.7`, otherwise returns results for manual choice.
 
 Imports are serialized per library folder by `IMPORT_QUEUE` (positions surface as
-`DownloadState::ImportQueued(n)`). Jobs that skipped/failed are kept in memory so a row can be
-retried with the matches beets found or as-is; the offers are mirrored onto
-`download_request_tracks`. Downloads, auto-download and discovery are refused while the beets
+`DownloadState::ImportQueued(n)`). Jobs that skipped/failed are kept (in memory and mirrored to
+`import_retries`) so a row can be retried after a reload or restart, with the matches beets found
+or as-is; the offers are mirrored onto `download_request_tracks` too. Downloads, auto-download and discovery are refused while the beets
 probe reports `HealthLevel::Broken`, and `request_retry`/`recovery` skip their passes then too.
 
 **Media server selection**
@@ -169,10 +169,11 @@ per-user in `user_settings`.
 
 ## Gotchas
 
-- State is process-local: `USER_CHANNELS`, `DISCOVERY_PROGRESS`, `IMPORT_QUEUE` (kept jobs and
-  per-library queues) and provider caches are statics. Multi-replica deployment breaks WebSocket
-  fan-out, discovery progress and import retries; a restart clears kept import jobs and their
-  offers, while the request rows stay.
+- State is process-local: `USER_CHANNELS`, `DISCOVERY_PROGRESS`, `IMPORT_QUEUE` (per-library
+  queues) and provider caches are statics. Multi-replica deployment breaks WebSocket fan-out,
+  discovery progress and per-library import ordering. Kept import jobs are a cache: they are
+  mirrored to `import_retries` (sources, target, mode, rows, candidates), so a restart keeps
+  Retry import / Import as-is / Show matches working for the request rows.
 - Each music folder owns `<folder>/.beets_library.db`; duplicates are only detectable per folder,
   never across libraries.
 - Navidrome discovery playlists are smart playlists filtered by path and self-update. Plex has no

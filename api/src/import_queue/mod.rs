@@ -24,7 +24,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use retry::RetryStore;
+use retry::{KeptRetry, RetryStore};
 use rows::{rows_for_done, rows_with_state};
 
 const WORKER_STOPPED: &str = "import worker stopped";
@@ -109,6 +109,18 @@ pub trait QueueDeps: Send + Sync {
 
     /// Runs after a job imported files into a user's library.
     async fn after_import(&self, _username: &str, _target: &Path) {}
+
+    /// Mirrors a kept job for `items`, or drops what they kept before when
+    /// `retry` is `None`.
+    async fn save_retry(&self, _username: &str, _items: &[String], _retry: Option<KeptRetry>) {}
+
+    /// The kept job of `item` from when this process did not record it.
+    async fn load_retry(&self, _username: &str, _item: &str) -> Option<KeptRetry> {
+        None
+    }
+
+    /// Drops what `items` kept.
+    async fn forget_retry_items(&self, _username: &str, _items: &[String]) {}
 }
 
 struct Waiting {
@@ -380,7 +392,7 @@ impl Shared {
             ..job.clone()
         });
         // Stored before the rows go out, so their Retry button always finds it.
-        self.retries.record(&job, &outcome.result);
+        self.retries.record(&self.deps, &job, &outcome.result).await;
         let _emit = self.emit_lock.lock().await;
         if let Some(owner) = &job.owner {
             let rows = rows_for_done(&owner.rows, &job, &outcome);
@@ -460,6 +472,22 @@ impl QueueDeps for LiveDeps {
             event => {
                 let _ = crate::globals::send_user_event(username, event).await;
             }
+        }
+    }
+
+    async fn save_retry(&self, username: &str, items: &[String], retry: Option<KeptRetry>) {
+        if let Err(e) = retry::save_retry_rows(username, items, retry).await {
+            warn!("Could not store the import retry of {username}: {e}");
+        }
+    }
+
+    async fn load_retry(&self, username: &str, item: &str) -> Option<KeptRetry> {
+        retry::load_retry_row(username, item).await
+    }
+
+    async fn forget_retry_items(&self, username: &str, items: &[String]) {
+        if let Err(e) = retry::delete_retry_rows(username, items).await {
+            warn!("Could not drop the import retry of {username}: {e}");
         }
     }
 

@@ -439,7 +439,9 @@ pub async fn retry_import(item: String, choice: ImportChoice) -> Result<(), Serv
 /// The matches a skipped row can be imported with.
 #[post("/api/downloads/import-choices", auth: AuthSession)]
 pub async fn import_choices(item: String) -> Result<MatchChoices, ServerFnError> {
-    crate::import_queue::import_choices_for(&auth.0.username, &item).map_err(kept_import_refusal)
+    crate::import_queue::import_choices_for(&auth.0.username, &item)
+        .await
+        .map_err(kept_import_refusal)
 }
 
 /// A refused retry or matches request, with what stays kept for the row.
@@ -451,7 +453,7 @@ fn kept_import_refusal(refusal: crate::import_queue::Refusal) -> ServerFnError {
 /// Drops the stored imports of rows the user cleared.
 #[post("/api/downloads/forget-retries", auth: AuthSession)]
 pub async fn forget_import_retries(items: Vec<String>) -> Result<(), ServerFnError> {
-    crate::import_queue::forget_retries(&auth.0.username, &items);
+    crate::import_queue::forget_retries(&auth.0.username, &items).await;
     Ok(())
 }
 

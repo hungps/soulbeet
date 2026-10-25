@@ -44,8 +44,8 @@ pub fn start_startup_recovery() {
 async fn run_startup_recovery() {
     info!("Startup recovery: rescanning library folders");
 
-    if let Err(e) = DownloadRequestTrackRow::reset_kept_offers().await {
-        warn!("Startup recovery: could not reset kept import offers: {e}");
+    if let Err(e) = DownloadRequestTrackRow::prune_stale_offers().await {
+        warn!("Startup recovery: could not prune kept import offers: {e}");
     }
 
     let folders = Folder::get_all().await.unwrap_or_default();

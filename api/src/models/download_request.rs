@@ -649,14 +649,22 @@ impl DownloadRequestTrackRow {
     }
 
     /// A failover rebinds a track to a new peer and remote path.
-    /// Drops the import offers a previous process kept: their jobs lived in
-    /// memory and are gone, so a retry would have nothing to run.
+    /// Drops the import offers that no stored job backs: flags written by a
+    /// process that kept its jobs in memory only.
     #[cfg(feature = "server")]
-    pub async fn reset_kept_offers() -> Result<(), String> {
+    pub async fn prune_stale_offers() -> Result<(), String> {
         sqlx::query(
             "UPDATE download_request_tracks
              SET retryable = 0, can_choose_import = 0
-             WHERE retryable != 0 OR can_choose_import != 0",
+             WHERE retryable != 0
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM import_retries r
+                 JOIN download_requests q ON q.id = download_request_tracks.request_id
+                 JOIN users u ON u.id = q.user_id
+                 WHERE r.username = u.username
+                   AND r.item = download_request_tracks.item_key
+               )",
         )
         .execute(&*DB)
         .await
