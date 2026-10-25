@@ -89,8 +89,9 @@ fn count_folder_files(responses: &[SearchResponse]) -> HashMap<(String, String),
 
 /// How close a folder's audio file count is to the release's track count. A
 /// couple of extra or missing files (scans, a bonus track) are normal; every
-/// further one weakens the fit. Neutral when the search is not an album, where
-/// the folder legitimately holds more tracks than were asked for.
+/// further one weakens the fit. Neutral only when the search is not for a
+/// release, where the folder legitimately holds more tracks than were asked
+/// for.
 fn count_fit(files_in_folder: usize, expected: Option<usize>) -> f64 {
     const SLACK: usize = 2;
     let Some(expected) = expected.filter(|expected| *expected > 0) else {
@@ -201,8 +202,7 @@ fn find_best_albums(
             let edition_fit = searched_album
                 .map(|album| utils::edition_fit(album, &album_title))
                 .unwrap_or(1.0);
-            let expected_count = searched_album
-                .and_then(|_| (expected_tracks.len() > 1).then_some(expected_tracks.len()));
+            let expected_count = searched_album.map(|_| expected_tracks.len());
             let count_fit = count_fit(file_count, expected_count);
 
             let album_quality_score = (avg_score * 0.25)
@@ -452,5 +452,33 @@ mod tests {
 
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].track_count, titles.len());
+    }
+
+    #[test]
+    fn a_single_track_release_prefers_the_folder_named_after_it() {
+        let tour = ["Afterglow", "Perfect", "Shape of You", "Castle", "Dive"];
+        let responses = vec![
+            response(
+                "tour-peer",
+                "Ed Sheeran - +-=÷× (TOUR COLLECTION) (2024)",
+                &tour,
+            ),
+            response("single-peer", "Ed Sheeran - Afterglow", &["Afterglow"]),
+        ];
+
+        let albums = ranked(&responses, "Afterglow", &["Afterglow"]);
+
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums[0].album_title, "Ed Sheeran - Afterglow");
+        assert_eq!(albums[0].release_fit, 1.0);
+        // The tour folder still lists, but its five files are no fit for a
+        // one-track release and it names another release than the one searched.
+        assert_eq!(
+            albums[1].album_title,
+            "Ed Sheeran - +-=÷× (TOUR COLLECTION) (2024)"
+        );
+        assert_eq!(albums[1].file_count, tour.len());
+        assert!(albums[1].release_fit < 0.5);
+        assert!(albums[1].score < albums[0].score);
     }
 }

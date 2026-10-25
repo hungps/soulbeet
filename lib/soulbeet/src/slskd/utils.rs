@@ -202,6 +202,20 @@ pub fn folder_title(folder: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Whether the folder holding a file names a release of its own. A folder that
+/// only repeats the artist says nothing about which release it holds; anything
+/// beyond that is the peer naming one, so a folder naming a different release
+/// must not have the album comparison skipped.
+fn folder_claims_release(folders: &[CleanedText], artist: Option<&CleanedText>) -> bool {
+    let Some(folder) = folders.last() else {
+        return false;
+    };
+    match artist {
+        Some(artist) => !folder.words().is_subset(artist.words()),
+        None => !folder.words().is_empty(),
+    }
+}
+
 #[derive(Debug)]
 struct PathInfo {
     parent_folders: Vec<String>,
@@ -323,11 +337,10 @@ pub fn rank_match(
         .collect();
     let stem_c = CleanedText::new(&path_info.stem);
 
-    let (artist_score, best_artist_guess) = if let Some(artist_str) = searched_artist {
-        let searched_artist_c = CleanedText::new(artist_str);
-        score_artist(&path_folders_c, &stem_c, &searched_artist_c)
-    } else {
-        (0.0, CleanedText::new(""))
+    let searched_artist_c = searched_artist.map(CleanedText::new);
+    let (artist_score, best_artist_guess) = match searched_artist_c.as_ref() {
+        Some(target) => score_artist(&path_folders_c, &stem_c, target),
+        None => (0.0, CleanedText::new("")),
     };
 
     let (album_score, best_album_folder) = if let Some(album_str) = searched_album {
@@ -367,7 +380,9 @@ pub fn rank_match(
 
     if searched_album.is_some() {
         weighted_sum += album_score * ALBUM_WEIGHT;
-        if album_score > ALBUM_INFO_THRESHOLD {
+        if album_score > ALBUM_INFO_THRESHOLD
+            || folder_claims_release(&path_folders_c, searched_artist_c.as_ref())
+        {
             total_weight += ALBUM_WEIGHT;
         }
     }
@@ -444,6 +459,29 @@ mod tests {
         assert_eq!(edition_fit("÷ (Deluxe)", "Ed Sheeran - ÷"), 0.5);
         assert_eq!(edition_fit("÷", "Ed Sheeran - ÷ [Deluxe Edition]"), 0.4);
         assert_eq!(edition_fit("÷ (Deluxe)", "Ed Sheeran - ÷ (Live)"), 0.1);
+    }
+
+    fn total_score(folder: &str) -> f64 {
+        rank_match(
+            &format!("/music/{folder}/01 - Afterglow.flac"),
+            Some("Ed Sheeran"),
+            Some("Afterglow"),
+            &["Afterglow"],
+        )
+        .total_score
+    }
+
+    #[test]
+    fn a_folder_naming_the_release_beats_one_naming_another() {
+        assert!(
+            total_score("Ed Sheeran - Afterglow")
+                > total_score("Ed Sheeran - +-=÷× (TOUR COLLECTION) (2024)")
+        );
+    }
+
+    #[test]
+    fn a_folder_that_only_repeats_the_artist_is_not_dragged_down() {
+        assert_eq!(total_score("Ed Sheeran"), 1.0);
     }
 
     #[test]
