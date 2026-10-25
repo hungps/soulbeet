@@ -14,6 +14,7 @@ pub fn process_search_responses(
     require_artist_match: bool,
 ) -> Vec<AlbumResult> {
     const MIN_SCORE_THRESHOLD: f64 = 0.6;
+    let folder_files = count_folder_files(responses);
     let scored_files: Vec<(MatchResult, SearchResult)> = responses
         .iter()
         .flat_map(|resp| {
@@ -57,24 +58,68 @@ pub fn process_search_responses(
         })
         .collect();
 
-    find_best_albums(&scored_files, expected_tracks)
+    find_best_albums(
+        &scored_files,
+        expected_tracks,
+        searched_album,
+        &folder_files,
+    )
+}
+
+/// Audio files per (peer, folder), counted before any matching so a folder's
+/// size is known even when most of it matches no expected track.
+fn count_folder_files(responses: &[SearchResponse]) -> HashMap<(String, String), usize> {
+    let mut counts = HashMap::new();
+    for response in responses {
+        for file in &response.files {
+            let path = Path::new(&file.filename);
+            if path.extension().is_some() && !is_audio_path(path) {
+                continue;
+            }
+            *counts
+                .entry((
+                    response.username.clone(),
+                    utils::folder_of(&file.filename),
+                ))
+                .or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// How close a folder's audio file count is to the release's track count. A
+/// couple of extra or missing files (scans, a bonus track) are normal; every
+/// further one weakens the fit. Neutral when the search is not an album, where
+/// the folder legitimately holds more tracks than were asked for.
+fn count_fit(files_in_folder: usize, expected: Option<usize>) -> f64 {
+    const SLACK: usize = 2;
+    let Some(expected) = expected.filter(|expected| *expected > 0) else {
+        return 1.0;
+    };
+    let off_by = files_in_folder.abs_diff(expected).saturating_sub(SLACK);
+    (1.0 - off_by as f64 / expected as f64).clamp(0.0, 1.0)
 }
 
 fn find_best_albums(
     scored_files: &[(MatchResult, SearchResult)],
     expected_tracks: &[&str],
+    searched_album: Option<&str>,
+    folder_files: &HashMap<(String, String), usize>,
 ) -> Vec<AlbumResult> {
     if expected_tracks.is_empty() {
         return vec![];
     }
 
-    let album_groups = scored_files
-        .iter()
-        .into_group_map_by(|(rank, search)| (search.username.clone(), rank.guessed_album.clone()));
+    let album_groups = scored_files.iter().into_group_map_by(|(_, search)| {
+        (
+            search.username.clone(),
+            utils::folder_of(&search.filename),
+        )
+    });
 
     album_groups
         .into_iter()
-        .filter_map(|((username, album_title), files_in_group)| {
+        .filter_map(|((username, folder), files_in_group)| {
             let artist = files_in_group
                 .first()
                 .map(|(rank, _)| rank.guessed_artist.clone())
@@ -133,7 +178,12 @@ fn find_best_albums(
                 .unwrap_or_default();
 
             let first_track = final_tracks[0].base.clone();
-            let album_path = first_track.filename.clone();
+            let album_title = utils::folder_title(&folder);
+            let file_count = folder_files
+                .get(&(username.clone(), folder.clone()))
+                .copied()
+                .unwrap_or(final_tracks.len())
+                .max(final_tracks.len());
 
             let avg_score: f64 =
                 final_tracks.iter().map(|t| t.match_score).sum::<f64>() / final_tracks.len() as f64;
@@ -148,14 +198,23 @@ fn find_best_albums(
                 .sum::<f64>()
                 / final_tracks.len() as f64;
 
-            let album_quality_score = (avg_score * 0.3)
-                + (completeness * 0.3)
-                + (avg_format_score * 0.38)
+            let edition_fit = searched_album
+                .map(|album| utils::edition_fit(album, &album_title))
+                .unwrap_or(1.0);
+            let expected_count = searched_album
+                .and_then(|_| (expected_tracks.len() > 1).then_some(expected_tracks.len()));
+            let count_fit = count_fit(file_count, expected_count);
+
+            let album_quality_score = (avg_score * 0.25)
+                + (completeness * 0.25)
+                + (edition_fit * 0.20)
+                + (count_fit * 0.10)
+                + (avg_format_score * 0.18)
                 + (avg_availability * 0.02);
 
             Some(AlbumResult {
                 username,
-                album_path,
+                album_path: folder,
                 album_title,
                 artist: Some(artist),
                 track_count: final_tracks.len(),
@@ -166,6 +225,8 @@ fn find_best_albums(
                 upload_speed: first_track.upload_speed,
                 queue_length: first_track.queue_length,
                 availability_score: avg_availability,
+                file_count,
+                release_fit: edition_fit.min(count_fit),
                 score: album_quality_score,
             })
         })
@@ -196,6 +257,111 @@ mod tests {
             upload_speed: 1_000_000,
             queue_length: 0,
         }
+    }
+
+    const PLAIN_TRACKS: [&str; 8] = [
+        "Eraser", "Castle", "Dive", "Shape", "Perfect", "Galway", "Happier", "Hearts",
+    ];
+    const BONUS_TRACKS: [&str; 4] = ["Supermarket", "Butterflies", "Sandman", "Remedy"];
+
+    fn deluxe_tracks() -> Vec<&'static str> {
+        PLAIN_TRACKS
+            .into_iter()
+            .chain(BONUS_TRACKS)
+            .collect()
+    }
+
+    fn ranked(responses: &[SearchResponse], album: &str, expected: &[&str]) -> Vec<AlbumResult> {
+        let mut albums =
+            process_search_responses(responses, "Ed Sheeran", Some(album), expected, false);
+        albums.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        albums
+    }
+
+    #[test]
+    fn a_deluxe_release_ranks_the_deluxe_folder_first() {
+        let deluxe = deluxe_tracks();
+        let responses = vec![
+            response("peer", "Ed Sheeran - ÷", &PLAIN_TRACKS),
+            response("peer", "Ed Sheeran - ÷ (Deluxe)", &deluxe),
+        ];
+
+        let albums = ranked(&responses, "÷ (Deluxe)", &deluxe);
+
+        assert_eq!(albums.len(), 2);
+        let best = &albums[0];
+        assert_eq!(best.album_title, "Ed Sheeran - ÷ (Deluxe)");
+        assert_eq!(best.album_path, "/music/Ed Sheeran - ÷ (Deluxe)");
+        assert_eq!(best.track_count, deluxe.len());
+        assert_eq!(best.file_count, deluxe.len());
+        assert_eq!(best.release_fit, 1.0);
+        // The plainer folder still lists, it just ranks lower.
+        assert_eq!(albums[1].album_title, "Ed Sheeran - ÷");
+        assert!(albums[1].score < best.score);
+    }
+
+    #[test]
+    fn a_plain_release_ranks_the_deluxe_folder_last() {
+        let deluxe = deluxe_tracks();
+        let responses = vec![
+            response("peer", "Ed Sheeran - ÷ (Deluxe)", &deluxe),
+            response("peer", "Ed Sheeran - ÷", &PLAIN_TRACKS),
+        ];
+
+        let albums = ranked(&responses, "÷", &PLAIN_TRACKS);
+
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums[0].album_title, "Ed Sheeran - ÷");
+        assert_eq!(albums[0].release_fit, 1.0);
+        // Its extra files are past the slack, and it names another edition.
+        assert_eq!(albums[1].album_title, "Ed Sheeran - ÷ (Deluxe)");
+        assert!(albums[1].release_fit < 0.5);
+    }
+
+    #[test]
+    fn symbol_titled_releases_still_prefer_their_own_version() {
+        let deluxe = deluxe_tracks();
+        let responses = vec![
+            response("peer", "Ed Sheeran - +", &PLAIN_TRACKS),
+            response("peer", "Ed Sheeran - + (Deluxe)", &deluxe),
+        ];
+
+        assert_eq!(
+            ranked(&responses, "+", &PLAIN_TRACKS)[0].album_title,
+            "Ed Sheeran - +"
+        );
+        assert_eq!(
+            ranked(&responses, "+ (Deluxe)", &deluxe)[0].album_title,
+            "Ed Sheeran - + (Deluxe)"
+        );
+    }
+
+    #[test]
+    fn a_track_search_is_not_held_against_a_full_album_folder() {
+        let responses = vec![response("peer", "Ed Sheeran - ÷", &PLAIN_TRACKS)];
+
+        let albums = process_search_responses(&responses, "Ed Sheeran", None, &["Dive"], false);
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].file_count, PLAIN_TRACKS.len());
+        assert_eq!(albums[0].release_fit, 1.0);
+    }
+
+    #[test]
+    fn two_peers_sharing_a_folder_name_stay_apart() {
+        let responses = vec![
+            response("peer-a", "Ed Sheeran - ÷", &PLAIN_TRACKS),
+            response("peer-b", "Ed Sheeran - ÷", &PLAIN_TRACKS),
+        ];
+
+        let albums = ranked(&responses, "÷", &PLAIN_TRACKS);
+
+        assert_eq!(albums.len(), 2);
+        assert_ne!(albums[0].username, albums[1].username);
     }
 
     #[test]

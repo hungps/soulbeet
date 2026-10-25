@@ -47,6 +47,7 @@ impl DownloadQuery {
                 key: format!("album:{}", album.id),
                 label: album.title.clone(),
                 artist: Some(album.artist.clone()),
+                track_count: album.track_count,
             };
         }
 
@@ -63,6 +64,7 @@ impl DownloadQuery {
                     .clone()
                     .unwrap_or_else(|| track.title.clone()),
                 artist: Some(track.artist.clone()),
+                track_count: None,
             };
         }
 
@@ -80,6 +82,9 @@ pub struct DownloadRequestContext {
     /// Release artist, when known.
     #[serde(default)]
     pub artist: Option<String>,
+    /// Tracks the release has, when the provider reports it.
+    #[serde(default)]
+    pub track_count: Option<u32>,
 }
 
 /// A persisted request session shown as one expandable card in the transfer panel.
@@ -187,13 +192,34 @@ pub struct DownloadableGroup {
     pub items: Vec<DownloadableItem>,
     /// Dominant quality in the group
     pub quality: String,
+    /// Audio files in the source's folder, including those that matched no
+    /// item.
+    #[serde(default)]
+    pub file_count: usize,
+    /// How well the source matches the selected release's edition and track
+    /// count, 0.0-1.0. 1.0 when the backend cannot tell.
+    #[serde(default)]
+    pub release_fit: f64,
     /// Overall score for ranking
     pub score: f64,
 }
 
+/// A source may only be picked without asking when it scores at least this and
+/// matches the release it was searched for.
+pub const MIN_AUTO_SCORE: f64 = 0.7;
+pub const MIN_AUTO_RELEASE_FIT: f64 = 0.5;
+
 impl DownloadableGroup {
     pub fn size_mb(&self) -> u64 {
         self.total_size / (1024 * 1024)
+    }
+
+    pub fn fits_release(&self) -> bool {
+        self.release_fit >= MIN_AUTO_RELEASE_FIT
+    }
+
+    pub fn auto_pickable(&self) -> bool {
+        self.score >= MIN_AUTO_SCORE && self.fits_release()
     }
 }
 
@@ -617,6 +643,30 @@ mod tests {
         assert!(DownloadState::Completed < DownloadState::ImportQueued(1));
         assert!(DownloadState::ImportQueued(1) < DownloadState::ImportQueued(3));
         assert!(DownloadState::ImportQueued(9) < DownloadState::Importing);
+    }
+
+    #[test]
+    fn only_a_scoring_source_that_matches_the_release_is_picked_unseen() {
+        let group = |score: f64, release_fit: f64| DownloadableGroup {
+            score,
+            release_fit,
+            ..DownloadableGroup {
+                source: "p".to_string(),
+                group_id: "g".to_string(),
+                title: "An Album".to_string(),
+                artist: None,
+                item_count: 1,
+                total_size: 0,
+                items: Vec::new(),
+                quality: "flac".to_string(),
+                file_count: 1,
+                release_fit: 1.0,
+                score: 0.0,
+            }
+        };
+        assert!(group(0.9, 1.0).auto_pickable());
+        assert!(!group(0.9, 0.4).auto_pickable(), "another edition");
+        assert!(!group(0.6, 1.0).auto_pickable(), "too weak");
     }
 
     #[test]

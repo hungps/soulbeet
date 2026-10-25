@@ -20,8 +20,6 @@ use crate::models::user::User;
 use crate::services::{available_download_backends, download_backend};
 
 #[cfg(feature = "server")]
-const AUTO_SELECT_SCORE_THRESHOLD: f64 = 0.7;
-#[cfg(feature = "server")]
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(feature = "server")]
 const SEARCH_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -167,16 +165,15 @@ async fn retry_one(row: &LibraryRequestRow) -> Result<(), String> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let Some(best) = groups.first() else {
+    let pick = groups
+        .iter()
+        .position(shared::download::DownloadableGroup::auto_pickable);
+    let Some(pick) = pick else {
         LibraryRequestRow::mark_attempt(&row.id).await?;
         return Ok(());
     };
-    if best.score < AUTO_SELECT_SCORE_THRESHOLD {
-        LibraryRequestRow::mark_attempt(&row.id).await?;
-        return Ok(());
-    }
 
-    let picked = groups.remove(0);
+    let picked = groups.remove(pick);
     if picked.items.is_empty() {
         LibraryRequestRow::mark_attempt(&row.id).await?;
         return Ok(());

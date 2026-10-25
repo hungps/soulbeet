@@ -190,6 +190,7 @@ function releaseJson(release: FixtureRelease): Record<string, unknown> {
     disambiguation: '',
     quality: 'normal',
     barcode: null,
+    asin: null,
     packaging: null,
     'status-id': '4e304316-386d-3409-af2e-78857eec5cfe',
     'release-events': [{ date: release.date, area: null }],

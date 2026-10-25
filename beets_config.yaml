@@ -13,8 +13,10 @@ import:
   resume: no
   duplicate_action: remove
 paths:
-  default: $albumartist/$album%aunique{}/$track $title
-  singleton: $albumartist/$album%aunique{}/$title
+  # The release's own version (beets' albumdisambig) belongs in its folder name;
+  # %aunique still adds what is needed when two releases collide without it.
+  default: $albumartist/$album%if{$albumdisambig, ($albumdisambig)}%aunique{}/$track $title
+  singleton: $albumartist/$album%if{$albumdisambig, ($albumdisambig)}%aunique{}/$title
 match:
   strong_rec_thresh: 0.10
   max_rec:

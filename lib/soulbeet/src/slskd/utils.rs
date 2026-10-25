@@ -1,8 +1,9 @@
 use regex::Regex;
 use shared::slskd::MatchResult;
-use std::{collections::HashSet, path::Path, sync::LazyLock};
+use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
+use std::sync::LazyLock;
 
-static RE_NON_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\w\s]").unwrap());
 static RE_LEAD_TRACK_FIXED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*(\d{1,3}|[A-D]\d{1,2})\s*[\.\-]\s*").unwrap());
 static RE_TRAIL_BRACKET: LazyLock<Regex> =
@@ -11,6 +12,37 @@ static RE_TRAIL_YEAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*[-\(\[]?\d{4}[-\)\]]?\s*$").unwrap());
 static RE_TRAIL_TRACK_NO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+[-\u{2013}]\s+\d{1,3}\s*$").unwrap());
+
+/// Punctuation that separates words rather than naming the release. Everything
+/// outside this set that is not alphanumeric is kept as its own token, so titles
+/// made of symbols (`+`, `÷`, `×`) stay comparable instead of vanishing.
+const SEPARATORS: &[char] = &[
+    '-', '_', '/', '\\', '.', ',', ':', ';', '\'', '"', '`', '(', ')', '[', ']', '{', '}', '!', '?',
+    '|', '*', '\u{2013}', '\u{2014}', '\u{2019}', '\u{201c}', '\u{201d}',
+];
+
+fn push_word(word: &mut String, tokens: &mut HashSet<String>) {
+    if !word.is_empty() {
+        tokens.insert(std::mem::take(word));
+    }
+}
+
+fn tokens(text: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut word = String::new();
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            word.extend(c.to_lowercase());
+            continue;
+        }
+        push_word(&mut word, &mut out);
+        if !c.is_whitespace() && !SEPARATORS.contains(&c) {
+            out.insert(c.to_lowercase().to_string());
+        }
+    }
+    push_word(&mut word, &mut out);
+    out
+}
 
 // A struct to hold pre-processed text for efficient comparisons.
 #[derive(Debug, Clone)]
@@ -21,16 +53,10 @@ struct CleanedText {
 
 impl CleanedText {
     fn new(s: &str) -> Self {
-        let original = s.to_string();
-        let s = s.replace('_', " ");
-        let cleaned = RE_NON_WORD.replace_all(&s, " ").to_string();
-        let words = cleaned
-            .to_lowercase()
-            .split_whitespace()
-            .filter(|w| !w.trim().is_empty())
-            .map(|w| w.to_string())
-            .collect();
-        CleanedText { original, words }
+        CleanedText {
+            original: s.to_string(),
+            words: tokens(s),
+        }
     }
 
     pub fn words(&self) -> &HashSet<String> {
@@ -97,6 +123,83 @@ pub fn path_names_artist(filename: &str, artist: &str) -> bool {
         return true;
     }
     identity_text(filename).contains(&artist)
+}
+
+/// The words that mark which version of a release a folder holds. `edition` and
+/// `version` are left out: they describe the marker next to them ("Deluxe
+/// Edition") rather than being one, and counting them makes "Deluxe" and
+/// "Deluxe Edition" look like different releases.
+const EDITION_WORDS: &[&str] = &[
+    "deluxe",
+    "expanded",
+    "remaster",
+    "anniversary",
+    "special",
+    "bonus",
+    "complete",
+    "reissue",
+    "mono",
+    "stereo",
+    "acoustic",
+    "instrumental",
+    "live",
+    "demo",
+    "explicit",
+    "clean",
+    "international",
+    "japanese",
+];
+
+fn canonical_edition_word(word: &str) -> Option<&'static str> {
+    match word {
+        "remastered" | "remasters" => Some("remaster"),
+        other => EDITION_WORDS.iter().copied().find(|known| *known == other),
+    }
+}
+
+pub fn edition_qualifiers(text: &str) -> BTreeSet<&'static str> {
+    tokens(text)
+        .iter()
+        .filter_map(|word| canonical_edition_word(word))
+        .collect()
+}
+
+/// How well a candidate folder names the same version of the release as
+/// `target_album`: 1.0 for the same markers (or none on either side), 0.5 when
+/// the folder is a plainer version, 0.4 when it adds markers the release does
+/// not have, 0.1 when both name different ones.
+pub fn edition_fit(target_album: &str, folder_name: &str) -> f64 {
+    let target = edition_qualifiers(target_album);
+    let candidate = edition_qualifiers(folder_name);
+    if target == candidate {
+        return 1.0;
+    }
+    if target.is_subset(&candidate) {
+        return 0.4;
+    }
+    if candidate.is_subset(&target) {
+        return 0.5;
+    }
+    0.1
+}
+
+/// The directory a peer's file sits in, normalized to forward slashes.
+pub fn folder_of(filename: &str) -> String {
+    let normalized = filename.replace('\\', "/");
+    Path::new(&normalized)
+        .parent()
+        .map(|parent| parent.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// The last segment of a folder path, which is the name the peer gave the
+/// release.
+pub fn folder_title(folder: &str) -> String {
+    let normalized = folder.replace('\\', "/");
+    Path::new(&normalized)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -283,5 +386,77 @@ pub fn rank_match(
         album_score,
         track_score,
         total_score,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn album_score(folder: &str, album: &str) -> f64 {
+        rank_match(
+            &format!("/music/{folder}/01 - Someone Like You.flac"),
+            Some("Ed Sheeran"),
+            Some(album),
+            &["Someone Like You"],
+        )
+        .album_score
+    }
+
+    #[test]
+    fn symbol_titles_are_compared() {
+        assert!(album_score("Ed Sheeran - +", "+") > 0.6);
+        assert!(album_score("Ed Sheeran - + (Deluxe)", "+") > 0.6);
+        assert!(album_score("Ed Sheeran - x", "+") < 0.25);
+    }
+
+    #[test]
+    fn symbols_survive_the_tokenizer() {
+        assert_eq!(
+            tokens("Ed Sheeran - + (Deluxe)"),
+            ["ed", "sheeran", "+", "deluxe"]
+                .map(str::to_string)
+                .into_iter()
+                .collect()
+        );
+        assert!(tokens("÷").contains("÷"));
+        assert!(tokens("Metaphor: ReFantazio").contains("refantazio"));
+        assert!(!tokens("AC/DC").contains("/"));
+    }
+
+    #[test]
+    fn edition_markers_read_the_same_words() {
+        assert_eq!(
+            edition_qualifiers("Divide (Deluxe Edition)"),
+            edition_qualifiers("Ed Sheeran - Divide [Deluxe]")
+        );
+        assert!(edition_qualifiers("Divide").is_empty());
+        assert_eq!(
+            edition_qualifiers("Album (2011 Remastered Version)"),
+            ["remaster"].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn edition_fit_ranks_the_same_version_first() {
+        assert_eq!(edition_fit("÷ (Deluxe)", "Ed Sheeran - ÷ (Deluxe)"), 1.0);
+        assert_eq!(edition_fit("÷", "Ed Sheeran - ÷"), 1.0);
+        assert_eq!(edition_fit("÷ (Deluxe)", "Ed Sheeran - ÷"), 0.5);
+        assert_eq!(edition_fit("÷", "Ed Sheeran - ÷ [Deluxe Edition]"), 0.4);
+        assert_eq!(edition_fit("÷ (Deluxe)", "Ed Sheeran - ÷ (Live)"), 0.1);
+    }
+
+    #[test]
+    fn folder_helpers_read_peer_paths() {
+        assert_eq!(
+            folder_of("Music\\Ed Sheeran - ÷ (Deluxe)\\01 - Eraser.flac"),
+            "Music/Ed Sheeran - ÷ (Deluxe)"
+        );
+        assert_eq!(
+            folder_title("Music/Ed Sheeran - ÷ (Deluxe)"),
+            "Ed Sheeran - ÷ (Deluxe)"
+        );
+        assert_eq!(folder_of("Eraser.flac"), "");
+        assert_eq!(folder_title(""), "");
     }
 }

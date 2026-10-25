@@ -171,6 +171,32 @@ fn is_unknown(release: &LibraryRelease) -> bool {
     release.matched_track_count == 0 || release.completeness == ReleaseCompleteness::Unmatched
 }
 
+fn filled(value: Option<&String>) -> Option<&str> {
+    value
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+}
+
+/// The album with MusicBrainz's disambiguation, so two pressings of the same
+/// album no longer read alike.
+fn release_title(release: &LibraryRelease) -> String {
+    match filled(release.album_disambig.as_ref()) {
+        Some(disambig) => format!("{} ({disambig})", release.album),
+        None => release.album.clone(),
+    }
+}
+
+/// Who made it and which pressing it is: `Ed Sheeran · 2017 · CD · GB`.
+fn release_subtitle(release: &LibraryRelease) -> String {
+    let mut parts = vec![release.album_artist.clone()];
+    if let Some(year) = release.year {
+        parts.push(year.to_string());
+    }
+    parts.extend(filled(release.media.as_ref()).map(str::to_string));
+    parts.extend(filled(release.country.as_ref()).map(str::to_string));
+    parts.join(" · ")
+}
+
 #[component]
 pub fn LibraryTab() -> Element {
     let auth = use_auth();
@@ -678,7 +704,9 @@ pub fn LibraryTab() -> Element {
                     }
                     div { class: "flex-grow min-w-0",
                         div { class: "flex items-center gap-2 min-w-0 flex-wrap",
-                            p { class: "text-sm font-bold text-white truncate", "{release.album}" }
+                            p { class: "text-sm font-bold text-white truncate",
+                                "{release_title(&release)}"
+                            }
                             span {
                                 class: "text-[10px] font-mono px-1.5 py-0.5 rounded border shrink-0 {badge_class}",
                                 "{badge}"
@@ -686,12 +714,9 @@ pub fn LibraryTab() -> Element {
                             {download_state_badge(download_state.as_ref())}
                         }
                         p { class: "text-xs text-gray-400 font-mono truncate",
-                            "{release.album_artist} · {release.folder_name}"
+                            "{release_subtitle(&release)}"
                         }
                         div { class: "flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] font-mono text-gray-600 mt-0.5",
-                            if let Some(year) = release.year {
-                                span { "{year}" }
-                            }
                             span { "{release.track_count} tracks" }
                             if let Some(expected) = display_release.expected_track_count {
                                 if expected > display_release.track_count {
@@ -1287,5 +1312,44 @@ pub fn LibraryTab() -> Element {
                 "Loading metadata candidates…"
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(album: &str, disambig: Option<&str>, media: Option<&str>) -> LibraryRelease {
+        LibraryRelease {
+            album: album.to_string(),
+            album_artist: "Ed Sheeran".to_string(),
+            album_disambig: disambig.map(str::to_string),
+            media: media.map(str::to_string),
+            country: Some("GB".to_string()),
+            year: Some(2017),
+            ..LibraryRelease::default()
+        }
+    }
+
+    #[test]
+    fn the_title_names_the_pressing_musicbrainz_distinguishes() {
+        assert_eq!(
+            release_title(&release("÷", Some("deluxe edition"), None)),
+            "÷ (deluxe edition)"
+        );
+        assert_eq!(release_title(&release("÷", None, None)), "÷");
+        assert_eq!(release_title(&release("÷", Some("  "), None)), "÷");
+    }
+
+    #[test]
+    fn the_subtitle_carries_the_edition_facts_instead_of_the_folder() {
+        assert_eq!(
+            release_subtitle(&release("÷", None, Some("CD"))),
+            "Ed Sheeran · 2017 · CD · GB"
+        );
+        assert_eq!(
+            release_subtitle(&release("÷", None, None)),
+            "Ed Sheeran · 2017 · GB"
+        );
     }
 }

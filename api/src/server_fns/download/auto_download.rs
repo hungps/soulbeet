@@ -39,11 +39,6 @@ use super::failover::{align_pool_tracks, SourcePool};
 #[cfg(feature = "server")]
 use super::monitor::{DownloadMonitor, WatchedTransfer};
 
-/// Score threshold for automatic source selection (per D-04).
-/// Below this, the client gets FallbackToManual with results attached.
-#[cfg(feature = "server")]
-const AUTO_SELECT_SCORE_THRESHOLD: f64 = 0.7;
-
 /// Maximum time to wait for search results from a single backend.
 #[cfg(feature = "server")]
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -306,25 +301,30 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             query_desc
         );
 
-        // Decide: auto-pick or fallback (per D-04)
-        if best_score < AUTO_SELECT_SCORE_THRESHOLD {
+        // Decide: auto-pick or fallback (per D-04). A source that is not the
+        // release that was searched for (other edition, other track count) is
+        // never picked unseen, however good its files look.
+        let pick = all_groups
+            .iter()
+            .position(shared::download::DownloadableGroup::auto_pickable);
+        let Some(pick) = pick else {
             let _ = tx.send(DownloadEvent::AutoDownload(
                 AutoDownloadEvent::FallbackToManual {
                     batch_id: batch_id.clone(),
                     results: all_groups,
                     best_score,
-                    threshold: AUTO_SELECT_SCORE_THRESHOLD,
+                    threshold: shared::download::MIN_AUTO_SCORE,
                 },
             ));
             info!(
-                "Auto-download: score {:.2} < threshold {:.1}, falling back to manual for '{}'",
-                best_score, AUTO_SELECT_SCORE_THRESHOLD, query_desc
+                "Auto-download: nothing scored {:.1} and matched the release, falling back to manual for '{}'",
+                shared::download::MIN_AUTO_SCORE, query_desc
             );
             return;
-        }
+        };
 
         // Pick the best source
-        let picked = all_groups.remove(0);
+        let picked = all_groups.remove(pick);
 
         let _ = tx.send(DownloadEvent::AutoDownload(
             AutoDownloadEvent::PickedSource {

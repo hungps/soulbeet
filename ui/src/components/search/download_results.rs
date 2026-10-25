@@ -84,6 +84,7 @@ struct AlbumResultItemProps {
     on_album_select_all: EventHandler<DownloadableGroup>,
     on_track_toggle: EventHandler<String>,
     on_download_group: EventHandler<DownloadableGroup>,
+    request: DownloadRequestContext,
     can_download: bool,
     is_best: bool,
     starts_expanded: bool,
@@ -100,65 +101,106 @@ fn get_track_id(track: &DownloadableItem) -> String {
     format!("{}{}", track.id, track.source)
 }
 
-fn normalized_label(value: &str) -> String {
-    value
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
+/// The file name a peer served, without its path.
+fn file_name(item: &DownloadableItem) -> String {
+    let normalized = item.id.replace('\\', "/");
+    normalized
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
-fn matches_selected_release(group: &DownloadableGroup, request: &DownloadRequestContext) -> bool {
-    let label = normalized_label(&request.label);
-    let title = normalized_label(&group.title);
-    label.chars().count() >= 4
-        && title.chars().count() >= 4
-        && (title == label || title.contains(&label) || label.contains(&title))
+/// How much of the release the folder holds, e.g. `18 of 20 tracks`.
+fn track_fit(group: &DownloadableGroup, request: &DownloadRequestContext) -> String {
+    match request.track_count {
+        Some(total) => format!("{} of {} tracks", group.item_count, total),
+        None => format!("{} tracks", group.item_count),
+    }
+}
+
+/// The line under the folder path: who serves it, how it matches, its score.
+fn release_facts(group: &DownloadableGroup, request: &DownloadRequestContext) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(artist) = group.artist.as_ref().filter(|artist| !artist.is_empty()) {
+        parts.push(artist.clone());
+    }
+    if !group.quality.is_empty() {
+        parts.push(group.quality.to_uppercase());
+    }
+    parts.push(track_fit(group, request));
+    if group.file_count > group.item_count {
+        parts.push(format!("{} files in folder", group.file_count));
+    }
+    parts.push(format!("Score {:.2}", group.score));
+    parts.join(" · ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn group(title: &str) -> DownloadableGroup {
+    fn group(item_count: usize, file_count: usize) -> DownloadableGroup {
         DownloadableGroup {
             source: "peer".to_string(),
-            group_id: "/music/peer".to_string(),
-            title: title.to_string(),
-            artist: None,
-            item_count: 1,
+            group_id: "/music/Ed Sheeran - ÷ (Deluxe)".to_string(),
+            title: "Ed Sheeran - ÷ (Deluxe)".to_string(),
+            artist: Some("Ed Sheeran".to_string()),
+            item_count,
             total_size: 0,
             items: Vec::new(),
             quality: "flac".to_string(),
-            score: 0.5,
+            file_count,
+            release_fit: 1.0,
+            score: 0.93,
         }
     }
 
-    fn request(label: &str) -> DownloadRequestContext {
+    fn request(track_count: Option<u32>) -> DownloadRequestContext {
         DownloadRequestContext {
             key: "album:1".to_string(),
-            label: label.to_string(),
-            artist: None,
+            label: "÷ (Deluxe)".to_string(),
+            artist: Some("Ed Sheeran".to_string()),
+            track_count,
         }
     }
 
     #[test]
-    fn matches_peer_folders_named_after_the_release() {
-        let request = request("Metaphor: ReFantazio Original Soundtrack");
-        assert!(matches_selected_release(
-            &group("Metaphor ReFantazio Original Soundtrack (FLAC)"),
-            &request
-        ));
-        assert!(!matches_selected_release(
-            &group("Unrelated Album"),
-            &request
-        ));
+    fn facts_compare_the_folder_with_the_release() {
+        assert_eq!(
+            release_facts(&group(18, 18), &request(Some(18))),
+            "Ed Sheeran · FLAC · 18 of 18 tracks · Score 0.93"
+        );
     }
 
     #[test]
-    fn ignores_labels_too_short_to_be_specific() {
-        let request = request("OST");
-        assert!(!matches_selected_release(&group("OST"), &request));
+    fn facts_name_the_extra_files_of_another_edition() {
+        assert!(release_facts(&group(12, 20), &request(Some(12)))
+            .contains("12 of 12 tracks · 20 files in folder"));
+    }
+
+    #[test]
+    fn facts_drop_the_release_count_when_it_is_unknown() {
+        assert!(release_facts(&group(12, 12), &request(None)).contains("12 tracks"));
+    }
+
+    #[test]
+    fn a_tracks_file_name_is_the_last_segment_of_its_id() {
+        let item = |id: &str| DownloadableItem {
+            id: id.to_string(),
+            source: "peer".to_string(),
+            title: "Eraser".to_string(),
+            artist: "Ed Sheeran".to_string(),
+            album: "÷".to_string(),
+            size: None,
+            duration: None,
+            quality: "flac".to_string(),
+            quality_score: 1.0,
+            backend_data: None,
+        };
+        assert_eq!(file_name(&item("Music\\÷\\01 - Eraser.flac")), "01 - Eraser.flac");
+        assert_eq!(file_name(&item("Eraser.flac")), "Eraser.flac");
     }
 }
 
@@ -175,7 +217,10 @@ fn TrackItem(props: TrackItemProps) -> Element {
             Checkbox { is_selected: props.is_selected }
 
             label { class: "cursor-pointer text-gray-300 font-mono text-sm flex-1 min-w-0 truncate",
-                "{props.track.title}"
+                span { class: "block truncate", "{props.track.title}" }
+                span { class: "block truncate text-[11px] text-gray-500", title: "{props.track.id}",
+                    "{file_name(&props.track)}"
+                }
             }
 
             {quality_badge(&props.track)}
@@ -187,6 +232,8 @@ fn TrackItem(props: TrackItemProps) -> Element {
 fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
     let album = props.album.clone();
     let group_for_download = album.clone();
+    let folder_path = album.group_id.clone();
+    let facts = release_facts(&album, &props.request);
     let mut is_expanded = use_signal(|| props.starts_expanded);
 
     rsx! {
@@ -199,9 +246,9 @@ fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
                 class: "flex justify-between items-center mb-2 cursor-pointer",
                 onclick: move |_| is_expanded.toggle(),
 
-                div { class: "flex-grow",
-                    div { class: "flex items-center gap-2",
-                        h4 { class: "text-md font-bold text-beet-leaf", "{album.title}" }
+                div { class: "flex-grow min-w-0",
+                    div { class: "flex items-center gap-2 min-w-0",
+                        h4 { class: "text-md font-bold text-beet-leaf truncate", "{album.title}" }
                         if props.is_best {
                             span {
                                 class: "text-[10px] font-mono px-1.5 py-0.5 rounded border bg-beet-accent/20 text-beet-accent border-beet-accent/40 uppercase shrink-0",
@@ -209,9 +256,10 @@ fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
                             }
                         }
                     }
-                    p { class: "text-sm text-gray-400 font-mono",
-                        "{album.artist.clone().unwrap_or_default()} - Quality: {album.quality}, {album.item_count} tracks, Score: {album.score:.2}"
+                    p { class: "text-[11px] text-gray-500 font-mono truncate", title: "{folder_path}",
+                        "{folder_path}"
                     }
+                    p { class: "text-sm text-gray-400 font-mono truncate", "{facts}" }
                 }
 
                 // Download the whole release
@@ -280,10 +328,15 @@ fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
 pub fn DownloadResults(props: Props) -> Element {
     let mut selected_tracks = use_signal(HashSet::<String>::new);
     let mut sorted_results = props.results.clone();
+    sorted_results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let best_group_id = sorted_results.first().map(|group| group.group_id.clone());
-    sorted_results.sort_by_key(|group| !matches_selected_release(group, &props.request));
     let results = sorted_results;
     let selected_release = props.request.clone();
+    let item_request = props.request.clone();
     let preferred_folder_id = props.selected_folder_id.clone();
     let mut folders = use_signal(std::vec::Vec::new);
     let mut selected_folder = use_signal(String::new);
@@ -440,6 +493,9 @@ pub fn DownloadResults(props: Props) -> Element {
                                 p { class: "text-xs text-gray-400 font-mono truncate", "{artist}" }
                             }
                         }
+                        if let Some(track_count) = selected_release.track_count {
+                            p { class: "text-xs text-gray-500 font-mono", "{track_count} tracks" }
+                        }
                     }
                 }
                 if props.is_searching {
@@ -459,6 +515,7 @@ pub fn DownloadResults(props: Props) -> Element {
                         on_album_select_all: handle_album_select_all,
                         on_track_toggle: handle_track_toggle,
                         on_download_group: handle_download_group,
+                        request: item_request.clone(),
                         can_download: !selected_folder.read().is_empty() && !*is_downloading.read(),
                         is_best: best_group_id.as_deref() == Some(album.group_id.as_str()),
                         starts_expanded: idx == 0,

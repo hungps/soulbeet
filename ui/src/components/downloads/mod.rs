@@ -12,7 +12,7 @@ use shared::download::{
 mod item;
 mod picker;
 use api::{CancelDownloadRequest, RequestAction};
-use item::DownloadItem;
+use item::{shows_choices, shows_retry, DownloadItem, ImportActions};
 
 use crate::{friendly_error, use_auth};
 
@@ -126,6 +126,16 @@ fn has_failed(group: &TransferGroup) -> bool {
         .tracks
         .iter()
         .any(|t| matches!(t.state, DownloadState::Failed(_)))
+}
+
+/// The row whose kept import job the album's own actions use: every row of a
+/// batch shares one job, so one row speaks for all of them. Actions move to the
+/// album once its transfers are done and at least one row was kept.
+fn group_import_row(group: &TransferGroup) -> Option<&DownloadProgress> {
+    if group.tracks.len() < 2 || !group.tracks.iter().all(|t| t.state.is_terminal()) {
+        return None;
+    }
+    group.tracks.iter().find(|t| shows_retry(t))
 }
 
 fn track_progress_rank(state: &DownloadState) -> Option<u8> {
@@ -768,9 +778,19 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
 
                     if is_expanded {
                       div { class: "px-3 pb-3 space-y-2",
+                        if let Some(row) = group_import_row(group) {
+                          ImportActions {
+                            item: row.item.clone(),
+                            state: row.state.clone(),
+                            can_choose: shows_choices(row),
+                            on_import: import_again,
+                            on_load_choices: load_choices,
+                          }
+                        }
                         for file in group.tracks.iter() {
                           DownloadItem {
                             file: file.clone(),
+                            show_import_actions: group_import_row(group).is_none(),
                             on_cancel: cancel_download,
                             on_import: import_again,
                             on_load_choices: load_choices,
@@ -932,6 +952,43 @@ mod tests {
             can_choose_import: true,
             ..row("a", DownloadState::ImportSkipped).1
         }
+    }
+
+    fn group_of(rows: Vec<DownloadProgress>) -> TransferGroup {
+        TransferGroup {
+            id: Some("batch".to_string()),
+            label: "An Album".to_string(),
+            tracks: rows,
+        }
+    }
+
+    #[test]
+    fn a_finished_album_imports_from_its_own_actions() {
+        let skipped = kept_skip();
+        let imported = row("b", DownloadState::Imported).1;
+        let group = group_of(vec![skipped.clone(), imported.clone()]);
+        assert_eq!(group_import_row(&group), Some(&skipped));
+    }
+
+    #[test]
+    fn a_single_track_keeps_its_own_actions() {
+        assert!(group_import_row(&group_of(vec![kept_skip()])).is_none());
+    }
+
+    #[test]
+    fn a_still_running_album_keeps_the_actions_on_its_rows() {
+        let rows = vec![kept_skip(), row("b", DownloadState::InProgress).1];
+        assert!(group_import_row(&group_of(rows)).is_none());
+    }
+
+    #[test]
+    fn an_album_with_nothing_kept_offers_no_actions() {
+        let nothing_kept = DownloadProgress {
+            retryable: false,
+            ..kept_skip()
+        };
+        let rows = vec![nothing_kept, row("b", DownloadState::Imported).1];
+        assert!(group_import_row(&group_of(rows)).is_none());
     }
 
     /// A refusal as the client gets it: built by the server's helper and

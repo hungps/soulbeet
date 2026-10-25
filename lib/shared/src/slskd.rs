@@ -465,6 +465,14 @@ pub struct AlbumResult {
     pub queue_length: i32,
     #[serde(default)]
     pub availability_score: f64,
+    /// Audio files in the peer's folder, including those that matched no
+    /// expected track.
+    #[serde(default)]
+    pub file_count: usize,
+    /// How well the folder matches the selected release's edition and track
+    /// count, 0.0-1.0.
+    #[serde(default)]
+    pub release_fit: f64,
     pub score: f64,
 }
 
@@ -540,6 +548,8 @@ impl From<AlbumResult> for crate::download::DownloadableGroup {
             total_size: album.total_size as u64,
             items: album.tracks.into_iter().map(Into::into).collect(),
             quality: album.dominant_quality,
+            file_count: album.file_count,
+            release_fit: album.release_fit,
             score: album.score,
         }
     }

@@ -43,6 +43,8 @@ pub fn group(source: &str, items: Vec<DownloadableItem>, score: f64) -> Download
         total_size: 0,
         items,
         quality: "FLAC".to_string(),
+        file_count: 0,
+        release_fit: 1.0,
         score,
     }
 }

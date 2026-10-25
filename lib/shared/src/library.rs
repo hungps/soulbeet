@@ -79,6 +79,15 @@ pub struct LibraryRelease {
     pub folder_path: String,
     pub album: String,
     pub album_artist: String,
+    /// MusicBrainz's own disambiguation of this pressing, e.g. `deluxe edition`.
+    #[serde(default)]
+    pub album_disambig: Option<String>,
+    /// Medium the release is, e.g. `CD` or `Digital Media`.
+    #[serde(default)]
+    pub media: Option<String>,
+    /// Release country code, e.g. `GB`.
+    #[serde(default)]
+    pub country: Option<String>,
     pub year: Option<i32>,
     pub mbid: Option<String>,
     pub path: String,

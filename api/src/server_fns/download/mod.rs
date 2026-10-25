@@ -283,6 +283,7 @@ pub async fn download(req: DownloadRequest) -> Result<Vec<QueuedDownload>, Serve
                 .map(|item| item.album.clone())
                 .unwrap_or_else(|| "Unknown release".to_string()),
             artist: first.map(|item| item.artist.clone()),
+            track_count: None,
         }
     } else {
         req.request
@@ -473,6 +474,8 @@ mod tests {
             total_size: 0,
             items: vec![item("p", "Northern Line", "1.flac")],
             quality: "flac".to_string(),
+            file_count: 1,
+            release_fit: 1.0,
             score: 1.0,
         };
         assert_eq!(auto_batch_label(&group), "Glass Atlas");

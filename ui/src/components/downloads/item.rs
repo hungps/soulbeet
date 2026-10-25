@@ -110,7 +110,7 @@ fn waiting_text(ahead: u32) -> String {
 
 /// Only rows whose import job the server kept are `retryable`, so a failed
 /// download or a row with nothing left to import never offers a retry.
-fn shows_retry(row: &DownloadProgress) -> bool {
+pub(super) fn shows_retry(row: &DownloadProgress) -> bool {
     matches!(
         row.state,
         DownloadState::ImportSkipped | DownloadState::Failed(_)
@@ -119,14 +119,18 @@ fn shows_retry(row: &DownloadProgress) -> bool {
 
 /// A kept row whose last automatic import recorded matches can also import
 /// as-is or with a picked match.
-fn shows_choices(row: &DownloadProgress) -> bool {
+pub(super) fn shows_choices(row: &DownloadProgress) -> bool {
     shows_retry(row) && row.can_choose_import
 }
 
+/// Retry import, Import as-is and the match picker for one kept import job.
+/// Every row of a job shares that job, so the album renders this once with the
+/// first row that kept it.
 #[component]
-pub fn DownloadItem(
-    file: DownloadProgress,
-    on_cancel: EventHandler<DownloadProgress>,
+pub(super) fn ImportActions(
+    item: String,
+    state: DownloadState,
+    can_choose: bool,
     on_import: ImportHandler,
     on_load_choices: ChoicesLoader,
 ) -> Element {
@@ -135,11 +139,11 @@ pub fn DownloadItem(
     let mut busy = use_signal(|| false);
     // Why the picker's last load or pick failed, shown in the picker.
     let mut picker_notice = use_signal(|| None::<String>);
-    use_effect(use_reactive(&file.state, move |_| {
+    use_effect(use_reactive(&state, move |_| {
         busy.set(false);
         picker_notice.set(None);
     }));
-    let item = file.item.clone();
+    let picker_item = item.clone();
     let import = use_callback(move |choice: ImportChoice| {
         if busy() {
             return;
@@ -157,6 +161,36 @@ pub fn DownloadItem(
         });
     });
 
+    rsx! {
+        div { class: "mt-2 flex flex-wrap gap-2",
+            RowAction { busy: busy(), onclick: move |_| import.call(ImportChoice::Auto), "Retry import" }
+            if can_choose {
+                RowAction { busy: busy(), onclick: move |_| import.call(ImportChoice::AsIs), "Import as-is" }
+            }
+        }
+        if can_choose {
+            MatchPicker {
+                item: picker_item,
+                busy: busy(),
+                on_load: on_load_choices,
+                on_choose: import,
+                notice: picker_notice,
+            }
+        }
+    }
+}
+
+#[component]
+pub fn DownloadItem(
+    file: DownloadProgress,
+    /// Whether the row offers its own import actions, or its album does.
+    #[props(default = true)]
+    show_import_actions: bool,
+    on_cancel: EventHandler<DownloadProgress>,
+    on_import: ImportHandler,
+    on_load_choices: ChoicesLoader,
+) -> Element {
+    let item = file.item.clone();
     let state = &file.state;
     let note = reason(&file);
     let is_cancellable = matches!(state, DownloadState::Queued | DownloadState::InProgress);
@@ -248,21 +282,13 @@ pub fn DownloadItem(
             pre { class: "mt-1 max-h-48 overflow-y-auto text-xs font-mono text-gray-400 whitespace-pre-wrap break-all", "{tail}" }
           }
         }
-        if shows_retry(&file) {
-          div { class: "mt-2 flex flex-wrap gap-2",
-            RowAction { busy: busy(), onclick: move |_| import.call(ImportChoice::Auto), "Retry import" }
-            if shows_choices(&file) {
-              RowAction { busy: busy(), onclick: move |_| import.call(ImportChoice::AsIs), "Import as-is" }
-            }
-          }
-        }
-        if shows_choices(&file) {
-          MatchPicker {
-            item: file.item.clone(),
-            busy: busy(),
-            on_load: on_load_choices,
-            on_choose: import,
-            notice: picker_notice,
+        if show_import_actions && shows_retry(&file) {
+          ImportActions {
+            item: item.clone(),
+            state: file.state.clone(),
+            can_choose: shows_choices(&file),
+            on_import,
+            on_load_choices,
           }
         }
         if matches!(state, DownloadState::Importing) {

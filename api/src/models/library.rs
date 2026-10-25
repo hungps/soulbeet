@@ -16,6 +16,9 @@ pub struct LibraryReleaseRow {
     pub album_artist: String,
     pub album_key: String,
     pub album_artist_key: String,
+    pub album_disambig: Option<String>,
+    pub media: Option<String>,
+    pub country: Option<String>,
     pub year: Option<i64>,
     pub mb_album_id: Option<String>,
     pub release_path: String,
@@ -83,6 +86,9 @@ impl LibraryReleaseRow {
             folder_path: self.folder_path.clone(),
             album: self.album.clone(),
             album_artist: self.album_artist.clone(),
+            album_disambig: self.album_disambig.clone(),
+            media: self.media.clone(),
+            country: self.country.clone(),
             year: self.year.map(|value| value as i32),
             mbid: self.mb_album_id.clone().filter(|value| !value.is_empty()),
             path: self.release_path.clone(),
@@ -179,9 +185,9 @@ impl LibraryReleaseRow {
             sqlx::query(
                 "INSERT INTO library_releases
                     (id, folder_id, folder_path, album, album_artist, album_key, album_artist_key,
-                     year, mb_album_id, release_path, track_count, matched_track_count,
-                     expected_track_count, total_size, scanned_at, ignored)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                     album_disambig, media, country, year, mb_album_id, release_path, track_count,
+                     matched_track_count, expected_track_count, total_size, scanned_at, ignored)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
             )
             .bind(&release_id)
             .bind(folder_id)
@@ -190,6 +196,9 @@ impl LibraryReleaseRow {
             .bind(&release.album_artist)
             .bind(normalize_key(&release.album))
             .bind(normalize_key(&release.album_artist))
+            .bind(&release.album_disambig)
+            .bind(&release.media)
+            .bind(&release.country)
             .bind(release.year.map(|year| year as i64))
             .bind(&release.mb_album_id)
             .bind(&release_path)
@@ -634,6 +643,9 @@ mod tests {
             album_artist: "Artist".to_string(),
             album_key: "album".to_string(),
             album_artist_key: "artist".to_string(),
+            album_disambig: None,
+            media: None,
+            country: None,
             year: None,
             mb_album_id: None,
             release_path: "/music/Artist/Album".to_string(),

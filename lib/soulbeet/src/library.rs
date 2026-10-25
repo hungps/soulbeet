@@ -34,6 +34,12 @@ pub struct ScannedTrack {
 pub struct ScannedRelease {
     pub album: String,
     pub album_artist: String,
+    /// MusicBrainz's own disambiguation of this pressing, e.g. `deluxe edition`.
+    pub album_disambig: Option<String>,
+    /// Medium the release is, e.g. `CD` or `Digital Media`.
+    pub media: Option<String>,
+    /// Release country code, e.g. `GB`.
+    pub country: Option<String>,
     pub year: Option<i32>,
     pub mb_album_id: Option<String>,
     pub path: String,
@@ -58,6 +64,9 @@ struct BeetsTrack {
     artist: String,
     album: String,
     album_artist: String,
+    album_disambig: Option<String>,
+    media: Option<String>,
+    country: Option<String>,
     track_number: Option<u32>,
     disc_number: Option<u32>,
     duration: Option<u32>,
@@ -150,7 +159,7 @@ fn parse_duration(value: &str) -> Option<u32> {
 
 fn parse_beets_line(root: &Path, line: &str) -> Option<(PathBuf, BeetsTrack)> {
     let parts: Vec<&str> = line.split('\u{1f}').collect();
-    if parts.len() < 11 {
+    if parts.len() < 14 {
         return None;
     }
     let path = canonical_path(root, parts[0]);
@@ -165,6 +174,9 @@ fn parse_beets_line(root: &Path, line: &str) -> Option<(PathBuf, BeetsTrack)> {
         mb_album_id: non_empty(parts[8]),
         duration: parse_duration(parts[9]),
         year: parse_number(parts[10]),
+        album_disambig: non_empty(parts[11]),
+        media: non_empty(parts[12]),
+        country: non_empty(parts[13]),
     };
     Some((path, track))
 }
@@ -206,7 +218,7 @@ async fn query_beets(root: &Path) -> Result<HashMap<PathBuf, BeetsTrack>, String
         return Ok(HashMap::new());
     }
     let config = beets_config_path();
-    let format = "$path\u{1f}$title\u{1f}$artist\u{1f}$album\u{1f}$albumartist\u{1f}$track\u{1f}$disc\u{1f}$mb_trackid\u{1f}$mb_albumid\u{1f}$length\u{1f}$year";
+    let format = "$path\u{1f}$title\u{1f}$artist\u{1f}$album\u{1f}$albumartist\u{1f}$track\u{1f}$disc\u{1f}$mb_trackid\u{1f}$mb_albumid\u{1f}$length\u{1f}$year\u{1f}$albumdisambig\u{1f}$media\u{1f}$country";
 
     let mut cmd = Command::new("beet");
     cmd.arg("-c")
@@ -437,11 +449,16 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
                 has_metadata,
             };
 
-            let key = (scoped_key(&album_artist), scoped_key(&album));
+            let key = (
+                scoped_key(&album_artist),
+                scoped_key(&album),
+                scoped_key(meta.album_disambig.as_deref().unwrap_or("")),
+            );
             if let Some(release) = releases.iter_mut().find(|release| {
                 (
                     scoped_key(&release.album_artist),
                     scoped_key(&release.album),
+                    scoped_key(release.album_disambig.as_deref().unwrap_or("")),
                 ) == key
             }) {
                 if release.mb_album_id.is_none() {
@@ -450,11 +467,20 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
                 if release.year.is_none() {
                     release.year = meta.year;
                 }
+                if release.media.is_none() {
+                    release.media = meta.media.clone();
+                }
+                if release.country.is_none() {
+                    release.country = meta.country.clone();
+                }
                 release.tracks.push(track);
             } else {
                 releases.push(ScannedRelease {
                     album,
                     album_artist,
+                    album_disambig: meta.album_disambig.clone(),
+                    media: meta.media.clone(),
+                    country: meta.country.clone(),
                     year: meta.year,
                     mb_album_id: meta.mb_album_id.clone(),
                     path: String::new(),
@@ -566,6 +592,7 @@ fn release_for_untagged(
         mb_album_id: None,
         path: parent.to_string_lossy().to_string(),
         tracks: vec![track],
+        ..Default::default()
     });
 }
 
@@ -820,7 +847,7 @@ mod tests {
     #[test]
     fn parses_beets_metadata_including_musicbrainz_ids() {
         let root = Path::new("/music/user");
-        let line = "Artist/Album/01 - One.flac\u{1f}One\u{1f}Artist\u{1f}Album\u{1f}Album Artist\u{1f}1\u{1f}2\u{1f}recording-id\u{1f}release-id\u{1f}215.4\u{1f}2019";
+        let line = "Artist/Album/01 - One.flac\u{1f}One\u{1f}Artist\u{1f}Album\u{1f}Album Artist\u{1f}1\u{1f}2\u{1f}recording-id\u{1f}release-id\u{1f}215.4\u{1f}2019\u{1f}deluxe edition\u{1f}CD\u{1f}GB";
         let (path, track) = parse_beets_line(root, line).unwrap();
         assert_eq!(path, Path::new("/music/user/Artist/Album/01 - One.flac"));
         assert_eq!(track.title, "One");
@@ -830,6 +857,15 @@ mod tests {
         assert_eq!(track.mb_album_id.as_deref(), Some("release-id"));
         assert_eq!(track.duration, Some(215));
         assert_eq!(track.year, Some(2019));
+        assert_eq!(track.album_disambig.as_deref(), Some("deluxe edition"));
+        assert_eq!(track.media.as_deref(), Some("CD"));
+        assert_eq!(track.country.as_deref(), Some("GB"));
+    }
+
+    #[test]
+    fn a_line_without_the_edition_fields_is_ignored() {
+        let line = "Artist/Album/01 - One.flac\u{1f}One\u{1f}Artist\u{1f}Album\u{1f}Album Artist\u{1f}1\u{1f}2\u{1f}\u{1f}\u{1f}215.4\u{1f}2019";
+        assert!(parse_beets_line(Path::new("/music"), line).is_none());
     }
 
     #[test]
