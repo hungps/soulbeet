@@ -75,20 +75,25 @@ function weakHit(hit: RecordingHit): RecordingHit {
 // ---- Lucene query handling -------------------------------------------------
 
 /**
- * Parses the Lucene subset the two clients emit: `field:"phrase"` pairs
- * (musicbrainz_rs) and `field:(escaped terms)` groups (beets), joined with
- * AND or whitespace.
+ * Parses the Lucene subset the two clients emit: `field:"phrase"` pairs and
+ * `field:(term AND term)` groups, joined with AND or whitespace. Every term of
+ * a group has to match, in any order, which is what Lucene does.
  */
-function parseLucene(query: string): { fields: Map<string, string>; freeText: string[] } {
-  const fields = new Map<string, string>();
+function parseLucene(query: string): { fields: Map<string, string[]>; freeText: string[] } {
+  const fields = new Map<string, string[]>();
   const fieldPattern = /([a-z]+):(?:"([^"]*)"|\(([^)]*)\)|(\S+))/gi;
   let match: RegExpExecArray | null;
   const consumed: string[] = [];
   while ((match = fieldPattern.exec(query)) !== null) {
     const key = (match[1] ?? '').toLowerCase();
     const value = match[2] ?? match[3] ?? match[4] ?? '';
-    // beets escapes Lucene metacharacters with backslashes; undo that.
-    fields.set(key, value.replace(/\\(.)/g, '$1').toLowerCase().trim());
+    const terms = value
+      .split(/\s+AND\s+/i)
+      // beets escapes Lucene metacharacters with backslashes; undo that.
+      .map((term) => term.replace(/\\(.)/g, '$1').toLowerCase().trim())
+      .filter((term) => term.length > 0);
+    const existing = fields.get(key);
+    fields.set(key, existing ? [...existing, ...terms] : terms);
     consumed.push(match[0] as string);
   }
   let rest = query;
@@ -103,11 +108,12 @@ function parseLucene(query: string): { fields: Map<string, string>; freeText: st
   return { fields, freeText };
 }
 
-function matchesText(haystack: string, needle: string | undefined): boolean {
-  if (needle === undefined || needle.length === 0) {
+function matchesText(haystack: string, terms: string[] | undefined): boolean {
+  if (terms === undefined || terms.length === 0) {
     return true;
   }
-  return haystack.toLowerCase().includes(needle);
+  const normalized = haystack.toLowerCase();
+  return terms.every((term) => normalized.includes(term));
 }
 
 interface RecordingHit {
@@ -119,8 +125,7 @@ function searchRecordings(query: string): RecordingHit[] {
   const { fields, freeText } = parseLucene(query);
   const title = fields.get('recording') ?? fields.get('recordingaccent');
   const artist = fields.get('artistname') ?? fields.get('artist');
-  const free = freeText.join(' ');
-  const hasCriteria = title !== undefined || artist !== undefined || free.length > 0;
+  const hasCriteria = title !== undefined || artist !== undefined || freeText.length > 0;
 
   const hits: RecordingHit[] = [];
   for (const release of releases) {
@@ -129,7 +134,7 @@ function searchRecordings(query: string): RecordingHit[] {
       const artistOk = matchesText(release.artist, artist);
       const freeOk =
         title === undefined && artist === undefined
-          ? matchesText(`${release.artist} ${track.title}`, free)
+          ? matchesText(`${release.artist} ${track.title}`, freeText)
           : true;
       if (hasCriteria && titleOk && artistOk && freeOk) {
         hits.push({ release, track });
@@ -144,15 +149,14 @@ function searchReleaseGroups(query: string): FixtureRelease[] {
   const title =
     fields.get('releasegroup') ?? fields.get('releasegroupaccent') ?? fields.get('release');
   const artist = fields.get('artist') ?? fields.get('artistname');
-  const free = freeText.join(' ');
-  const hasCriteria = title !== undefined || artist !== undefined || free.length > 0;
+  const hasCriteria = title !== undefined || artist !== undefined || freeText.length > 0;
 
   return releases.filter((release) => {
     const titleOk = matchesText(release.title, title);
     const artistOk = matchesText(release.artist, artist);
     const freeOk =
       title === undefined && artist === undefined
-        ? matchesText(`${release.artist} ${release.title}`, free)
+        ? matchesText(`${release.artist} ${release.title}`, freeText)
         : true;
     return hasCriteria && titleOk && artistOk && freeOk;
   });
@@ -225,15 +229,14 @@ function searchReleases(query: string): FixtureRelease[] {
   const title =
     fields.get('release') ?? fields.get('releaseaccent') ?? fields.get('alias');
   const artist = fields.get('artist') ?? fields.get('artistname');
-  const free = freeText.join(' ');
-  const hasCriteria = title !== undefined || artist !== undefined || free.length > 0;
+  const hasCriteria = title !== undefined || artist !== undefined || freeText.length > 0;
 
   return releases.filter((release) => {
     const titleOk = matchesText(release.title, title);
     const artistOk = matchesText(release.artist, artist);
     const freeOk =
       title === undefined && artist === undefined
-        ? matchesText(`${release.artist} ${release.title}`, free)
+        ? matchesText(`${release.artist} ${release.title}`, freeText)
         : true;
     return hasCriteria && titleOk && artistOk && freeOk;
   });
