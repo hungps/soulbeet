@@ -307,22 +307,18 @@ fn common_parent(paths: &[PathBuf]) -> PathBuf {
 }
 
 fn resolve_release_path(root: &Path, group: &mut ScannedRelease) {
-    let parents: Vec<PathBuf> = group
+    let files: Vec<PathBuf> = group
         .tracks
         .iter()
-        .map(|track| {
-            PathBuf::from(&track.path)
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| root.to_path_buf())
-        })
+        .map(|track| PathBuf::from(&track.path))
         .collect();
-    let common = common_parent(&parents);
+    let common = common_parent(&files);
     group.path = if common.starts_with(root) && common != root {
         common.to_string_lossy().to_string()
     } else {
-        parents
+        files
             .first()
+            .and_then(|path| path.parent())
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|| root.to_string_lossy().to_string())
     };
@@ -851,6 +847,7 @@ mod tests {
 
         assert_eq!(scan.releases.len(), 1);
         let release = &scan.releases[0];
+        assert_eq!(release.path, album.to_string_lossy());
         assert_eq!(release.album, "Album");
         assert_eq!(release.album_artist, "Artist");
         assert_eq!(release.year, Some(2020));

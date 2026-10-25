@@ -28,14 +28,25 @@ pub struct DuplicateReport {
     pub libraries_scanned: Vec<String>,
 }
 
-/// Lowercase, alphanumeric-only key used to compare metadata across providers.
-/// Diacritics that survive `to_lowercase` are kept, punctuation and spacing are
-/// dropped, so "The Beatles - Hey Jude!" and "the beatles hey jude" match.
+/// Characters that cannot appear in a folder or file name are replaced with
+/// `_`; every other character is kept as written.
+const INVALID_NAME_CHARS: [char; 10] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*', '\0'];
+
+/// Case-insensitive key used to identify artists, albums and tracks.
+/// Only case and surrounding whitespace are folded, so distinct names such as
+/// `=` and `−` keep separate keys instead of collapsing into one album.
 pub fn normalize_key(value: &str) -> String {
     value
+        .trim()
         .chars()
-        .filter(|c| c.is_alphanumeric())
         .flat_map(|c| c.to_lowercase())
+        .map(|c| {
+            if INVALID_NAME_CHARS.contains(&c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -346,8 +357,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn library_keys_ignore_case_punctuation_and_spacing() {
+    fn library_keys_fold_case_and_surrounding_whitespace_only() {
         assert_eq!(
+            normalize_key("The Beatles - Hey Jude!"),
+            normalize_key("  the beatles - hey jude!  ")
+        );
+        assert_ne!(
             normalize_key("The Beatles - Hey Jude!"),
             normalize_key("the beatles hey jude")
         );
@@ -355,14 +370,34 @@ mod tests {
     }
 
     #[test]
-    fn activity_keys_ignore_case_and_punctuation() {
+    fn library_keys_keep_symbol_only_names_distinct() {
+        assert_ne!(normalize_key("="), normalize_key("−"));
+        assert_eq!(normalize_key("="), "=");
+        assert_eq!(normalize_key(" − "), "−");
+        assert_eq!(normalize_key("   "), "");
+    }
+
+    #[test]
+    fn library_keys_replace_characters_invalid_in_folder_and_file_names() {
+        assert_eq!(normalize_key("AC/DC"), "ac_dc");
+        assert_eq!(normalize_key("What?"), "what_");
+        assert_eq!(normalize_key("A:B"), "a_b");
+        assert_eq!(normalize_key("A《B》"), "a《b》");
+    }
+
+    #[test]
+    fn activity_keys_ignore_case() {
         assert_eq!(
             album_activity_key("The Beatles", "Abbey Road!"),
-            album_activity_key("the beatles", "abbey road")
+            album_activity_key("the beatles", "abbey road!")
         );
         assert_eq!(
             track_activity_key("The Beatles", "Come Together"),
             track_activity_key("the beatles", "come together")
+        );
+        assert_ne!(
+            album_activity_key("Ed Sheeran", "="),
+            album_activity_key("Ed Sheeran", "−")
         );
     }
 

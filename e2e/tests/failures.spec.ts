@@ -210,7 +210,7 @@ test('surfaces a per-file enqueue rejection with its real reason', async ({ cont
   await expect(item.getByText('Error: Enqueue rejected by peer')).toBeVisible();
 });
 
-test('reports a failed search when slskd is unreachable', async ({ context, page }) => {
+test('parks a failed search for retry when slskd is unreachable', async ({ context, page }) => {
   await freshSession(context, page, 'fail-outage');
   await setOutage(true);
 
@@ -218,9 +218,17 @@ test('reports a failed search when slskd is unreachable', async ({ context, page
   const row = page.locator('li').filter({ hasText: 'Undertow' }).first();
   await row.getByRole('button', { name: 'Download' }).click();
 
-  // The row's download icon flips to the failed state, with the reason as
-  // its tooltip.
-  await expect(row.getByTitle('No results found')).toBeVisible({ timeout: 90_000 });
+  // A search that cannot start because slskd is down is not written off: the
+  // request is parked in the retry queue, so the row carries the "Requested"
+  // badge instead of a spinner that never resolves or a hard failure.
+  await expect(row.getByText('Requested', { exact: true })).toBeVisible({ timeout: 90_000 });
+
+  // The drawer lists the parked request, waiting for the next retry attempt.
+  await openDownloadsPanel(page);
+  const drawer = page.locator('div.bg-beet-panel').filter({ hasText: 'Active Transfers' });
+  await expect(drawer.getByText('REQUESTED', { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(drawer.getByRole('heading', { name: glassAtlas.title })).toBeVisible();
+  await expect(drawer.getByText(/Waiting to retry/)).toBeVisible();
 });
 
 test('cancels a transfer stuck in the remote queue', async ({ context, page }) => {
