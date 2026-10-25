@@ -18,6 +18,7 @@ use crate::models::download_request::{DownloadRequestRow, DownloadRequestTrackRo
 use crate::models::folder::Folder;
 #[cfg(feature = "server")]
 use crate::models::user::User;
+use crate::server_fns::download::enqueue::transfer_key;
 use crate::server_fns::download::process::import_job as make_import_job;
 #[cfg(feature = "server")]
 use crate::server_fns::download::requests::{broadcast_progress, record_queued, start_monitor};
@@ -25,6 +26,7 @@ use crate::server_fns::download::requests::{broadcast_progress, record_queued, s
 use crate::server_fns::download::utils::resolve_download_path_mapped;
 #[cfg(feature = "server")]
 use crate::services::download_backend;
+use crate::transfer_registry::TransferRegistry;
 
 #[cfg(feature = "server")]
 static RECOVERY_STARTED: Once = Once::new();
@@ -41,6 +43,10 @@ pub fn start_startup_recovery() {
 #[cfg(feature = "server")]
 async fn run_startup_recovery() {
     info!("Startup recovery: rescanning library folders");
+
+    if let Err(e) = DownloadRequestTrackRow::reset_kept_offers().await {
+        warn!("Startup recovery: could not reset kept import offers: {e}");
+    }
 
     let folders = Folder::get_all().await.unwrap_or_default();
     tokio::spawn(async move {
@@ -67,6 +73,25 @@ async fn run_startup_recovery() {
         return;
     }
 
+    let importer_issue = match crate::services::music_importer(None).await {
+        Ok(importer) => importer
+            .refresh_health()
+            .await
+            .blocking_issue()
+            .map(|issue| issue.title.clone()),
+        Err(e) => Some(format!("no importer available: {e}")),
+    };
+    if let Some(issue) = importer_issue {
+        warn!(
+            "Startup recovery: beets cannot import ({issue}); leaving {} request(s) stopped",
+            requests.len()
+        );
+        for request in requests {
+            let _ = DownloadRequestRow::set_state(&request.id, "stopped").await;
+        }
+        return;
+    }
+
     info!(
         "Startup recovery: resuming {} active download request(s)",
         requests.len()
@@ -89,7 +114,12 @@ async fn recover_request(request: DownloadRequestRow) -> Result<(), String> {
 
     let importable: Vec<DownloadRequestTrackRow> = tracks
         .iter()
-        .filter(|track| matches!(track.state.as_str(), "completed" | "importing"))
+        .filter(|track| {
+            matches!(
+                track.state.as_str(),
+                "completed" | "importing" | "import_queued"
+            )
+        })
         .cloned()
         .collect();
     let resumable: Vec<DownloadRequestTrackRow> = tracks
@@ -141,13 +171,30 @@ async fn recover_request(request: DownloadRequestRow) -> Result<(), String> {
         }
 
         if !missing.is_empty() {
-            let destination = shared::download::batch_folder(&request.label, &request.id);
-            queued.extend(
-                backend
-                    .download(missing, &destination)
-                    .await
-                    .map_err(|e| e.to_string())?,
-            );
+            let batch = crate::server_fns::download::requests::batch_for(&request);
+            let keys: Vec<_> = missing
+                .iter()
+                .map(|item| transfer_key(backend.id(), &item.source, &item.id))
+                .collect();
+            let claim = TransferRegistry::global().claim(&keys, &batch);
+            let free: Vec<_> = missing
+                .into_iter()
+                .filter(|item| {
+                    claim
+                        .claimed
+                        .iter()
+                        .any(|key| key.peer == item.source && key.filename == item.id)
+                })
+                .collect();
+            if !free.is_empty() {
+                let destination = shared::download::batch_folder(&request.label, &request.id);
+                queued.extend(
+                    backend
+                        .download(free, &destination)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                );
+            }
         }
 
         let accepted = record_queued(&request, &items, &queued, &tx).await;
@@ -273,16 +320,23 @@ async fn import_after_settled(
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             continue;
         };
-        if tracks
-            .iter()
-            .any(|track| matches!(track.state.as_str(), "queued" | "in_progress" | "importing"))
-        {
+        if tracks.iter().any(|track| {
+            matches!(
+                track.state.as_str(),
+                "queued" | "in_progress" | "importing" | "import_queued"
+            )
+        }) {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             continue;
         }
         let importable: Vec<DownloadRequestTrackRow> = tracks
             .into_iter()
-            .filter(|track| matches!(track.state.as_str(), "completed" | "importing"))
+            .filter(|track| {
+                matches!(
+                    track.state.as_str(),
+                    "completed" | "importing" | "import_queued"
+                )
+            })
             .collect();
         if importable.is_empty() {
             return;

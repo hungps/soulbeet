@@ -41,6 +41,10 @@ anything server-side.
 | Env config singleton | `api/src/config.rs` (`CONFIG`) |
 | SQLite pool + migrations | `api/src/db.rs` (pool max 5, `sqlx::migrate!("./migrations")`) |
 | Provider/backend/importer registry | `api/src/services.rs` |
+| Import queue (one job per library, kept retries, row events) | `api/src/import_queue/` |
+| In-flight transfer ownership + batch inboxes | `api/src/transfer_registry.rs` |
+| Claim-then-enqueue + batch folders | `api/src/server_fns/download/enqueue.rs` |
+| Beets health probe/gates | `api/src/importer_health.rs` |
 | Per-user broadcast channels, cancellation, discovery progress | `api/src/globals.rs` |
 | JWT create/verify | `api/src/auth.rs` |
 | AES-GCM credential encryption | `api/src/crypto.rs` |
@@ -52,7 +56,7 @@ anything server-side.
 | Media-server trait (extension seam) | `lib/soulbeet/src/traits.rs` (`MediaServer`, `PlaylistSpec`) |
 | Navidrome client / Subsonic models | `lib/soulbeet/src/navidrome/{client,models}.rs` |
 | Plex client / plex.tv OAuth | `lib/soulbeet/src/plex/{client,models,auth}.rs` |
-| beets importer | `lib/soulbeet/src/beets/mod.rs` |
+| beets importer, run log classification, config probe, import driver | `lib/soulbeet/src/beets/{mod,runner,classify,probe,report}.rs`, `beets/{probe,import}.py` |
 | Recommendation pipeline | `lib/soulbeet/src/engine/` |
 | Routes and app shell | `web/src/main.rs`, `web/src/views/` |
 | Reusable UI | `ui/src/components/` |
@@ -82,11 +86,19 @@ anything server-side.
 
 **Search -> download -> import**
 `search_album`/`search_track` -> metadata provider -> `start_download_search` (hydrates album
-tracklists first) -> `poll_download_search` -> `download`/`auto_download` -> slskd batch enqueue
--> `DownloadMonitor` polls per-peer transfers, fails over (`download/failover.rs`), drops abandoned
-transfers, broadcasts `DownloadEvent` over `/api/downloads/updates` -> `download/process.rs`
-resolves the file on disk with retry/backoff -> `download/import.rs` -> beets -> target folder.
+tracklists first) -> `poll_download_search` -> `download`/`auto_download` -> `enqueue.rs` claims the
+files in the transfer registry and enqueues them into the batch folder
+(`<label> [<batch id>]` via `shared::download::batch_folder`) -> `DownloadMonitor` polls per-peer
+transfers by transfer id, fails over in place (`download/failover.rs`), drops abandoned transfers,
+broadcasts `DownloadEvent` over `/api/downloads/updates` -> `download/process.rs` resolves the file
+on disk with retry/backoff -> `IMPORT_QUEUE.submit` -> beets -> target folder.
 `auto_download` requires a source score >= `0.7`, otherwise returns results for manual choice.
+
+Imports are serialized per library folder by `IMPORT_QUEUE` (positions surface as
+`DownloadState::ImportQueued(n)`). Jobs that skipped/failed are kept in memory so a row can be
+retried with the matches beets found or as-is; the offers are mirrored onto
+`download_request_tracks`. Downloads, auto-download and discovery are refused while the beets
+probe reports `HealthLevel::Broken`, and `request_retry`/`recovery` skip their passes then too.
 
 **Media server selection**
 `available_media_servers()` always exposes Navidrome and Plex. Plex login creates a PIN, opens
@@ -121,7 +133,8 @@ navbar banner in `web/src/main.rs`.
 ```bash
 ./css.sh                                        # Tailwind v4 watcher -> web/assets/tailwind.css
 dx serve --package web --platform web           # dev server (default port 9765)
-cargo test -p api -p soulbeet                   # Rust unit tests (inline #[cfg(test)] modules)
+cargo test --workspace --features server,dioxus/server --lib   # Rust unit tests (inline modules)
+cargo test -p soulbeet --lib                    # soulbeet alone, without feature unification
 cargo check -p web --features server            # server-side type check (WASM target not always installed)
 cargo clippy                                    # respects clippy.toml await-borrow denies
 ```
@@ -156,8 +169,10 @@ per-user in `user_settings`.
 
 ## Gotchas
 
-- State is process-local: `USER_CHANNELS`, `DISCOVERY_PROGRESS`, and provider caches are
-  statics. Multi-replica deployment breaks WebSocket fan-out and discovery progress.
+- State is process-local: `USER_CHANNELS`, `DISCOVERY_PROGRESS`, `IMPORT_QUEUE` (kept jobs and
+  per-library queues) and provider caches are statics. Multi-replica deployment breaks WebSocket
+  fan-out, discovery progress and import retries; a restart clears kept import jobs and their
+  offers, while the request rows stay.
 - Each music folder owns `<folder>/.beets_library.db`; duplicates are only detectable per folder,
   never across libraries.
 - Navidrome discovery playlists are smart playlists filtered by path and self-update. Plex has no

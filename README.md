@@ -167,7 +167,7 @@ When beets handled the import as one task (one track, or one album folder that b
 -   **Show matches**: the matches beets weighed for that import, with their score and what differs. Pick one, or paste a MusicBrainz link or ID (a recording for singletons, a release in album mode), then click **Import with this match**. beets applies exactly that match (`-S <id>`), however low its score.
 -   **Import as-is**: beets imports the files with their own tags (`-A`) and looks nothing up. Every file needs artist and title tags, and in album mode an album tag too. If one lacks them, nothing is imported and the row names the files that lack them: beets would file untagged music under empty names, and with `duplicate_action: remove` a second untagged import would replace the first.
 
-These offers come from the import job the server kept for the row, and that job lives in memory. The buttons show in the session that saw the import; after a page reload the row and its reason come back from the request list, but its **Retry import** / **Show matches** buttons do not. The job is dropped on restart, when you clear the row, and after 200 kept jobs per user.
+The reason, the beets output and whether the row can still be retried are stored with the request, so a page reload keeps the row's offers. The import job they need lives in memory: a server restart drops it, and Soulbeet clears the offers then — the files stay in the download folder until you retry or clear the row. Jobs are also dropped when you clear the row, and only the newest 200 per user are kept.
 
 ### Image Tiers
 

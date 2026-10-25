@@ -38,6 +38,19 @@ pub fn start_request_retry_task() {
     });
 }
 
+/// Parked requests wait while beets cannot import, so a broken importer never
+/// turns into downloads nobody can file.
+#[cfg(feature = "server")]
+async fn importer_ready() -> bool {
+    match crate::importer_health::not_ready().await {
+        Some(issue) => {
+            info!("Request retry: beets cannot import ({issue}), keeping parked requests");
+            false
+        }
+        None => true,
+    }
+}
+
 #[cfg(feature = "server")]
 fn due(last_attempt_at: Option<&str>, interval: Duration) -> bool {
     let Some(last) = last_attempt_at else {
@@ -67,6 +80,9 @@ async fn retry_due_requests() -> Result<(), String> {
     let Some(interval) = settings.request_retry_interval.duration() else {
         return Ok(());
     };
+    if !importer_ready().await {
+        return Ok(());
+    }
 
     for row in LibraryRequestRow::list_all().await? {
         if !due(row.last_attempt_at.as_deref(), interval) {
@@ -185,28 +201,27 @@ async fn retry_one(row: &LibraryRequestRow) -> Result<(), String> {
         let _ = DownloadRequestTrackRow::insert_if_new(&request.id, item).await;
     }
 
-    let backend = download_backend(None).await?;
-    let destination = shared::download::batch_folder(&request.label, &request.id);
-    let queued = match backend.download(picked.items.clone(), &destination).await {
-        Ok(queued) => queued,
+    let (tx, _) = get_or_create_user_channel(&user.username).await;
+    let accepted = match crate::server_fns::download::requests::enqueue_for_request(
+        &user.username,
+        &request,
+        picked.items.clone(),
+        &tx,
+    )
+    .await
+    {
+        Ok(accepted) => accepted,
         Err(e) => {
             let _ = DownloadRequestRow::delete(&request.id).await;
             return Err(format!("queue failed: {e}"));
         }
     };
 
-    let (tx, _) = get_or_create_user_channel(&user.username).await;
-    let accepted =
-        crate::server_fns::download::requests::record_queued(&request, &picked.items, &queued, &tx)
-            .await;
-
     if accepted.is_empty() {
         let _ = DownloadRequestRow::delete(&request.id).await;
         LibraryRequestRow::mark_attempt(&row.id).await?;
         return Ok(());
     }
-
-    crate::server_fns::download::requests::start_monitor(&user.username, &request, accepted).await;
     let _ = tx.send(DownloadEvent::AutoDownload(
         shared::download::AutoDownloadEvent::Downloading {
             batch_id: request.id.clone(),

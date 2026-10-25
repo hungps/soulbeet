@@ -54,6 +54,19 @@ pub async fn broken_issue() -> Option<HealthIssue> {
         .cloned()
 }
 
+/// The issue that blocks background work, from the cached health: a check
+/// still running counts as blocking, so no pass downloads before the first
+/// probe answers.
+pub async fn not_ready() -> Option<String> {
+    let importer = music_importer(None).await.ok()?;
+    let health = importer.health();
+    match health.level {
+        HealthLevel::Checking => Some("beets has not been checked yet".to_string()),
+        HealthLevel::Broken => health.blocking_issue().map(|issue| issue.title.clone()),
+        HealthLevel::Ready | HealthLevel::Degraded => None,
+    }
+}
+
 /// Why `importer` must not run a job, if it must not. A Broken importer is
 /// checked again first, so a fixed config does not wait for the next poll,
 /// and one not checked yet is checked before its first job.

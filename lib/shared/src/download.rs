@@ -126,6 +126,14 @@ pub struct DownloadRequestTrack {
     pub state: DownloadState,
     pub error: Option<String>,
     pub transfer_id: Option<String>,
+    #[serde(default)]
+    pub local_path: Option<String>,
+    #[serde(default)]
+    pub import_output: Option<String>,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default)]
+    pub can_choose_import: bool,
 }
 
 impl From<Track> for DownloadQuery {

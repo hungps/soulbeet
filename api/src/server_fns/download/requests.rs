@@ -52,7 +52,9 @@ use crate::services::download_backend;
 use crate::AuthSession;
 
 #[cfg(feature = "server")]
-use super::enqueue::failed_reason;
+use super::enqueue::{
+    deliver, enqueue_request, failed_reason, stopped_rows, transfer_key, RequestEnqueue, Watcher,
+};
 #[cfg(feature = "server")]
 use super::monitor::{DownloadMonitor, WatchedTransfer};
 #[cfg(feature = "server")]
@@ -264,8 +266,16 @@ pub async fn start_monitor(
     if accepted.is_empty() {
         return;
     }
+    let batch = batch_for(request);
+    if let Ok(backend) = download_backend(request.backend.as_deref()).await {
+        let keys: Vec<crate::transfer_registry::TransferKey> = accepted
+            .iter()
+            .map(|q| transfer_key(backend.id(), &q.source, &q.item))
+            .collect();
+        crate::transfer_registry::TransferRegistry::global().claim(&keys, &batch);
+    }
     let (tx, _) = get_or_create_user_channel(username).await;
-    start_monitor_on_batch(username, request, accepted, batch_for(request), tx).await;
+    start_monitor_on_batch(username, request, accepted, batch, tx).await;
 }
 
 #[cfg(feature = "server")]
@@ -418,31 +428,58 @@ async fn cancel_tracks(
     Ok(())
 }
 
+/// Enqueues `items` for `request` through the transfer registry and starts
+/// (or joins) the monitor that watches them. Rows are persisted and sent to
+/// the UI on the way.
+#[cfg(feature = "server")]
+pub async fn enqueue_for_request(
+    username: &str,
+    request: &DownloadRequestRow,
+    items: Vec<DownloadableItem>,
+    tx: &broadcast::Sender<DownloadEvent>,
+) -> Result<Vec<QueuedDownload>, String> {
+    let backend = download_backend(request.backend.as_deref())
+        .await
+        .map_err(|e| format!("download backend not available: {e}"))?;
+    let enq = enqueue_request(&backend, items.clone(), batch_for(request)).await;
+    let accepted = record_queued(request, &items, &enq.results, tx).await;
+    let RequestEnqueue {
+        batch,
+        watcher,
+        error,
+        ..
+    } = enq;
+    if let Some(error) = error {
+        return Err(format!("download queue failed: {error}"));
+    }
+    match watcher {
+        Watcher::Joined(reservation) => {
+            let lost = deliver(reservation, &accepted, &backend, &batch).await;
+            if !lost.is_empty() {
+                let _ = tx.send(DownloadEvent::Progress(stopped_rows(&lost, &batch)));
+            }
+        }
+        Watcher::Own if accepted.is_empty() && batch.inbox.close_if_idle() => {}
+        Watcher::Own => {
+            start_monitor_on_batch(username, request, accepted.clone(), batch, tx.clone()).await;
+        }
+    }
+    Ok(accepted)
+}
+
 #[cfg(feature = "server")]
 pub(crate) async fn requeue(
+    username: &str,
     request: &DownloadRequestRow,
     tracks: Vec<DownloadRequestTrackRow>,
     tx: &broadcast::Sender<DownloadEvent>,
 ) -> Result<Vec<QueuedDownload>, String> {
-    let mut items = Vec::new();
-    for track in &tracks {
-        items.push(track.to_item());
-    }
-
+    let items: Vec<DownloadableItem> = tracks.iter().map(|track| track.to_item()).collect();
     if items.is_empty() {
         return Ok(Vec::new());
     }
 
-    let backend = download_backend(request.backend.as_deref())
-        .await
-        .map_err(|e| format!("download backend not available: {e}"))?;
-    let destination = shared::download::batch_folder(&request.label, &request.id);
-    let queued = backend
-        .download(items.clone(), &destination)
-        .await
-        .map_err(|e| format!("download queue failed: {e}"))?;
-
-    let accepted = record_queued(request, &items, &queued, tx).await;
+    let accepted = enqueue_for_request(username, request, items, tx).await?;
     DownloadRequestRow::set_state(&request.id, "active").await?;
     Ok(accepted)
 }
@@ -569,10 +606,9 @@ pub async fn resume_download_request(action: RequestAction) -> Result<(), Server
         })
         .collect();
     let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
-    let accepted = requeue(&request, pending, &tx)
+    requeue(&auth.0.username, &request, pending, &tx)
         .await
         .map_err(server_error)?;
-    start_monitor(&auth.0.username, &request, accepted).await;
     Ok(())
 }
 
@@ -584,8 +620,9 @@ pub async fn retry_download_request(action: RequestAction) -> Result<(), ServerF
         .map_err(server_error)?;
     let failed: Vec<_> = tracks.into_iter().filter(|t| t.state == "failed").collect();
     let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
-    let accepted = requeue(&request, failed, &tx).await.map_err(server_error)?;
-    start_monitor(&auth.0.username, &request, accepted).await;
+    requeue(&auth.0.username, &request, failed, &tx)
+        .await
+        .map_err(server_error)?;
     Ok(())
 }
 

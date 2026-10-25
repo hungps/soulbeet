@@ -79,6 +79,7 @@ fn group_rank(group: &TransferGroup) -> u8 {
             t.state,
             DownloadState::Queued
                 | DownloadState::InProgress
+                | DownloadState::ImportQueued(_)
                 | DownloadState::Importing
                 | DownloadState::Completed
         )
@@ -132,7 +133,7 @@ fn track_progress_rank(state: &DownloadState) -> Option<u8> {
         DownloadState::Queued => Some(0),
         DownloadState::InProgress => Some(1),
         DownloadState::Completed => Some(2),
-        DownloadState::Importing => Some(3),
+        DownloadState::ImportQueued(_) | DownloadState::Importing => Some(3),
         DownloadState::Imported => Some(4),
         _ => None,
     }
@@ -857,10 +858,10 @@ fn seed_request_tracks(
                 backend: Some("soulseek".to_string()),
                 batch_id: Some(request.id.clone()),
                 batch_label: Some(request.label.clone()),
-                local_path: None,
-                import_output: None,
-                retryable: false,
-                can_choose_import: false,
+                local_path: track.local_path.clone(),
+                import_output: track.import_output.clone(),
+                retryable: track.retryable,
+                can_choose_import: track.can_choose_import,
             },
         );
     }

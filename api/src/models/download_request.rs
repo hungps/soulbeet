@@ -46,6 +46,11 @@ pub struct DownloadRequestTrackRow {
     pub transferred: i64,
     pub speed: f64,
     pub error: Option<String>,
+    pub local_path: Option<String>,
+    pub import_output: Option<String>,
+    pub retryable: i64,
+    pub can_choose_import: i64,
+    pub queue_position: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -55,7 +60,8 @@ pub fn state_key(state: &DownloadState) -> &'static str {
         DownloadState::Queued => "queued",
         DownloadState::InProgress => "in_progress",
         DownloadState::Completed => "completed",
-        DownloadState::ImportQueued(_) | DownloadState::Importing => "importing",
+        DownloadState::ImportQueued(_) => "import_queued",
+        DownloadState::Importing => "importing",
         DownloadState::Imported => "imported",
         DownloadState::ImportSkipped => "import_skipped",
         DownloadState::Failed(_) => "failed",
@@ -68,6 +74,7 @@ pub fn state_from_key(state: &str, error: Option<&str>) -> DownloadState {
     match state {
         "in_progress" => DownloadState::InProgress,
         "completed" => DownloadState::Completed,
+        "import_queued" => DownloadState::ImportQueued(1),
         "importing" => DownloadState::Importing,
         "imported" => DownloadState::Imported,
         "import_skipped" => DownloadState::ImportSkipped,
@@ -75,6 +82,13 @@ pub fn state_from_key(state: &str, error: Option<&str>) -> DownloadState {
         "cancelled" => DownloadState::Cancelled,
         "stopped" => DownloadState::Stopped,
         _ => DownloadState::Queued,
+    }
+}
+
+fn queue_position(state: &DownloadState) -> Option<i64> {
+    match state {
+        DownloadState::ImportQueued(ahead) => Some(i64::from(*ahead)),
+        _ => None,
     }
 }
 
@@ -106,6 +120,12 @@ async fn track_in_library(user_id: &str, artist: &str, title: &str) -> Result<bo
 impl DownloadRequestTrackRow {
     #[cfg(feature = "server")]
     pub fn to_shared(&self) -> DownloadRequestTrack {
+        let state = match self.state.as_str() {
+            "import_queued" => {
+                DownloadState::ImportQueued(self.queue_position.unwrap_or(1).max(1) as u32)
+            }
+            other => state_from_key(other, self.error.as_deref()),
+        };
         DownloadRequestTrack {
             item: self.item_key.clone(),
             source: self.source.clone(),
@@ -117,9 +137,13 @@ impl DownloadRequestTrackRow {
             transferred: self.transferred.max(0) as u64,
             percent: self.percent,
             speed: self.speed,
-            state: state_from_key(&self.state, self.error.as_deref()),
+            state,
             error: self.error.clone(),
             transfer_id: self.transfer_id.clone(),
+            local_path: self.local_path.clone(),
+            import_output: self.import_output.clone(),
+            retryable: self.retryable != 0,
+            can_choose_import: self.can_choose_import != 0,
         }
     }
 
@@ -601,7 +625,8 @@ impl DownloadRequestTrackRow {
         sqlx::query(
             "UPDATE download_request_tracks
              SET transfer_id = ?, state = ?, percent = ?, transferred = ?, speed = ?, error = ?,
-                 updated_at = CURRENT_TIMESTAMP
+                 local_path = ?, import_output = ?, retryable = ?, can_choose_import = ?,
+                 queue_position = ?, updated_at = CURRENT_TIMESTAMP
              WHERE request_id = ? AND item_key = ?",
         )
         .bind(&progress.id)
@@ -610,6 +635,11 @@ impl DownloadRequestTrackRow {
         .bind(progress.transferred as i64)
         .bind(progress.speed)
         .bind(progress.error.as_deref())
+        .bind(progress.local_path.as_deref())
+        .bind(progress.import_output.as_deref())
+        .bind(i64::from(progress.retryable))
+        .bind(i64::from(progress.can_choose_import))
+        .bind(queue_position(&progress.state))
         .bind(request_id)
         .bind(&progress.item)
         .execute(&*DB)
@@ -619,6 +649,21 @@ impl DownloadRequestTrackRow {
     }
 
     /// A failover rebinds a track to a new peer and remote path.
+    /// Drops the import offers a previous process kept: their jobs lived in
+    /// memory and are gone, so a retry would have nothing to run.
+    #[cfg(feature = "server")]
+    pub async fn reset_kept_offers() -> Result<(), String> {
+        sqlx::query(
+            "UPDATE download_request_tracks
+             SET retryable = 0, can_choose_import = 0
+             WHERE retryable != 0 OR can_choose_import != 0",
+        )
+        .execute(&*DB)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     #[cfg(feature = "server")]
     pub async fn rebind(
         request_id: &str,
@@ -629,7 +674,8 @@ impl DownloadRequestTrackRow {
             "UPDATE download_request_tracks
              SET item_key = ?, source = ?, transfer_id = ?, state = ?,
                  percent = ?, transferred = ?, speed = ?, error = ?,
-                 updated_at = CURRENT_TIMESTAMP
+                 local_path = ?, import_output = ?, retryable = ?, can_choose_import = ?,
+                 queue_position = ?, updated_at = CURRENT_TIMESTAMP
              WHERE request_id = ? AND item_key = ?",
         )
         .bind(&entry.item)
@@ -640,6 +686,11 @@ impl DownloadRequestTrackRow {
         .bind(entry.transferred as i64)
         .bind(entry.speed)
         .bind(entry.error.as_deref())
+        .bind(entry.local_path.as_deref())
+        .bind(entry.import_output.as_deref())
+        .bind(i64::from(entry.retryable))
+        .bind(i64::from(entry.can_choose_import))
+        .bind(queue_position(&entry.state))
         .bind(request_id)
         .bind(previous_item)
         .execute(&*DB)
@@ -688,7 +739,8 @@ impl DownloadRequestTrackRow {
     ) -> Result<(), String> {
         sqlx::query(
             "UPDATE download_request_tracks
-             SET state = ?, error = ?, updated_at = CURRENT_TIMESTAMP
+             SET state = ?, error = ?, retryable = 0, can_choose_import = 0,
+                 queue_position = NULL, updated_at = CURRENT_TIMESTAMP
              WHERE request_id = ? AND item_key = ?",
         )
         .bind(state_key(state))
