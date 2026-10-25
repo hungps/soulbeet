@@ -243,12 +243,12 @@ fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
 
             // Clickable header for expand/collapse
             div {
-                class: "flex justify-between items-center mb-2 cursor-pointer",
+                class: "flex justify-between items-start gap-2 mb-2 cursor-pointer",
                 onclick: move |_| is_expanded.toggle(),
 
                 div { class: "flex-grow min-w-0",
                     div { class: "flex items-center gap-2 min-w-0",
-                        h4 { class: "text-md font-bold text-beet-leaf truncate", "{album.title}" }
+                        h4 { class: "text-md font-bold text-beet-leaf break-words min-w-0", "{album.title}" }
                         if props.is_best {
                             span {
                                 class: "text-[10px] font-mono px-1.5 py-0.5 rounded border bg-beet-accent/20 text-beet-accent border-beet-accent/40 uppercase shrink-0",
@@ -256,10 +256,8 @@ fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
                             }
                         }
                     }
-                    p { class: "text-[11px] text-gray-500 font-mono truncate", title: "{folder_path}",
-                        "{folder_path}"
-                    }
-                    p { class: "text-sm text-gray-400 font-mono truncate", "{facts}" }
+                    p { class: "text-[11px] text-gray-500 font-mono break-all", "{folder_path}" }
+                    p { class: "text-sm text-gray-400 font-mono break-words", "{facts}" }
                 }
 
                 // Download the whole release
