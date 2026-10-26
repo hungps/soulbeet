@@ -95,6 +95,11 @@ RUN pip uninstall -y numba llvmlite scipy pip wheel setuptools \
      \) -prune -exec rm -rf {} + \
   && find /opt/venv -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
+# Patch beets' unguarded recording["aliases"] read so releases with more than
+# 500 tracks can still be matched (see build/patch-beets.sh).
+COPY build/patch-beets.sh /tmp/patch-beets.sh
+RUN sh /tmp/patch-beets.sh $VIRTUAL_ENV
+
 # Template beets_config.yaml's `plugins:` line from BEETS_PLUGINS, and ensure
 # `pluginpath:` is present. The sed pattern is anchored to `^plugins:` so the
 # other top-level blocks (replaygain, musicbrainz, etc.) survive untouched.

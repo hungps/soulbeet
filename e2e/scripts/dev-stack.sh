@@ -192,6 +192,7 @@ up() {
     make_venv "$venv"
   fi
   install_beets "$venv" "$REPO_DIR/build/requirements-beets.txt"
+  sh "$REPO_DIR/build/patch-beets.sh" "$venv"
   export PATH="$venv/bin:$PATH"
   # The servers' beets config check runs this interpreter.
   export BEETS_PYTHON="$venv/bin/python"
