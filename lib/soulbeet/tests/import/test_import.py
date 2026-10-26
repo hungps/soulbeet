@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import zipfile
 from pathlib import Path
@@ -272,6 +273,98 @@ def test_asis_imports_with_the_files_own_tags(beets_env, singleton):
     assert beets_env.music_files() == expected
     assert beets_env.tags(beets_env.music / expected[0]) == tags_before
     assert all(trackid == "" for _, _, _, trackid, _ in beets_env.library())
+
+
+def mapped_file(beets_env, mapping):
+    path = beets_env.root / f"map{beets_env.runs}.json"
+    path.write_text(json.dumps(mapping))
+    return path
+
+
+@pytest.mark.parametrize("singleton", [False, True], ids=["album", "singleton"])
+def test_mapped_import_places_and_tags_each_file(beets_env, singleton):
+    if singleton:
+        sources = [one_track(beets_env)]
+        files = list(beets_env.src.iterdir())
+    else:
+        beets_env.album(beets_env.src)
+        sources = [beets_env.src]
+        files = sorted(beets_env.src.iterdir())
+    mapping = {
+        str(files[0]): {
+            "title": "Mapped One",
+            "track": 3,
+            "artist": "Zzqx Artist",
+            "album": "Mapped Album",
+            "albumartist": "Zzqx Artist",
+            "year": 2024,
+            "mb_trackid": "11111111-1111-1111-1111-111111111111",
+            "mb_albumid": "22222222-2222-2222-2222-222222222222",
+        }
+    }
+    if not singleton:
+        mapping[str(files[1])] = {
+            "title": "Mapped Two",
+            "track": 4,
+            "artist": "Zzqx Artist",
+            "album": "Mapped Album",
+            "albumartist": "Zzqx Artist",
+            "year": 2024,
+            "mb_trackid": "11111111-1111-1111-1111-111111111112",
+            "mb_albumid": "22222222-2222-2222-2222-222222222222",
+        }
+
+    # Any lookup would log an error, so a clean run shows none was made.
+    run = beets_env.driver(
+        "mapped",
+        str(mapped_file(beets_env, mapping)),
+        sources=sources,
+        singleton=singleton,
+        env={"FAKESRC_MODE": "error"},
+    )
+
+    assert run.code == 0, run
+    assert "Error in 'FakeSrc" not in run.stderr
+    assert beets_env.music_files() == (
+        ["Zzqx Artist/Mapped Album/Mapped One.mp3"]
+        if singleton
+        else [
+            "Zzqx Artist/Mapped Album/03 Mapped One.mp3",
+            "Zzqx Artist/Mapped Album/04 Mapped Two.mp3",
+        ]
+    )
+    # The files carry the mapping, not the tags they were downloaded with:
+    # an as-is import would otherwise skip beets' own tag write.
+    tags = beets_env.tags(beets_env.music / beets_env.music_files()[0])
+    assert tags["title"] == "Mapped One"
+    assert tags["album"] == "Mapped Album"
+    assert tags["albumartist"] == "Zzqx Artist"
+    assert tags["musicbrainz_albumid"] == "22222222-2222-2222-2222-222222222222"
+    assert "3" in tags["tracknumber"]
+
+
+def test_mapped_import_leaves_out_the_files_it_has_no_mapping_for(beets_env):
+    beets_env.album(beets_env.src)
+    first, second = sorted(beets_env.src.iterdir())
+    mapping = {
+        str(first): {
+            "title": "Mapped One",
+            "track": 1,
+            "artist": "Zzqx Artist",
+            "album": "Mapped Album",
+            "albumartist": "Zzqx Artist",
+            "mb_albumid": "22222222-2222-2222-2222-222222222222",
+        }
+    }
+
+    run = beets_env.driver(
+        "mapped", str(mapped_file(beets_env, mapping)), env={"FAKESRC_MODE": "error"}
+    )
+
+    assert run.code == 0, run
+    assert beets_env.music_files() == ["Zzqx Artist/Mapped Album/01 Mapped One.mp3"]
+    assert second.exists()
+    assert beets_env.files_under(beets_env.src) == [second.name]
 
 
 def test_asis_refuses_an_untagged_track(beets_env):

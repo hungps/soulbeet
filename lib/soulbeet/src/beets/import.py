@@ -268,6 +268,10 @@ class MappedFiles(BeetsPlugin):
             for key, value in fields.items():
                 if str(value).strip():
                     setattr(item, key, value)
+            # beets skips its own tag write for an as-is import, because the
+            # files are assumed to carry the right tags. They carry the
+            # caller's now, so write them out before beets places the file.
+            item.write()
             kept.append(item)
         task.items = kept
         return None
