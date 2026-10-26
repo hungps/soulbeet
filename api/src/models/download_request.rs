@@ -257,9 +257,16 @@ impl DownloadRequestRow {
     #[cfg(feature = "server")]
     pub async fn list_for_user(user_id: &str) -> Result<Vec<Self>, String> {
         sqlx::query_as::<_, Self>(
-            "SELECT * FROM download_requests
-             WHERE user_id = ? AND state != 'completed'
-             ORDER BY created_at DESC",
+            "SELECT * FROM download_requests r
+             WHERE r.user_id = ?
+               AND (
+                 r.state != 'completed'
+                 OR EXISTS (
+                   SELECT 1 FROM download_request_tracks t
+                   WHERE t.request_id = r.id AND t.state != 'imported'
+                 )
+               )
+             ORDER BY r.created_at DESC",
         )
         .bind(user_id)
         .fetch_all(&*DB)

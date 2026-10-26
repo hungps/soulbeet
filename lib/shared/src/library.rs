@@ -90,6 +90,8 @@ pub struct LibraryRelease {
     pub country: Option<String>,
     pub year: Option<i32>,
     pub mbid: Option<String>,
+    #[serde(default)]
+    pub mb_release_group_id: Option<String>,
     pub path: String,
     pub track_count: u32,
     pub matched_track_count: u32,

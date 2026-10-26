@@ -12,6 +12,12 @@ static RE_TRAIL_YEAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*[-\(\[]?\d{4}[-\)\]]?\s*$").unwrap());
 static RE_TRAIL_TRACK_NO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+[-\u{2013}]\s+\d{1,3}\s*$").unwrap());
+static RE_MEDIUM_FOLDER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^\s*(?:(?:cd|disc|disk|dvd|sacd|blu-?ray|vinyl|lp|side|medium|vol(?:ume)?)\s*[-_.]?\s*[a-z0-9]{0,3}|digital\s+media)\s*\.?\s*$",
+    )
+    .unwrap()
+});
 
 /// Punctuation that separates words rather than naming the release. Everything
 /// outside this set that is not alphanumeric is kept as its own token, so titles
@@ -200,6 +206,29 @@ pub fn folder_title(folder: &str) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+fn is_medium_folder(name: &str) -> bool {
+    RE_MEDIUM_FOLDER.is_match(name)
+}
+
+pub fn release_folder(folder: &str) -> String {
+    let normalized = folder.replace('\\', "/");
+    let mut current = Path::new(&normalized);
+    while current
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_medium_folder)
+    {
+        let Some(parent) = current
+            .parent()
+            .filter(|parent| parent.file_name().is_some())
+        else {
+            break;
+        };
+        current = parent;
+    }
+    current.to_string_lossy().to_string()
 }
 
 /// Whether the folder holding a file names a release of its own. A folder that
@@ -393,9 +422,14 @@ pub fn rank_match(
         0.0
     };
 
+    let guessed_album = match searched_album {
+        Some(album) if album_score <= ALBUM_INFO_THRESHOLD => album.to_string(),
+        _ => best_album_folder.original,
+    };
+
     MatchResult {
         guessed_artist: best_artist_guess.original,
-        guessed_album: best_album_folder.original,
+        guessed_album,
         matched_track: best_track_match.original,
         artist_score,
         album_score,
@@ -416,6 +450,28 @@ mod tests {
             &["Someone Like You"],
         )
         .album_score
+    }
+
+    #[test]
+    fn a_medium_folder_does_not_become_the_guessed_album() {
+        let result = rank_match(
+            "/music/Artist/CD1/01 - Song.flac",
+            Some("Artist"),
+            Some("Album"),
+            &["Song"],
+        );
+        assert_eq!(result.guessed_album, "Album");
+    }
+
+    #[test]
+    fn a_folder_naming_the_release_is_kept_as_the_guessed_album() {
+        let result = rank_match(
+            "/music/Artist/Album (Deluxe)/CD1/01 - Song.flac",
+            Some("Artist"),
+            Some("Album"),
+            &["Song"],
+        );
+        assert_eq!(result.guessed_album, "Album (Deluxe)");
     }
 
     #[test]
@@ -496,5 +552,30 @@ mod tests {
         );
         assert_eq!(folder_of("Eraser.flac"), "");
         assert_eq!(folder_title(""), "");
+    }
+
+    #[test]
+    fn release_folders_drop_medium_names() {
+        assert_eq!(
+            release_folder("Music/Ed Sheeran - ÷/CD1"),
+            "Music/Ed Sheeran - ÷"
+        );
+        assert_eq!(
+            release_folder("Music/Ed Sheeran - ÷/Disc 2"),
+            "Music/Ed Sheeran - ÷"
+        );
+        assert_eq!(
+            release_folder("Music/Ed Sheeran - ÷/CD1/CD2"),
+            "Music/Ed Sheeran - ÷"
+        );
+        assert_eq!(
+            release_folder("Music/Ed Sheeran - ÷"),
+            "Music/Ed Sheeran - ÷"
+        );
+        assert_eq!(
+            release_folder("Music/Ed Sheeran - ÷ [CD FLAC]"),
+            "Music/Ed Sheeran - ÷ [CD FLAC]"
+        );
+        assert_eq!(release_folder("CD1"), "CD1");
     }
 }

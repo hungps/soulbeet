@@ -10,7 +10,7 @@ use shared::metadata::{Album, Track};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::use_auth;
-use crate::{ConfirmModal, DownloadTick, Modal};
+use crate::{ConfirmModal, CoverImage, DownloadTick, Modal};
 
 #[derive(Clone, PartialEq)]
 enum PendingRemoval {
@@ -684,10 +684,19 @@ pub fn LibraryTab() -> Element {
         let can_tag = is_unknown(display_release)
             || display_release.matched_track_count < display_release.track_count;
         let is_complete = display_release.completeness == ReleaseCompleteness::Complete;
-        let cover_url = release
-            .mbid
-            .as_ref()
-            .map(|mbid| format!("https://coverartarchive.org/release/{mbid}/front-250"));
+        let cover_urls: Vec<String> = [
+            display_release
+                .mbid
+                .as_ref()
+                .map(|mbid| format!("https://coverartarchive.org/release/{mbid}/front-250")),
+            display_release
+                .mb_release_group_id
+                .as_ref()
+                .map(|mbid| format!("https://coverartarchive.org/release-group/{mbid}/front-250")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         rsx! {
             div { key: "{release.id}",
                 class: "bg-white/5 border rounded-lg transition-colors",
@@ -696,11 +705,7 @@ pub fn LibraryTab() -> Element {
                     class: "flex items-center gap-3 p-3 cursor-pointer",
                     onclick: move |_| toggle_release(release_for_toggle.clone()),
                     div { class: "w-12 h-12 shrink-0 bg-beet-panel border border-white/5 rounded overflow-hidden flex items-center justify-center",
-                        if let Some(url) = cover_url {
-                            img { src: "{url}", alt: "Cover", class: "w-full h-full object-cover" }
-                        } else {
-                            span { class: "text-[9px] font-mono text-gray-600 text-center px-1", "NO ART" }
-                        }
+                        CoverImage { urls: cover_urls }
                     }
                     div { class: "flex-grow min-w-0",
                         div { class: "flex items-center gap-2 min-w-0 flex-wrap",

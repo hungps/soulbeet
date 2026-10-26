@@ -294,10 +294,34 @@ fn album_title(group_title: &str, release_title: &str, tokens: &[String]) -> Str
 }
 
 fn edition_title(release: &Release) -> String {
-    match release.disambiguation.as_deref() {
-        Some(comment) if !comment.is_empty() => format!("{} ({})", release.title, comment),
+    match release.disambiguation.as_deref().map(str::trim) {
+        Some(comment) if !comment.is_empty() && !is_medium_disambiguation(comment) => {
+            format!("{} ({})", release.title, comment)
+        }
         _ => release.title.clone(),
     }
+}
+
+fn is_medium_disambiguation(comment: &str) -> bool {
+    let letters: String = comment
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    let base = letters.trim_matches(|c: char| c.is_ascii_digit());
+    matches!(
+        base,
+        "cd" | "disc"
+            | "disk"
+            | "dvd"
+            | "sacd"
+            | "bluray"
+            | "vinyl"
+            | "lp"
+            | "cassette"
+            | "medium"
+            | "digitalmedia"
+    )
 }
 
 fn sort_editions(editions: &mut [Album], tokens: &[String]) {
@@ -859,6 +883,17 @@ mod tests {
             "secondary-types": secondary,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn edition_titles_leave_out_a_medium_disambiguation() {
+        let mut release = release("r", "Album", "2024", "Official", &["CD"]);
+        release.disambiguation = Some("CD".to_string());
+        assert_eq!(edition_title(&release), "Album");
+        release.disambiguation = Some("Digital Media".to_string());
+        assert_eq!(edition_title(&release), "Album");
+        release.disambiguation = Some("deluxe edition".to_string());
+        assert_eq!(edition_title(&release), "Album (deluxe edition)");
     }
 
     #[test]

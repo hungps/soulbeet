@@ -44,3 +44,35 @@ pub fn CoverArt(album: Album) -> Element {
       }
     }
 }
+
+#[derive(Props, PartialEq, Clone)]
+pub struct CoverImageProps {
+    pub urls: Vec<String>,
+    #[props(default = "Cover".to_string())]
+    pub alt: String,
+    #[props(default = "w-full h-full object-cover".to_string())]
+    pub class: String,
+    #[props(default = "NO ART".to_string())]
+    pub placeholder: String,
+    #[props(default = "text-[9px] font-mono text-gray-600 text-center px-1".to_string())]
+    pub placeholder_class: String,
+}
+
+#[component]
+pub fn CoverImage(props: CoverImageProps) -> Element {
+    let mut index = use_signal(|| 0usize);
+    let url = props.urls.get(*index.read()).cloned();
+
+    rsx! {
+      if let Some(url) = url {
+        img {
+          src: "{url}",
+          alt: "{props.alt}",
+          class: "{props.class}",
+          onerror: move |_| *index.write() += 1,
+        }
+      } else {
+        span { class: "{props.placeholder_class}", "{props.placeholder}" }
+      }
+    }
+}

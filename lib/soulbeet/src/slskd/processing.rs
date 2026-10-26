@@ -79,7 +79,7 @@ fn count_folder_files(responses: &[SearchResponse]) -> HashMap<(String, String),
             *counts
                 .entry((
                     response.username.clone(),
-                    utils::folder_of(&file.filename),
+                    utils::release_folder(&utils::folder_of(&file.filename)),
                 ))
                 .or_insert(0) += 1;
         }
@@ -114,7 +114,7 @@ fn find_best_albums(
     let album_groups = scored_files.iter().into_group_map_by(|(_, search)| {
         (
             search.username.clone(),
-            utils::folder_of(&search.filename),
+            utils::release_folder(&utils::folder_of(&search.filename)),
         )
     });
 
@@ -362,6 +362,22 @@ mod tests {
 
         assert_eq!(albums.len(), 2);
         assert_ne!(albums[0].username, albums[1].username);
+    }
+
+    #[test]
+    fn medium_folders_merge_into_their_release() {
+        let responses = vec![
+            response("peer", "Ed Sheeran - ÷/CD1", &PLAIN_TRACKS[..4]),
+            response("peer", "Ed Sheeran - ÷/CD2", &PLAIN_TRACKS[4..]),
+        ];
+
+        let albums = ranked(&responses, "÷", &PLAIN_TRACKS);
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].album_title, "Ed Sheeran - ÷");
+        assert_eq!(albums[0].album_path, "/music/Ed Sheeran - ÷");
+        assert_eq!(albums[0].track_count, PLAIN_TRACKS.len());
+        assert_eq!(albums[0].file_count, PLAIN_TRACKS.len());
     }
 
     #[test]

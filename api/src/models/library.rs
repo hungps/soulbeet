@@ -21,6 +21,7 @@ pub struct LibraryReleaseRow {
     pub country: Option<String>,
     pub year: Option<i64>,
     pub mb_album_id: Option<String>,
+    pub mb_release_group_id: Option<String>,
     pub release_path: String,
     pub track_count: i64,
     pub matched_track_count: i64,
@@ -91,6 +92,10 @@ impl LibraryReleaseRow {
             country: self.country.clone(),
             year: self.year.map(|value| value as i32),
             mbid: self.mb_album_id.clone().filter(|value| !value.is_empty()),
+            mb_release_group_id: self
+                .mb_release_group_id
+                .clone()
+                .filter(|value| !value.is_empty()),
             path: self.release_path.clone(),
             track_count: self.track_count.max(0) as u32,
             matched_track_count: self.matched_track_count.max(0) as u32,
@@ -185,9 +190,10 @@ impl LibraryReleaseRow {
             sqlx::query(
                 "INSERT INTO library_releases
                     (id, folder_id, folder_path, album, album_artist, album_key, album_artist_key,
-                     album_disambig, media, country, year, mb_album_id, release_path, track_count,
-                     matched_track_count, expected_track_count, total_size, scanned_at, ignored)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                     album_disambig, media, country, year, mb_album_id, mb_release_group_id,
+                     release_path, track_count, matched_track_count, expected_track_count,
+                     total_size, scanned_at, ignored)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
             )
             .bind(&release_id)
             .bind(folder_id)
@@ -201,6 +207,7 @@ impl LibraryReleaseRow {
             .bind(&release.country)
             .bind(release.year.map(|year| year as i64))
             .bind(&release.mb_album_id)
+            .bind(&release.mb_release_group_id)
             .bind(&release_path)
             .bind(release.tracks.len() as i64)
             .bind(matched)
@@ -648,6 +655,7 @@ mod tests {
             country: None,
             year: None,
             mb_album_id: None,
+            mb_release_group_id: None,
             release_path: "/music/Artist/Album".to_string(),
             track_count: 2,
             matched_track_count: matched,
