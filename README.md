@@ -10,6 +10,7 @@
 > - Able to pick specific album release
 > - Download queue
 > - Play downloaded track
+> - Play track preview thanks to [Deezer](https://www.deezer.com/)
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/hungps/soulbeet)](https://hub.docker.com/r/hungps/soulbeet)
 [![Docker Image Size](https://img.shields.io/docker/image-size/hungps/soulbeet)](https://hub.docker.com/r/hungps/soulbeet/tags)
