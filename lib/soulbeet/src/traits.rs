@@ -81,6 +81,9 @@ pub enum ImportMode {
     Singleton,
 }
 
+/// The fields one file is imported with, as the user mapped it.
+pub type MappedFields = Vec<(std::path::PathBuf, Vec<(String, String)>)>;
+
 /// How the importer decides on a match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverChoice {
@@ -90,6 +93,12 @@ pub enum DriverChoice {
     AsIs,
     /// Apply what `data_source` returns for `id`, however close it is.
     Pick { data_source: String, id: String },
+    /// No lookup; each file is imported with the fields the caller mapped it
+    /// to, and files without fields are left alone. Kept as `Arc` so the
+    /// choice stays small to clone and compare.
+    Mapped {
+        fields: std::sync::Arc<MappedFields>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

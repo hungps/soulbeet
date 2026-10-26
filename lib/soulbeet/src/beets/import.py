@@ -7,6 +7,7 @@
 #   auto            decide as `beet import -q` does, recording each task's candidates
 #   asis            import with the files' own tags (-A); refused when one lacks them
 #   pick SOURCE ID  apply what SOURCE returns for ID (-S ID), whatever its distance
+#   mapped MAPFILE  import as-is, with the fields MAPFILE gives each file
 #
 # REPORT gets {"tasks": [...], "pick_missing": bool, "refused": str or null},
 # also when beets fails. Tasks are recorded in auto mode only. stdout carries
@@ -53,6 +54,7 @@ if not hooked:
 
 import beets.ui
 from beets import config
+from beets.plugins import BeetsPlugin
 from beets.autotag.hooks import AlbumMatch
 from beets.autotag.match import Recommendation
 from beets.importer import Action
@@ -233,6 +235,44 @@ class AsIsSession(Session):
         super().run()
 
 
+class MappedFiles(BeetsPlugin):
+    """Sets each file's mapped fields before beets imports it.
+
+    A file the mapping does not cover is taken out of its import task, so it is
+    left where it is instead of being filed under its own (wrong) tags.
+    """
+
+    def __init__(self, mapping):
+        super().__init__("soulbeet-map")
+        self.by_path = mapping
+        # A path that differs only by how it was resolved still matches.
+        self.by_name = {}
+        for path, fields in mapping.items():
+            name = os.path.basename(path)
+            self.by_name[name] = None if name in self.by_name else fields
+        self.register_listener("import_task_created", self.apply)
+
+    def fields_for(self, path):
+        text = path_text(path)
+        fields = self.by_path.get(text)
+        if fields is None:
+            fields = self.by_name.get(os.path.basename(text))
+        return fields
+
+    def apply(self, session=None, task=None):
+        kept = []
+        for item in task.items:
+            fields = self.fields_for(item.path)
+            if fields is None:
+                continue
+            for key, value in fields.items():
+                if str(value).strip():
+                    setattr(item, key, value)
+            kept.append(item)
+        task.items = kept
+        return None
+
+
 def parse(argv):
     """(report path, session class, beet args) from the command line."""
     if "--" not in argv[1:]:
@@ -246,6 +286,10 @@ def parse(argv):
     if len(choice) == 3 and choice[0] == "pick":
         PickSession.source, PickSession.wanted = choice[1], choice[2]
         return report_path, PickSession, [*beet_args, "-S", choice[2]]
+    if len(choice) == 2 and choice[0] == "mapped":
+        with open(choice[1], encoding="utf-8") as f:
+            MappedFiles(json.load(f))
+        return report_path, Session, [*beet_args, "-A"]
     sys.exit(USAGE)
 
 

@@ -20,6 +20,6 @@ pub use plex::{PlexClient, PlexClientBuilder};
 pub use services::{Services, ServicesBuilder};
 pub use traits::{
     CandidateGenerator, DownloadBackend, DriverChoice, FallbackMetadataProvider, ImportMode,
-    ImportOutcome, ImportResult, MediaServer, MetadataProvider, MusicImporter, PlaylistSpec,
-    ScrobbleProvider, SkipReason, TaskCount, TimeoutKind,
+    ImportOutcome, ImportResult, MappedFields, MediaServer, MetadataProvider, MusicImporter,
+    PlaylistSpec, ScrobbleProvider, SkipReason, TaskCount, TimeoutKind,
 };

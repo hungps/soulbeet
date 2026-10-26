@@ -251,8 +251,10 @@ pub async fn apply_download_tagging(
         let username = auth.0.username.clone();
         let tracks = request.tracks;
         let (tx, _) = get_or_create_user_channel(&username).await;
+        let sources = job.sources.clone();
+        let mode = job.mode;
         tokio::spawn(run_download_tagging(
-            request_id, target, folder_id, user_id, username, owner, tracks, tx,
+            request_id, target, sources, mode, folder_id, user_id, username, owner, tracks, tx,
         ));
 
         Ok(LibraryTagApplyResult {
@@ -273,6 +275,8 @@ pub async fn apply_download_tagging(
 async fn run_download_tagging(
     request_id: String,
     target: PathBuf,
+    sources: Vec<PathBuf>,
+    mode: soulbeet::ImportMode,
     folder_id: Option<String>,
     user_id: String,
     username: String,
@@ -302,37 +306,71 @@ async fn run_download_tagging(
     }
     broadcast_progress(&tx, started).await;
 
+    // One album import for the whole batch, with each file mapped to the track
+    // the user picked: beets files it like any other import, under its album
+    // layout, and leaves files the mapping does not cover where they are.
+    let fields: soulbeet::MappedFields = tracks
+        .iter()
+        .map(|track| {
+            let values = tag_fields(track)
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect::<Vec<_>>();
+            (PathBuf::from(&track.path), values)
+        })
+        .collect();
+    let imported = match crate::services::music_importer(None).await {
+        Ok(importer) => {
+            let source_paths: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
+            let choice = soulbeet::DriverChoice::Mapped {
+                fields: std::sync::Arc::new(fields),
+            };
+            Some(importer.import(&source_paths, &target, mode, &choice).await)
+        }
+        Err(e) => {
+            warn!("Could not load the beets importer for a force import: {e}");
+            None
+        }
+    };
+    let (state, note) = match imported.as_ref().map(|result| &result.outcome) {
+        Some(soulbeet::ImportOutcome::Imported { .. }) => (DownloadState::Imported, None),
+        Some(outcome @ soulbeet::ImportOutcome::Skipped(_)) => {
+            (DownloadState::ImportSkipped, Some(outcome.to_string()))
+        }
+        Some(outcome) => (DownloadState::Failed(outcome.to_string()), Some(outcome.to_string())),
+        None => (
+            DownloadState::Failed("The beets importer is not available".to_string()),
+            Some("The beets importer is not available".to_string()),
+        ),
+    };
+    let placed = matches!(state, DownloadState::Imported);
+    let tail = imported
+        .map(|result| result.output_tail)
+        .filter(|tail| !tail.is_empty());
+
     for track in &tracks {
-        // beets sets the fields before it places the file, so one import both
-        // moves the download into the library and tags it there.
-        let error = soulbeet::library::import_tagged(
-            &target,
-            Path::new(&track.path),
-            &tag_fields(track),
-        )
-        .await
-        .err()
-        .map(|e| format!("beets import failed: {e}"));
         let template = parent_row(&owner, track.item.as_deref());
-        let progress = match error {
-            Some(error) => {
-                failures += 1;
-                warn!("Force import of '{}' failed: {}", track.path, error);
-                let template = template.cloned().unwrap_or_else(|| placeholder(&track.path));
-                row_progress(&template, DownloadState::Failed(error.clone()), Some(error))
-            }
-            None => {
-                updated += 1;
-                let template = template.cloned().unwrap_or_else(|| placeholder(&track.path));
-                row_progress(&template, DownloadState::Imported, None)
-            }
-        };
+        let template = template
+            .cloned()
+            .unwrap_or_else(|| placeholder(&track.path));
+        let mut progress = row_progress(&template, state.clone(), note.clone());
+        progress.import_output.clone_from(&tail);
+        match state {
+            DownloadState::Imported => updated += 1,
+            _ => failures += 1,
+        }
         let _ = DownloadRequestTrackRow::update_progress(&request_id, &progress).await;
         broadcast_progress(&tx, vec![progress]).await;
     }
 
-    // A run with failures keeps the job, so its rows can still be retried.
-    if failures == 0 {
+    // The job is dropped once every one of its rows was placed; a run that
+    // failed, or that left files unmapped, keeps it for a retry.
+    let applied: HashSet<&str> = tracks
+        .iter()
+        .filter_map(|track| track.item.as_deref())
+        .collect();
+    let whole_job = owner.rows.iter().all(|row| applied.contains(row.item.as_str()));
+    if placed && whole_job {
         let items: Vec<String> = owner.rows.iter().map(|row| row.item.clone()).collect();
         crate::import_queue::forget_retries(&username, &items).await;
     }

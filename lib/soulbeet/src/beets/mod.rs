@@ -134,8 +134,15 @@ fn import_args(
     args
 }
 
-/// Runs import.py, which runs beets' own CLI with `beet_args`.
-fn driver_args(report: &Path, choice: &DriverChoice, beet_args: Vec<OsString>) -> Vec<OsString> {
+/// Runs import.py, which runs beets' own CLI with `beet_args`. `mapping` is
+/// where the caller's per-file fields were written, for
+/// [`DriverChoice::Mapped`].
+fn driver_args(
+    report: &Path,
+    choice: &DriverChoice,
+    mapping: Option<&Path>,
+    beet_args: Vec<OsString>,
+) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["-P".into(), "-c".into(), IMPORT_PY.into(), report.into()];
     match choice {
         DriverChoice::Auto => args.push("auto".into()),
@@ -143,10 +150,30 @@ fn driver_args(report: &Path, choice: &DriverChoice, beet_args: Vec<OsString>) -
         DriverChoice::Pick { data_source, id } => {
             args.extend(["pick".into(), data_source.into(), id.into()])
         }
+        DriverChoice::Mapped { .. } => match mapping {
+            Some(mapping) => args.extend(["mapped".into(), mapping.as_os_str().to_owned()]),
+            None => args.push("asis".into()),
+        },
     }
     args.push("--".into());
     args.extend(beet_args);
     args
+}
+
+/// The per-file fields as import.py reads them: `{"<path>": {"<field>": "…"}}`.
+fn mapping_json(fields: &[(&Path, Vec<(String, String)>)]) -> String {
+    let mut files = serde_json::Map::new();
+    for (path, values) in fields {
+        let mut entry = serde_json::Map::new();
+        for (key, value) in values {
+            entry.insert(key.clone(), serde_json::Value::String(value.clone()));
+        }
+        files.insert(
+            path.to_string_lossy().into_owned(),
+            serde_json::Value::Object(entry),
+        );
+    }
+    serde_json::Value::Object(files).to_string()
 }
 
 fn outcome_kind(outcome: &ImportOutcome) -> &'static str {
@@ -197,9 +224,34 @@ impl MusicImporter for BeetsImporter {
                 return ImportResult::failed(format!("Could not create the beets run files: {e}"))
             }
         };
+        let mapping_file = match choice {
+            DriverChoice::Mapped { fields } => {
+                let file = match TempFile::create("map") {
+                    Ok(file) => file,
+                    Err(e) => {
+                        return ImportResult::failed(format!(
+                            "Could not create the beets mapping file: {e}"
+                        ))
+                    }
+                };
+                let paths: Vec<(&Path, Vec<(String, String)>)> = fields
+                    .iter()
+                    .map(|(path, values)| (path.as_path(), values.clone()))
+                    .collect();
+                if let Err(e) = tokio::fs::write(&file.0, mapping_json(&paths)).await {
+                    return ImportResult::failed(format!(
+                        "Could not write the beets mapping file: {e}"
+                    ));
+                }
+                Some(file)
+            }
+            _ => None,
+        };
         // -A leaves no marker in beets' output.
-        let autotag_off = *choice == DriverChoice::AsIs
-            || self.state().report.as_ref().is_some_and(|r| !r.autotag);
+        let autotag_off = matches!(
+            choice,
+            DriverChoice::AsIs | DriverChoice::Mapped { .. }
+        ) || self.state().report.as_ref().is_some_and(|r| !r.autotag);
 
         info!(
             "beets import into {} ({mode:?}, {choice:?}): {:?}",
@@ -211,7 +263,12 @@ impl MusicImporter for BeetsImporter {
         let beet_args = import_args(s, sources, target, mode, &run_log.0);
         let spec = RunSpec {
             program: python,
-            args: driver_args(&report_file.0, choice, beet_args),
+            args: driver_args(
+                &report_file.0,
+                choice,
+                mapping_file.as_ref().map(|file| file.0.as_path()),
+                beet_args,
+            ),
             limits: s.limits,
         };
         let run = run_beet(spec, &mut |stream, line| classifier.feed(stream, line)).await;
@@ -223,6 +280,7 @@ impl MusicImporter for BeetsImporter {
             }
         };
         drop(run_log);
+        drop(mapping_file);
         let report = read_report(&run.end, &report_file.0).await;
         drop(report_file);
 
@@ -597,6 +655,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_mapped_import_hands_its_mapping_file_to_the_driver() {
+        let args = driver_args(
+            Path::new("/tmp/report.json"),
+            &DriverChoice::Mapped {
+                fields: std::sync::Arc::new(Vec::new()),
+            },
+            Some(Path::new("/tmp/mapping.json")),
+            vec!["import".into()],
+        );
+        let args: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args[4..],
+            [
+                "mapped".to_string(),
+                "/tmp/mapping.json".to_string(),
+                "--".to_string(),
+                "import".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn mapped_fields_become_one_json_object_per_file() {
+        let fields = vec![(
+            Path::new("/dl/X/01.flac"),
+            vec![
+                ("title".to_string(), "A Song".to_string()),
+                ("track".to_string(), "3".to_string()),
+            ],
+        )];
+        let json: serde_json::Value = serde_json::from_str(&mapping_json(&fields)).unwrap();
+        assert_eq!(json["/dl/X/01.flac"]["title"], "A Song");
+        assert_eq!(json["/dl/X/01.flac"]["track"], "3");
     }
 
     #[tokio::test]

@@ -164,7 +164,7 @@ impl Report {
                     message: format!("{data_source} has no {entity} {id}"),
                 };
             }
-            DriverChoice::Pick { .. } | DriverChoice::AsIs => {}
+            DriverChoice::Pick { .. } | DriverChoice::AsIs | DriverChoice::Mapped { .. } => {}
         }
         result
     }
