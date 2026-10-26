@@ -33,6 +33,9 @@ pub use auto_download::{auto_download, AutoDownloadRequest, AutoDownloadResult};
 pub mod requests;
 pub use requests::*;
 
+pub mod tagging;
+pub use tagging::*;
+
 #[cfg(feature = "server")]
 pub mod enqueue;
 #[cfg(feature = "server")]

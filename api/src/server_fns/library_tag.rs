@@ -186,6 +186,216 @@ fn clean_query_name(value: &str) -> String {
     }
 }
 
+/// The files of a tagging preview, each pre-mapped to `tracks`.
+#[cfg(feature = "server")]
+pub(crate) fn tag_files(
+    files: Vec<std::path::PathBuf>,
+    tracks: &[LibraryTagTrack],
+) -> Vec<LibraryTagFile> {
+    files
+        .into_iter()
+        .map(|file| {
+            let (number, title) = soulbeet::library::guess_file_title(&file);
+            LibraryTagFile {
+                path: file.to_string_lossy().to_string(),
+                name: file
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                current_title: title.clone(),
+                track_number: number,
+                selected: best_track_index(&title, number, tracks),
+                item: None,
+            }
+        })
+        .collect()
+}
+
+/// Metadata editions `path`, `artist` and `album` could be tagged with, best
+/// first. `release_mbid` is looked up before searching and, when found, is the
+/// only candidate.
+#[cfg(feature = "server")]
+pub(crate) async fn tag_candidates(
+    user_id: &str,
+    path: &std::path::Path,
+    artist: &str,
+    album: &str,
+    is_track: bool,
+    release_mbid: Option<String>,
+) -> Vec<LibraryTagCandidate> {
+    let Ok(settings) = UserSettings::get(user_id).await else {
+        return Vec::new();
+    };
+    let default_provider = settings
+        .default_metadata_provider
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("musicbrainz");
+    let mut provider_ids = vec![default_provider.to_string()];
+    for (id, _) in crate::services::available_metadata_providers().await {
+        if id != default_provider && id != "lastfm" {
+            provider_ids.push(id);
+        }
+    }
+    if default_provider != "lastfm"
+        && settings
+            .lastfm_api_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty())
+    {
+        provider_ids.push("lastfm".to_string());
+    }
+
+    let mut seen_providers = std::collections::HashSet::new();
+    let mut providers = Vec::new();
+    for id in provider_ids {
+        if !seen_providers.insert(id.clone()) {
+            continue;
+        }
+        if let Ok(provider) = metadata_provider(Some(&id), settings.lastfm_api_key.as_deref()).await
+        {
+            providers.push(provider);
+        }
+    }
+    if providers.is_empty() {
+        if let Ok(provider) = metadata_provider(None, settings.lastfm_api_key.as_deref()).await {
+            providers.push(provider);
+        }
+    }
+
+    let artist_filter =
+        (!artist.is_empty() && artist != "Unknown Artist").then_some(artist.to_string());
+    let mut variants: Vec<(Option<String>, String)> = Vec::new();
+    let mut seen_variants = std::collections::HashSet::new();
+    {
+        let mut push = |artist: Option<&str>, query: &str| {
+            let query = clean_query_name(query);
+            let artist = artist
+                .map(clean_query_name)
+                .filter(|value| !value.is_empty() && value != "Unknown Artist");
+            if query.is_empty() {
+                return;
+            }
+            let key = (artist, query);
+            if seen_variants.insert(key.clone()) {
+                variants.push(key);
+            }
+        };
+
+        let dir = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let parent = path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let grandparent = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+
+        push(artist_filter.as_deref(), album);
+        push(None, album);
+        if !is_track {
+            push(Some(parent), dir);
+            push(Some(grandparent), parent);
+            push(None, dir);
+            push(None, parent);
+            push(Some(grandparent), dir);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(mbid) = release_mbid {
+        for provider in &providers {
+            if let Ok(album) = provider.get_album(&mbid).await {
+                candidates.push(candidate_from_album(&album));
+                break;
+            }
+        }
+    }
+    for provider in providers {
+        if !candidates.is_empty() {
+            break;
+        }
+        for (artist_filter, query) in &variants {
+            if is_track {
+                let results = provider
+                    .search_tracks(artist_filter.as_deref(), query, 8)
+                    .await
+                    .unwrap_or_default();
+                for result in results {
+                    if let SearchResult::Track(track) = result {
+                        candidates.push(candidate_from_track(&track));
+                    }
+                }
+            } else {
+                let results = provider
+                    .search_albums(
+                        artist_filter.as_deref(),
+                        query,
+                        &SearchFilters::default(),
+                        8,
+                    )
+                    .await
+                    .unwrap_or_default();
+                let mut editions = Vec::new();
+                for result in results {
+                    match result {
+                        SearchResult::Album(album) => editions.push(album),
+                        SearchResult::AlbumGroup(group) => editions.extend(group.editions),
+                        SearchResult::Track(_) => {}
+                    }
+                    if editions.len() >= 6 {
+                        break;
+                    }
+                }
+                for edition in editions.into_iter().take(4) {
+                    match provider.get_album(&edition.id).await {
+                        Ok(album) => candidates.push(candidate_from_album(&album)),
+                        Err(e) => {
+                            dioxus::logger::tracing::info!(
+                                "Tag preview could not load album {}: {}",
+                                edition.id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            if !candidates.is_empty() {
+                break;
+            }
+        }
+        if !candidates.is_empty() {
+            break;
+        }
+    }
+
+    let mut seen_candidates = std::collections::HashSet::new();
+    candidates.retain(|candidate| seen_candidates.insert(candidate.release_id.clone()));
+
+    if candidates.is_empty() {
+        dioxus::logger::tracing::info!(
+            "Tag preview found no metadata candidates for '{}' / '{}' at {} (queries: {:?})",
+            artist,
+            album,
+            path.display(),
+            variants
+                .iter()
+                .map(|(artist, query)| (artist.clone(), query.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    candidates
+}
+
 #[post("/api/library/tag/preview", auth: AuthSession)]
 pub async fn preview_library_tagging(
     request: LibraryTagPreviewRequest,
@@ -223,176 +433,16 @@ pub async fn preview_library_tagging(
             )
         };
 
-        let settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;
-        let default_provider = settings
-            .default_metadata_provider
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .unwrap_or("musicbrainz");
-        let mut provider_ids = vec![default_provider.to_string()];
-        for (id, _) in crate::services::available_metadata_providers().await {
-            if id != default_provider && id != "lastfm" {
-                provider_ids.push(id);
-            }
-        }
-        if default_provider != "lastfm"
-            && settings
-                .lastfm_api_key
-                .as_deref()
-                .is_some_and(|key| !key.is_empty())
-        {
-            provider_ids.push("lastfm".to_string());
-        }
-
-        let mut seen_providers = std::collections::HashSet::new();
-        let mut providers = Vec::new();
-        for id in provider_ids {
-            if !seen_providers.insert(id.clone()) {
-                continue;
-            }
-            if let Ok(provider) =
-                metadata_provider(Some(&id), settings.lastfm_api_key.as_deref()).await
-            {
-                providers.push(provider);
-            }
-        }
-        if providers.is_empty() {
-            providers.push(
-                metadata_provider(None, settings.lastfm_api_key.as_deref())
-                    .await
-                    .map_err(server_error)?,
-            );
-        }
-
-        let artist_filter =
-            (!artist.is_empty() && artist != "Unknown Artist").then_some(artist.as_str());
         let path = std::path::Path::new(&request.path);
-        let mut variants: Vec<(Option<String>, String)> = Vec::new();
-        let mut seen_variants = std::collections::HashSet::new();
-        {
-            let mut push = |artist: Option<&str>, query: &str| {
-                let query = clean_query_name(query);
-                let artist = artist
-                    .map(clean_query_name)
-                    .filter(|value| !value.is_empty() && value != "Unknown Artist");
-                if query.is_empty() {
-                    return;
-                }
-                let key = (artist, query);
-                if seen_variants.insert(key.clone()) {
-                    variants.push(key);
-                }
-            };
-
-            let dir = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            let parent = path
-                .parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            let grandparent = path
-                .parent()
-                .and_then(|parent| parent.parent())
-                .and_then(|parent| parent.file_name())
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-
-            push(artist_filter, &album);
-            push(None, &album);
-            if !request.is_track {
-                push(Some(parent), dir);
-                push(Some(grandparent), parent);
-                push(None, dir);
-                push(None, parent);
-                push(Some(grandparent), dir);
-            }
-        }
-
-        let mut candidates = Vec::new();
-        if let Some(mbid) = release_mbid {
-            for provider in &providers {
-                if let Ok(album) = provider.get_album(&mbid).await {
-                    candidates.push(candidate_from_album(&album));
-                    break;
-                }
-            }
-        }
-        for provider in providers {
-            if !candidates.is_empty() {
-                break;
-            }
-            for (artist_filter, query) in &variants {
-                if request.is_track {
-                    let results = provider
-                        .search_tracks(artist_filter.as_deref(), query, 8)
-                        .await
-                        .unwrap_or_default();
-                    for result in results {
-                        if let SearchResult::Track(track) = result {
-                            candidates.push(candidate_from_track(&track));
-                        }
-                    }
-                } else {
-                    let results = provider
-                        .search_albums(
-                            artist_filter.as_deref(),
-                            query,
-                            &SearchFilters::default(),
-                            8,
-                        )
-                        .await
-                        .unwrap_or_default();
-                    let mut editions = Vec::new();
-                    for result in results {
-                        match result {
-                            SearchResult::Album(album) => editions.push(album),
-                            SearchResult::AlbumGroup(group) => editions.extend(group.editions),
-                            SearchResult::Track(_) => {}
-                        }
-                        if editions.len() >= 6 {
-                            break;
-                        }
-                    }
-                    for edition in editions.into_iter().take(4) {
-                        match provider.get_album(&edition.id).await {
-                            Ok(album) => candidates.push(candidate_from_album(&album)),
-                            Err(e) => {
-                                dioxus::logger::tracing::info!(
-                                    "Tag preview could not load album {}: {}",
-                                    edition.id,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-                if !candidates.is_empty() {
-                    break;
-                }
-            }
-            if !candidates.is_empty() {
-                break;
-            }
-        }
-
-        let mut seen_candidates = std::collections::HashSet::new();
-        candidates.retain(|candidate| seen_candidates.insert(candidate.release_id.clone()));
-
-        if candidates.is_empty() {
-            dioxus::logger::tracing::info!(
-                "Tag preview found no metadata candidates for '{}' / '{}' at {} (queries: {:?})",
-                artist,
-                album,
-                request.path,
-                variants
-                    .iter()
-                    .map(|(artist, query)| (artist.clone(), query.clone()))
-                    .collect::<Vec<_>>()
-            );
-        }
+        let candidates = tag_candidates(
+            &auth.0.sub,
+            path,
+            &artist,
+            &album,
+            request.is_track,
+            release_mbid,
+        )
+        .await;
 
         let indexed_files = if request.is_track {
             None
@@ -424,23 +474,7 @@ pub async fn preview_library_tagging(
             .get(selected_candidate)
             .map(|candidate| candidate.tracks.as_slice())
             .unwrap_or(&[]);
-        let files = files
-            .into_iter()
-            .map(|file| {
-                let (number, title) = soulbeet::library::guess_file_title(&file);
-                LibraryTagFile {
-                    path: file.to_string_lossy().to_string(),
-                    name: file
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    current_title: title.clone(),
-                    track_number: number,
-                    selected: best_track_index(&title, number, candidate_tracks),
-                }
-            })
-            .collect();
+        let files = tag_files(files, candidate_tracks);
 
         Ok(LibraryTagPreview {
             candidates,
@@ -590,6 +624,54 @@ fn tag_progress(
     }
 }
 
+/// Registers `path` in beets when it is not known yet, then writes `track`'s
+/// fields onto it, in place.
+#[cfg(feature = "server")]
+pub(crate) async fn tag_library_file(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    track: &shared::library::LibraryTagApplyTrack,
+    known: &std::collections::HashSet<std::path::PathBuf>,
+) -> Result<(), String> {
+    let path_key = tokio::fs::canonicalize(path)
+        .await
+        .unwrap_or_else(|_| path.to_path_buf());
+    if !known.contains(&path_key) {
+        soulbeet::library::import_as_is(root, path)
+            .await
+            .map_err(|e| format!("beets import failed: {e}"))?;
+    }
+    let fields = vec![
+        ("title", track.title.clone()),
+        ("artist", track.artist.clone()),
+        ("album", track.album.clone()),
+        ("albumartist", track.album_artist.clone()),
+        (
+            "year",
+            track.year.map(|year| year.to_string()).unwrap_or_default(),
+        ),
+        (
+            "track",
+            track
+                .track_number
+                .map(|number| number.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "disc",
+            track
+                .disc_number
+                .map(|number| number.to_string())
+                .unwrap_or_default(),
+        ),
+        ("mb_trackid", track.mb_track_id.clone().unwrap_or_default()),
+        ("mb_albumid", track.mb_album_id.clone().unwrap_or_default()),
+    ];
+    soulbeet::library::modify_track(root, path, &fields)
+        .await
+        .map_err(|e| format!("beets modify failed: {e}"))
+}
+
 #[cfg(feature = "server")]
 async fn run_tagging_job(
     request: DownloadRequestRow,
@@ -629,54 +711,7 @@ async fn run_tagging_job(
             .await;
             continue;
         }
-        let path_key = tokio::fs::canonicalize(path)
-            .await
-            .unwrap_or_else(|_| path.to_path_buf());
-        if !known.contains(&path_key) {
-            if let Err(e) = soulbeet::library::import_as_is(&root, path).await {
-                failures += 1;
-                let error = format!("beets import failed: {e}");
-                broadcast_progress(
-                    &tx,
-                    vec![tag_progress(
-                        &request,
-                        &track.path,
-                        size,
-                        DownloadState::Failed(error.clone()),
-                        Some(error),
-                    )],
-                )
-                .await;
-                continue;
-            }
-        }
-        let fields = vec![
-            ("title", track.title.clone()),
-            ("artist", track.artist.clone()),
-            ("album", track.album.clone()),
-            ("albumartist", track.album_artist.clone()),
-            (
-                "year",
-                track.year.map(|year| year.to_string()).unwrap_or_default(),
-            ),
-            (
-                "track",
-                track
-                    .track_number
-                    .map(|number| number.to_string())
-                    .unwrap_or_default(),
-            ),
-            (
-                "disc",
-                track
-                    .disc_number
-                    .map(|number| number.to_string())
-                    .unwrap_or_default(),
-            ),
-            ("mb_trackid", track.mb_track_id.clone().unwrap_or_default()),
-            ("mb_albumid", track.mb_album_id.clone().unwrap_or_default()),
-        ];
-        match soulbeet::library::modify_track(&root, path, &fields).await {
+        match tag_library_file(&root, path, track, &known).await {
             Ok(()) => {
                 updated += 1;
                 broadcast_progress(
@@ -691,10 +726,9 @@ async fn run_tagging_job(
                 )
                 .await;
             }
-            Err(e) => {
+            Err(error) => {
                 failures += 1;
-                let error = format!("beets modify failed: {e}");
-                warn!("Tagging failed for '{}': {}", track.path, e);
+                warn!("Tagging failed for '{}': {}", track.path, error);
                 broadcast_progress(
                     &tx,
                     vec![tag_progress(

@@ -10,11 +10,6 @@ use super::picker::{ChoicesLoader, MatchPicker};
 use super::Failure;
 use crate::{request_audio_url, use_player, Disclosure, PlayerTrack, QualityBadge, RowAction};
 
-/// A track's length as `M:SS`.
-fn format_duration(seconds: u32) -> String {
-    format!("{}:{:02}", seconds / 60, seconds % 60)
-}
-
 /// How a row's state is shown: badge text and tooltip, plus row and badge classes.
 #[derive(Debug, PartialEq)]
 struct Badge {
@@ -130,6 +125,17 @@ pub(super) fn shows_choices(row: &DownloadProgress) -> bool {
     shows_retry(row) && row.can_choose_import
 }
 
+/// Whether the row is still moving bytes, and so shows how fast and how far.
+fn shows_percent(state: &DownloadState) -> bool {
+    matches!(
+        state,
+        DownloadState::Queued
+            | DownloadState::InProgress
+            | DownloadState::ImportQueued(_)
+            | DownloadState::Importing
+    )
+}
+
 fn preview_track(
     file: &DownloadProgress,
     display_name: &str,
@@ -169,6 +175,8 @@ pub(super) fn ImportActions(
     #[props(default)] force: DownloadReleaseInfo,
     on_import: ImportHandler,
     on_load_choices: ChoicesLoader,
+    /// Opens the library tagging dialog for this row's kept files.
+    on_tag: EventHandler<(String, DownloadReleaseInfo)>,
 ) -> Element {
     // Set while an import request is in flight, and kept after an accepted one
     // until the row changes state, so a second click cannot race the first.
@@ -180,6 +188,7 @@ pub(super) fn ImportActions(
         picker_notice.set(None);
     }));
     let picker_item = item.clone();
+    let tag_item = item.clone();
     let import = use_callback(move |choice: ImportChoice| {
         if busy() {
             return;
@@ -197,9 +206,9 @@ pub(super) fn ImportActions(
         });
     });
 
-    let forced = force.has_force_target().then(|| ImportChoice::Force {
-        release_mbid: force.release_mbid.clone(),
-        recording_mbid: force.recording_mbid.clone(),
+    let forced = force.has_force_target().then(|| {
+        let force = force.clone();
+        move || on_tag.call((tag_item.clone(), force.clone()))
     });
 
     rsx! {
@@ -208,11 +217,11 @@ pub(super) fn ImportActions(
             if can_choose {
                 RowAction { busy: busy(), onclick: move |_| import.call(ImportChoice::AsIs), "Import as-is" }
             }
-            if let Some(choice) = forced {
+            if let Some(open) = forced {
                 RowAction {
                     busy: busy(),
-                    title: "Import using the release or track you selected when searching, instead of beets' matches",
-                    onclick: move |_| import.call(choice.clone()),
+                    title: "Choose the release and track mapping, then copy the files into the library",
+                    onclick: move |_| open(),
                     "Force import"
                 }
             }
@@ -245,6 +254,7 @@ pub fn DownloadItem(
     on_clear: EventHandler<(String, String)>,
     on_import: ImportHandler,
     on_load_choices: ChoicesLoader,
+    on_tag: EventHandler<(String, DownloadReleaseInfo)>,
 ) -> Element {
     let item = file.item.clone();
     let state = &file.state;
@@ -277,59 +287,32 @@ pub fn DownloadItem(
         .as_ref()
         .map(|track| track.title.clone())
         .unwrap_or_else(|| display_name.clone());
-    let file_name_differs = title != display_name;
+    let is_kept = shows_retry(&file);
     let is_tagged = matches!(state, DownloadState::Imported);
-    let show_percent = matches!(
-        state,
-        DownloadState::Queued
-            | DownloadState::InProgress
-            | DownloadState::ImportQueued(_)
-            | DownloadState::Importing
-    );
+    let current_path = file
+        .local_path
+        .as_ref()
+        .filter(|_| is_kept)
+        .map(|kept| format!("Kept in {kept}/{display_name}"));
+    let rate = {
+        let speed = (matches!(state, DownloadState::InProgress) && file.speed > 0.0)
+            .then(|| format!("{}/s", format_size(file.speed as u64)));
+        let percent = shows_percent(state).then(|| format!("{percent}%"));
+        [speed, percent]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
     let clear_item = item.clone();
 
     rsx! {
-      div { class: "bg-white/5 border {border_class} p-4 rounded-lg hover:border-beet-accent/50 transition-colors group",
-        div { class: "flex items-start justify-between gap-2",
-          div { class: "min-w-0 flex-1",
-            p { class: "text-sm font-bold text-white break-words", "{title}" }
-            if file_name_differs {
-              p {
-                class: "text-[10px] font-mono text-gray-500 break-all mt-0.5",
-                title: "{file.item}",
-                "{display_name}"
-              }
-            }
-            div { class: "flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-gray-500 mt-1",
-              if let Some(meta) = track.as_ref() {
-                QualityBadge {
-                  quality: meta.quality.clone(),
-                  backend_data: meta.backend_data.clone(),
-                  compact: true,
-                }
-                span { "·" }
-              }
-              span { "{format_size(file.size)}" }
-              if let Some(seconds) = track.as_ref().and_then(|track| track.duration) {
-                span { "· {format_duration(seconds)}" }
-              }
-              if matches!(state, DownloadState::InProgress) && file.speed > 0.0 {
-                span { "· {format_size(file.speed as u64)}/s" }
-              }
-              if show_percent {
-                span { "· {percent}%" }
-              }
-            }
-          }
-          div { class: "flex items-center gap-1.5 shrink-0",
-            span {
-              class: "text-[10px] font-mono {badge_class} px-1.5 py-0.5 rounded uppercase cursor-help",
-              title: "{status_text}",
-              "{badge_text}"
-            }
+      div { class: "bg-white/5 border {border_class} p-3 rounded-lg hover:border-beet-accent/50 transition-colors group",
+        div { class: "flex items-center gap-2 min-w-0",
+          div { class: "w-4 shrink-0 flex items-center justify-center",
             if let Some(preview) = preview {
               button {
-                class: "p-1 rounded-full border border-transparent text-gray-500 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 hover:text-beet-accent hover:border-beet-accent/40 hover:bg-white/5 transition-all cursor-pointer",
+                class: "text-gray-500 hover:text-beet-accent transition-colors cursor-pointer",
                 title: "Preview downloaded file",
                 aria_label: "Preview downloaded file",
                 onclick: move |evt: Event<MouseData>| {
@@ -344,45 +327,76 @@ pub fn DownloadItem(
                 }
               }
             }
-            if is_cancellable {
-              { let file_clone = file.clone();
-              rsx! {
-                button {
-                  class: "text-[10px] font-mono px-1.5 py-0.5 rounded uppercase border border-transparent text-gray-600 opacity-0 group-hover:opacity-100 hover:border-red-500/40 hover:text-red-400 transition-all cursor-pointer",
-                  title: "Cancel download",
-                  onclick: move |evt: Event<MouseData>| {
-                      evt.stop_propagation();
-                      on_cancel.call(file_clone.clone());
-                  },
-                  "\u{00d7}"
-                }
-              }}
-            }
-            if is_tagged {
-              if let Some(request_id) = file.batch_id.clone() {
-                button {
-                  class: "p-1 rounded-full border border-transparent text-gray-500 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 hover:text-white hover:border-white/10 hover:bg-white/5 transition-all cursor-pointer",
-                  title: "Clear from Active Transfers (keeps the library file)",
-                  aria_label: "Clear from Active Transfers",
-                  onclick: move |evt: Event<MouseData>| {
-                      evt.stop_propagation();
-                      on_clear.call((request_id.clone(), clear_item.clone()));
-                  },
-                svg {
-                  class: "w-3.5 h-3.5",
-                  fill: "none",
-                  stroke: "currentColor",
-                  stroke_width: "2",
-                  view_box: "0 0 24 24",
-                  path {
-                    stroke_linecap: "round",
-                    stroke_linejoin: "round",
-                    d: "M6 18L18 6M6 6l12 12",
-                  }
-                }
+          }
+          p { class: "text-sm font-bold text-white break-words min-w-0 flex-1", "{title}" }
+          span {
+            class: "text-[10px] font-mono {badge_class} px-1.5 py-0.5 rounded uppercase cursor-help shrink-0",
+            title: "{status_text}",
+            "{badge_text}"
+          }
+          if is_cancellable {
+            { let file_clone = file.clone();
+            rsx! {
+              button {
+                class: "text-[10px] font-mono px-1.5 py-0.5 rounded uppercase border border-transparent text-gray-600 opacity-0 group-hover:opacity-100 hover:border-red-500/40 hover:text-red-400 transition-all cursor-pointer shrink-0",
+                title: "Cancel download",
+                onclick: move |evt: Event<MouseData>| {
+                    evt.stop_propagation();
+                    on_cancel.call(file_clone.clone());
+                },
+                "\u{00d7}"
+              }
+            }}
+          }
+          if is_tagged {
+            if let Some(request_id) = file.batch_id.clone() {
+              button {
+                class: "p-1 rounded-full border border-transparent text-gray-500 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 hover:text-white hover:border-white/10 hover:bg-white/5 transition-all cursor-pointer shrink-0",
+                title: "Clear from Active Transfers (keeps the library file)",
+                aria_label: "Clear from Active Transfers",
+                onclick: move |evt: Event<MouseData>| {
+                    evt.stop_propagation();
+                    on_clear.call((request_id.clone(), clear_item.clone()));
+                },
+              svg {
+                class: "w-3.5 h-3.5",
+                fill: "none",
+                stroke: "currentColor",
+                stroke_width: "2",
+                view_box: "0 0 24 24",
+                path {
+                  stroke_linecap: "round",
+                  stroke_linejoin: "round",
+                  d: "M6 18L18 6M6 6l12 12",
                 }
               }
+              }
             }
+          }
+        }
+        p {
+          class: "text-[10px] font-mono text-gray-500 truncate mt-0.5",
+          title: "{file.item}",
+          if let Some(current_path) = current_path {
+            "{current_path}"
+          } else {
+            "{display_name}"
+          }
+        }
+        div { class: "flex items-center justify-between gap-2 mt-1 text-[10px] font-mono text-gray-500",
+          div { class: "flex items-center gap-1.5 min-w-0",
+            if let Some(meta) = track.as_ref() {
+              QualityBadge {
+                quality: meta.quality.clone(),
+                backend_data: meta.backend_data.clone(),
+                compact: true,
+              }
+              span { "·" }
+            }
+            span { class: "truncate", "{format_size(file.size)}" }
+          }
+          if !rate.is_empty() {
+            span { class: "shrink-0", "{rate}" }
           }
         }
         if matches!(state, DownloadState::InProgress | DownloadState::Importing) {
@@ -393,24 +407,24 @@ pub fn DownloadItem(
             }
           }
         } else if matches!(state, DownloadState::Queued) {
-          div { class: "h-1 w-full bg-gray-800 rounded-full mt-2" }
+          div { class: "h-2 w-full bg-gray-800 rounded-full mt-2" }
         }
         if let DownloadState::ImportQueued(n) = state {
           div { class: "text-xs text-gray-300 font-mono mt-2", "{waiting_text(*n)}" }
         }
-        // The only element holding the reason: e2e matches it by text.
         if let Some((note_class, note)) = note {
+          if is_kept {
+            div { class: "border-t border-white/10 mt-2" }
+          }
+          // The only element holding the reason: e2e matches it by text.
           div { class: "text-xs {note_class} mt-1 break-words", "{note}" }
-        }
-        if let (true, Some(kept)) = (file.retryable, &file.local_path) {
-          div { class: "text-xs text-gray-500 font-mono mt-1 break-all", "Kept in {kept}" }
         }
         if let (Some(_), Some(tail)) = (note, &file.import_output) {
           Disclosure { class: "mt-2", label: "beets output",
             pre { class: "mt-1 max-h-48 overflow-y-auto text-xs font-mono text-gray-400 whitespace-pre-wrap break-all", "{tail}" }
           }
         }
-        if show_import_actions && shows_retry(&file) {
+        if show_import_actions && is_kept {
           ImportActions {
             item: item.clone(),
             state: file.state.clone(),
@@ -418,6 +432,7 @@ pub fn DownloadItem(
             force: release.clone(),
             on_import,
             on_load_choices,
+            on_tag,
           }
         }
         if matches!(state, DownloadState::Importing) {
@@ -474,14 +489,6 @@ mod tests {
                 .with_state(state)
                 .with_import_details(kept.map(str::to_string), None)
         }
-    }
-
-    #[test]
-    fn duration_reads_as_minutes_and_seconds() {
-        assert_eq!(format_duration(0), "0:00");
-        assert_eq!(format_duration(9), "0:09");
-        assert_eq!(format_duration(176), "2:56");
-        assert_eq!(format_duration(3_600), "60:00");
     }
 
     #[test]

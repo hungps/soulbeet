@@ -210,6 +210,20 @@ impl ImportQueue {
         Ok(())
     }
 
+    /// The job the server keeps for `item`, left kept for a retry.
+    pub async fn kept_job(&self, username: &str, item: &str) -> Option<ImportJob> {
+        match self.shared.retries.peek(username, item) {
+            Some(job) => Some(Arc::unwrap_or_clone(job)),
+            None => Some(
+                self.shared
+                    .deps
+                    .load_retry(username, item)
+                    .await?
+                    .into_job(username, None),
+            ),
+        }
+    }
+
     /// What the kept job of `item` can pick from, leaving it kept.
     pub async fn import_choices(
         &self,
@@ -248,6 +262,10 @@ pub async fn retry_import_for(
 
 pub async fn import_choices_for(username: &str, item: &str) -> Result<MatchChoices, Refusal> {
     IMPORT_QUEUE.import_choices(username, item).await
+}
+
+pub async fn kept_job_for(username: &str, item: &str) -> Option<ImportJob> {
+    IMPORT_QUEUE.kept_job(username, item).await
 }
 
 pub async fn forget_retries(username: &str, items: &[String]) {

@@ -187,10 +187,11 @@ impl Player {
         let mut error = self.error;
         let mut playing = self.playing;
         let track = self.track;
+        let target = audio.clone();
         let on_error = Closure::<dyn FnMut()>::new(move || {
             if track.peek().is_some() {
                 playing.set(false);
-                error.set(Some("Could not play this file".to_string()));
+                error.set(Some(playback_error(&target)));
             }
         });
         let _ = audio.add_event_listener_with_callback("error", on_error.as_ref().unchecked_ref());
@@ -207,6 +208,18 @@ impl Player {
                 let _ = parent.remove_child(&audio);
             }
         }
+    }
+}
+
+/// Why a media element reported an error, as far as the browser says.
+fn playback_error(audio: &HtmlAudioElement) -> String {
+    match audio.error().map(|error| error.code()) {
+        // MEDIA_ERR_SRC_NOT_SUPPORTED: the server's answer could not be
+        // decoded, which for a streamed file means it never got the bytes.
+        Some(4) => "This file could not be loaded. It may have been moved or renamed.".to_string(),
+        Some(3) => "This audio format cannot be played in this browser.".to_string(),
+        Some(2) => "The server could not send this file.".to_string(),
+        _ => "Could not play this file".to_string(),
     }
 }
 
@@ -232,8 +245,7 @@ pub fn use_player() -> Player {
     use_context()
 }
 
-pub fn request_audio_url(request_id: &str, item: &str) -> String {
-    format!(
+pub fn request_audio_url(request_id: &str, item: &str) -> String {    format!(
         "/api/audio/request?request={}&item={}",
         url_encode(request_id),
         url_encode(item)

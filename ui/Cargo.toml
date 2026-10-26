@@ -15,6 +15,7 @@ web-sys = { version = "0.3.91", features = [
     "HtmlElement",
     "HtmlMediaElement",
     "Location",
+    "MediaError",
     "Node",
     "Storage",
     "Window",

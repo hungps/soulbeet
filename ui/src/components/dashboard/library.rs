@@ -255,7 +255,7 @@ fn open_search(artist: &str, album: &str, release_mbid: Option<&str>, search_typ
     }
 }
 
-fn title_overlap(left: &str, right: &str) -> f64 {
+pub(crate) fn title_overlap(left: &str, right: &str) -> f64 {
     let left: HashSet<&str> = left.split_whitespace().collect();
     let right: HashSet<&str> = right.split_whitespace().collect();
     if left.is_empty() || right.is_empty() {
@@ -264,7 +264,7 @@ fn title_overlap(left: &str, right: &str) -> f64 {
     left.intersection(&right).count() as f64 / left.union(&right).count() as f64
 }
 
-fn suggest_track(
+pub(crate) fn suggest_track(
     file_title: &str,
     file_number: Option<u32>,
     tracks: &[LibraryTagTrack],
@@ -979,6 +979,7 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
                     year: track.year,
                     mb_track_id: track.mb_track_id.clone(),
                     mb_album_id: track.mb_album_id.clone(),
+                    item: None,
                 })
             })
             .collect();

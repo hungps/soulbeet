@@ -504,6 +504,26 @@ pub enum ImportChoice {
     },
 }
 
+/// Asks what a kept download could be tagged with, for the download row
+/// `item`. `release_mbid` is the edition picked in search, offered first.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DownloadTagPreviewRequest {
+    pub item: String,
+    #[serde(default)]
+    pub release_mbid: Option<String>,
+}
+
+/// Copies the kept files of a download into the library, tagged the way the
+/// user mapped them.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DownloadTagApplyRequest {
+    /// The download row whose kept job holds the files.
+    pub item: String,
+    /// One entry per file to place in the library; `path` is the file that
+    /// currently sits in the download folder.
+    pub tracks: Vec<crate::library::LibraryTagApplyTrack>,
+}
+
 /// What the server still keeps for a row after it refused a retry or a
 /// matches request. A refusal carries it as its details, so the row offers
 /// only what the server can still do.

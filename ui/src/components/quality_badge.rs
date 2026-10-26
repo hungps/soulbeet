@@ -36,14 +36,10 @@ fn quality_label(
     ) {
         match (bit_depth, sample_rate) {
             (Some(depth), Some(rate)) => {
-                format!(
-                    "{} {depth}-Bit/{} kHz",
-                    quality.to_uppercase(),
-                    format_khz(rate)
-                )
+                format!("{} {depth}/{}", quality.to_uppercase(), format_khz(rate))
             }
-            (Some(depth), None) => format!("{} {depth}-Bit", quality.to_uppercase()),
-            (None, Some(rate)) => format!("{} {} kHz", quality.to_uppercase(), format_khz(rate)),
+            (Some(depth), None) => format!("{} {depth}", quality.to_uppercase()),
+            (None, Some(rate)) => format!("{} {}", quality.to_uppercase(), format_khz(rate)),
             _ => quality.to_uppercase(),
         }
     } else if matches!(quality.as_str(), "m4a" | "aac" | "ogg" | "opus" | "wma") {
@@ -123,10 +119,7 @@ mod tests {
     #[test]
     fn flac_shows_bit_depth_and_sample_rate() {
         let data = r#"{"username":"u","filename":"a.flac","size":1,"bitrate":null,"duration":1,"sampleRate":44100,"bitDepth":16,"hasFreeUploadSlot":true,"uploadSpeed":0,"queueLength":0}"#;
-        assert_eq!(
-            quality_label("flac", None, None, None, Some(data)),
-            "FLAC 16-Bit/44.1 kHz"
-        );
+        assert_eq!(quality_label("flac", None, None, None, Some(data)), "FLAC 16/44.1");
         assert_eq!(quality_label("flac", None, None, None, None), "FLAC");
     }
 
@@ -134,11 +127,11 @@ mod tests {
     fn explicit_library_quality_wins_over_search_data() {
         assert_eq!(
             quality_label("flac", None, Some(24), Some(96000), None),
-            "FLAC 24-Bit/96 kHz"
+            "FLAC 24/96"
         );
         assert_eq!(
             quality_label("flac", Some(320), Some(16), Some(44100), None),
-            "FLAC 16-Bit/44.1 kHz"
+            "FLAC 16/44.1"
         );
         assert_eq!(
             quality_label("mp3", Some(320), None, None, None),

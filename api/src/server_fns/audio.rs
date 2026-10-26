@@ -65,7 +65,23 @@ pub async fn stream_request_audio(
             .await
         {
             Ok(Some(track)) => track,
-            Ok(None) => return not_found(),
+            // A request can join a batch another request started; the row then
+            // carries the batch's id, not its own request's.
+            Ok(None) => match DownloadRequestTrackRow::find_by_item(&auth.0.sub, &query.item).await {
+                Ok(Some(track)) => track,
+                Ok(None) => {
+                    tracing::warn!(
+                        "No download row for playback: request {} item {}",
+                        query.request,
+                        query.item
+                    );
+                    return not_found();
+                }
+                Err(error) => {
+                    tracing::warn!("Failed to load download track for playback: {error}");
+                    return internal_error();
+                }
+            },
             Err(error) => {
                 tracing::warn!("Failed to load download track for playback: {error}");
                 return internal_error();
@@ -73,6 +89,11 @@ pub async fn stream_request_audio(
         };
     let root = AppConfig::download_path().await;
     let Some(path) = request_file_path(&track, &root, &auth.0.sub).await else {
+        tracing::warn!(
+            "Could not find the downloaded file for playback: {} under {}",
+            track.item_key,
+            root.display()
+        );
         return not_found();
     };
 
@@ -85,12 +106,24 @@ async fn request_file_path(
     user_id: &str,
 ) -> Option<std::path::PathBuf> {
     if let Some(local_path) = track.local_path.as_deref() {
-        if tokio::fs::metadata(local_path)
+        let kept = std::path::PathBuf::from(local_path);
+        if tokio::fs::metadata(&kept)
             .await
             .map(|metadata| metadata.is_file())
             .unwrap_or(false)
         {
-            return Some(std::path::PathBuf::from(local_path));
+            return Some(kept);
+        }
+        // A kept row points at the folder its files were left in.
+        if let (Some(parent), Some(name)) = (
+            kept.parent().and_then(FsPath::to_str),
+            kept.file_name().and_then(|name| name.to_str()),
+        ) {
+            if let Some(path) =
+                resolve_in_destination(&track.item_key, FsPath::new(parent), name, &HashSet::new())
+            {
+                return Some(path);
+            }
         }
     }
     if let Ok(Some(request)) = DownloadRequestRow::get_for_user(&track.request_id, user_id).await {
@@ -113,13 +146,27 @@ async fn request_file_path(
 async fn serve_file(path: &str, root: &FsPath, headers: &HeaderMap) -> Response {
     let root = match tokio::fs::canonicalize(root).await {
         Ok(root) => root,
-        Err(_) => return not_found(),
+        Err(error) => {
+            tracing::warn!(
+                "Could not resolve the audio root {}: {error}",
+                root.display()
+            );
+            return not_found();
+        }
     };
     let path = match tokio::fs::canonicalize(path).await {
         Ok(path) => path,
-        Err(_) => return not_found(),
+        Err(error) => {
+            tracing::warn!("Could not resolve the audio file {path}: {error}");
+            return not_found();
+        }
     };
     if !path.starts_with(&root) {
+        tracing::warn!(
+            "Refusing to stream {}: it is outside {}",
+            path.display(),
+            root.display()
+        );
         return forbidden();
     }
 

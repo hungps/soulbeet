@@ -322,6 +322,9 @@ pub struct LibraryTagFile {
     pub track_number: Option<u32>,
     #[serde(default)]
     pub selected: Option<usize>,
+    /// The download row this file came from, when it is not in the library yet.
+    #[serde(default)]
+    pub item: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -357,6 +360,9 @@ pub struct LibraryTagApplyTrack {
     pub year: Option<i32>,
     pub mb_track_id: Option<String>,
     pub mb_album_id: Option<String>,
+    /// The download row the file came from, when it was not in the library.
+    #[serde(default)]
+    pub item: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

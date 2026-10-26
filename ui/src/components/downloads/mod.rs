@@ -11,8 +11,10 @@ use shared::download::{
 
 mod item;
 mod picker;
+mod tagging;
 use api::{CancelDownloadRequest, RequestAction};
 use item::{shows_choices, shows_retry, DownloadItem, ImportActions};
+use tagging::DownloadTagDialog;
 
 use crate::{friendly_error, use_auth};
 
@@ -239,37 +241,6 @@ fn release_facts(release: &DownloadReleaseInfo, track_count: Option<u32>) -> Str
         .join(" · ")
 }
 
-fn query_encode(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-fn library_href(
-    request: Option<&DownloadRequestSummary>,
-    label: &str,
-    artist: Option<&str>,
-) -> String {
-    if let Some(mbid) = request
-        .and_then(|request| request.release.release_mbid.as_deref())
-        .filter(|mbid| !mbid.is_empty())
-    {
-        return format!("/dashboard?tab=library&release={}", query_encode(mbid));
-    }
-    let mut href = format!("/dashboard?tab=library&album={}", query_encode(label));
-    if let Some(artist) = artist.filter(|artist| !artist.trim().is_empty()) {
-        href.push_str(&format!("&artist={}", query_encode(artist)));
-    }
-    href
-}
-
 #[component]
 pub fn Downloads(mut props: DownloadsProps) -> Element {
     let auth = use_auth();
@@ -277,6 +248,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
     let mut busy = use_signal(HashSet::<String>::new);
     let mut clearing = use_signal(|| false);
     let mut clearing_failed = use_signal(|| false);
+    let mut tag_item = use_signal::<Option<(String, DownloadReleaseInfo)>>(|| None);
     let mut pending = use_signal::<Vec<PendingRequestSummary>>(Vec::new);
     let mut requests = use_signal::<HashMap<String, DownloadRequestSummary>>(HashMap::new);
     let is_open = props.is_open;
@@ -443,6 +415,9 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
     };
 
     let mut requests_signal = requests;
+    let open_tag = use_callback(move |request: (String, DownloadReleaseInfo)| {
+        tag_item.set(Some(request));
+    });
     let clear_item = move |(request_id, item): (String, String)| {
         spawn(async move {
             if let Err(e) = auth
@@ -670,7 +645,6 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                     .as_ref()
                     .map(|request| release_facts(&request.release, request.track_count))
                     .unwrap_or_default();
-                let library_href = library_href(request.as_ref(), &group.label, group_artist.as_deref());
 
                 rsx! {
                   div { key: "{key}", class: "bg-white/5 border border-white/5 rounded-lg overflow-hidden",
@@ -690,11 +664,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                       div { class: "flex items-start justify-between gap-2",
                         div { class: "min-w-0 flex-grow",
                           div { class: "flex items-start gap-2 min-w-0",
-                            a {
-                              class: "text-sm font-bold text-beet-leaf break-words min-w-0 flex-1 hover:text-white hover:underline decoration-dotted transition-colors",
-                              href: "{library_href}",
-                              title: "Open this release in the library",
-                              onclick: move |evt: MouseEvent| evt.stop_propagation(),
+                            p { class: "text-sm font-bold text-beet-leaf break-words min-w-0 flex-1",
                               "{group.label}"
                             }
                             span {
@@ -896,6 +866,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                             force: release.clone(),
                             on_import: import_again,
                             on_load_choices: load_choices,
+                            on_tag: open_tag,
                           }
                         }
                         for file in group.tracks.iter() {
@@ -916,6 +887,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                                 on_clear: clear_item,
                                 on_import: import_again,
                                 on_load_choices: load_choices,
+                                on_tag: open_tag,
                               }
                             }
                           }
@@ -944,6 +916,15 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
               }
             }
           }
+        }
+      }
+
+      if let Some((item, release)) = tag_item() {
+        DownloadTagDialog {
+          key: "{item}",
+          item: item.clone(),
+          release: release.clone(),
+          on_close: move |_| tag_item.set(None),
         }
       }
     }
