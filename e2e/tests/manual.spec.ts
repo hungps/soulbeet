@@ -20,7 +20,7 @@ test('lists scored sources and downloads a hand-picked track', async ({ context,
   // and the lossless quality details (bit depth / sample rate).
   await expect(page.getByText('Download Options')).toBeVisible();
   await expect(page.getByText('Best match')).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByText('FLAC 16/44.1').first()).toBeVisible();
+  await expect(page.getByText('FLAC 16-Bit/44.1 kHz').first()).toBeVisible();
 
   await page.getByRole('button', { name: 'Select All' }).first().click();
   await page.locator('select[name="dl_folder"]').selectOption({ label: folder.name });

@@ -242,6 +242,7 @@ pub fn DownloadItem(
     #[props(default)]
     track: Option<DownloadRequestTrack>,
     on_cancel: EventHandler<DownloadProgress>,
+    on_clear: EventHandler<(String, String)>,
     on_import: ImportHandler,
     on_load_choices: ChoicesLoader,
 ) -> Element {
@@ -272,14 +273,53 @@ pub fn DownloadItem(
     };
     let player = use_player();
     let preview = preview_track(&file, &display_name, track.as_ref());
+    let title = track
+        .as_ref()
+        .map(|track| track.title.clone())
+        .unwrap_or_else(|| display_name.clone());
+    let file_name_differs = title != display_name;
+    let is_tagged = matches!(state, DownloadState::Imported);
+    let show_percent = matches!(
+        state,
+        DownloadState::Queued
+            | DownloadState::InProgress
+            | DownloadState::ImportQueued(_)
+            | DownloadState::Importing
+    );
+    let clear_item = item.clone();
 
     rsx! {
       div { class: "bg-white/5 border {border_class} p-4 rounded-lg hover:border-beet-accent/50 transition-colors group",
-        div { class: "flex justify-between items-start gap-2 mb-2",
-          div {
-            class: "text-sm font-bold text-white break-words min-w-0 flex-1",
-            title: "{file.item}",
-            "{display_name}"
+        div { class: "flex items-start justify-between gap-2",
+          div { class: "min-w-0 flex-1",
+            p { class: "text-sm font-bold text-white break-words", "{title}" }
+            if file_name_differs {
+              p {
+                class: "text-[10px] font-mono text-gray-500 break-all mt-0.5",
+                title: "{file.item}",
+                "{display_name}"
+              }
+            }
+            div { class: "flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-gray-500 mt-1",
+              if let Some(meta) = track.as_ref() {
+                QualityBadge {
+                  quality: meta.quality.clone(),
+                  backend_data: meta.backend_data.clone(),
+                  compact: true,
+                }
+                span { "·" }
+              }
+              span { "{format_size(file.size)}" }
+              if let Some(seconds) = track.as_ref().and_then(|track| track.duration) {
+                span { "· {format_duration(seconds)}" }
+              }
+              if matches!(state, DownloadState::InProgress) && file.speed > 0.0 {
+                span { "· {format_size(file.speed as u64)}/s" }
+              }
+              if show_percent {
+                span { "· {percent}%" }
+              }
+            }
           }
           div { class: "flex items-center gap-1.5 shrink-0",
             span {
@@ -318,41 +358,35 @@ pub fn DownloadItem(
                 }
               }}
             }
-          }
-        }
-        if let Some(meta) = track.as_ref() {
-          div { class: "text-[11px] text-gray-400 font-mono break-words mb-1",
-            span { class: "text-gray-300", "{meta.artist}" }
-            span { " · {meta.title}" }
-            if !meta.album.is_empty() && meta.album != meta.title {
-              span { class: "text-gray-500", " · {meta.album}" }
-            }
-          }
-        }
-        div { class: "flex justify-between items-center gap-2 text-xs text-gray-400 font-mono mb-1",
-          div { class: "flex items-center gap-1.5 min-w-0 flex-wrap",
-            if let Some(meta) = track.as_ref() {
-              QualityBadge {
-                quality: meta.quality.clone(),
-                backend_data: meta.backend_data.clone(),
-              }
-              if let Some(seconds) = meta.duration {
-                span { class: "text-gray-500", "{format_duration(seconds)}" }
-              }
-            }
-            span {
-              if matches!(state, DownloadState::InProgress) && file.speed > 0.0 {
-                "{format_size(file.speed as u64)}/s"
-              } else {
-                "{format_size(file.size)}"
+            if is_tagged {
+              if let Some(request_id) = file.batch_id.clone() {
+                button {
+                  class: "p-1 rounded-full border border-transparent text-gray-500 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 hover:text-white hover:border-white/10 hover:bg-white/5 transition-all cursor-pointer",
+                  title: "Clear from Active Transfers (keeps the library file)",
+                  aria_label: "Clear from Active Transfers",
+                  onclick: move |evt: Event<MouseData>| {
+                      evt.stop_propagation();
+                      on_clear.call((request_id.clone(), clear_item.clone()));
+                  },
+                svg {
+                  class: "w-3.5 h-3.5",
+                  fill: "none",
+                  stroke: "currentColor",
+                  stroke_width: "2",
+                  view_box: "0 0 24 24",
+                  path {
+                    stroke_linecap: "round",
+                    stroke_linejoin: "round",
+                    d: "M6 18L18 6M6 6l12 12",
+                  }
+                }
+                }
               }
             }
           }
-          span { class: "shrink-0", "{percent}%" }
         }
-        // Progress Bar
         if matches!(state, DownloadState::InProgress | DownloadState::Importing) {
-          div { class: "h-2 w-full bg-gray-800 rounded-full overflow-hidden relative",
+          div { class: "h-2 w-full bg-gray-800 rounded-full overflow-hidden relative mt-2",
             div {
               class: "h-full bg-beet-accent absolute top-0 left-0 transition-[width] duration-300",
               style: "width: {percent}%",

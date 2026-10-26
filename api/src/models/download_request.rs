@@ -437,6 +437,23 @@ impl DownloadRequestRow {
     }
 
     #[cfg(feature = "server")]
+    pub async fn delete_if_empty(id: &str) -> Result<bool, String> {
+        let result = sqlx::query(
+            "DELETE FROM download_requests
+             WHERE id = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM download_request_tracks WHERE request_id = ?
+               )",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&*DB)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[cfg(feature = "server")]
     pub async fn delete_failed(user_id: &str) -> Result<Vec<String>, String> {
         let rows = sqlx::query_as::<_, Self>(
             "SELECT * FROM download_requests
@@ -633,6 +650,17 @@ impl DownloadRequestTrackRow {
         .fetch_optional(&*DB)
         .await
         .map_err(|e| e.to_string())
+    }
+
+    #[cfg(feature = "server")]
+    pub async fn delete(request_id: &str, item_key: &str) -> Result<(), String> {
+        sqlx::query("DELETE FROM download_request_tracks WHERE request_id = ? AND item_key = ?")
+            .bind(request_id)
+            .bind(item_key)
+            .execute(&*DB)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Insert a track if the request does not already hold the same remote file.

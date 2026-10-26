@@ -239,6 +239,37 @@ fn release_facts(release: &DownloadReleaseInfo, track_count: Option<u32>) -> Str
         .join(" · ")
 }
 
+fn query_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn library_href(
+    request: Option<&DownloadRequestSummary>,
+    label: &str,
+    artist: Option<&str>,
+) -> String {
+    if let Some(mbid) = request
+        .and_then(|request| request.release.release_mbid.as_deref())
+        .filter(|mbid| !mbid.is_empty())
+    {
+        return format!("/dashboard?tab=library&release={}", query_encode(mbid));
+    }
+    let mut href = format!("/dashboard?tab=library&album={}", query_encode(label));
+    if let Some(artist) = artist.filter(|artist| !artist.trim().is_empty()) {
+        href.push_str(&format!("&artist={}", query_encode(artist)));
+    }
+    href
+}
+
 #[component]
 pub fn Downloads(mut props: DownloadsProps) -> Element {
     let auth = use_auth();
@@ -407,6 +438,36 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                 if let Some(entry) = map.get_mut(&item_key) {
                     entry.state = DownloadState::Cancelled;
                 }
+            }
+        });
+    };
+
+    let mut requests_signal = requests;
+    let clear_item = move |(request_id, item): (String, String)| {
+        spawn(async move {
+            if let Err(e) = auth
+                .call(api::dismiss_download_track(
+                    request_id.clone(),
+                    item.clone(),
+                ))
+                .await
+            {
+                warn!("Could not clear tagged track: {:?}", e);
+                return;
+            }
+            downloads_signal.write().remove(&item);
+            let empty = {
+                let mut map = requests_signal.write();
+                match map.get_mut(&request_id) {
+                    Some(request) => {
+                        request.tracks.retain(|track| track.item != item);
+                        request.tracks.is_empty()
+                    }
+                    None => false,
+                }
+            };
+            if empty {
+                requests_signal.write().remove(&request_id);
             }
         });
     };
@@ -609,6 +670,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                     .as_ref()
                     .map(|request| release_facts(&request.release, request.track_count))
                     .unwrap_or_default();
+                let library_href = library_href(request.as_ref(), &group.label, group_artist.as_deref());
 
                 rsx! {
                   div { key: "{key}", class: "bg-white/5 border border-white/5 rounded-lg overflow-hidden",
@@ -628,7 +690,13 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                       div { class: "flex items-start justify-between gap-2",
                         div { class: "min-w-0 flex-grow",
                           div { class: "flex items-start gap-2 min-w-0",
-                            h4 { class: "text-sm font-bold text-beet-leaf break-words min-w-0 flex-1", "{group.label}" }
+                            a {
+                              class: "text-sm font-bold text-beet-leaf break-words min-w-0 flex-1 hover:text-white hover:underline decoration-dotted transition-colors",
+                              href: "{library_href}",
+                              title: "Open this release in the library",
+                              onclick: move |evt: MouseEvent| evt.stop_propagation(),
+                              "{group.label}"
+                            }
                             span {
                               class: "text-[9px] font-mono px-1.5 py-0.5 rounded border uppercase shrink-0 {status_class}",
                               "{status_label}"
@@ -845,6 +913,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                                 release: release.clone(),
                                 track,
                                 on_cancel: cancel_download,
+                                on_clear: clear_item,
                                 on_import: import_again,
                                 on_load_choices: load_choices,
                               }

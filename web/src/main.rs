@@ -44,6 +44,13 @@ pub enum Route {
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const MAIN_CSS: Asset = asset!("/assets/tailwind.css");
 
+#[cfg(feature = "web")]
+fn has_untagged(downloads: &HashMap<String, DownloadProgress>) -> bool {
+    downloads
+        .values()
+        .any(|file| !matches!(file.state, DownloadState::Imported))
+}
+
 fn main() {
     #[cfg(feature = "server")]
     {
@@ -144,6 +151,25 @@ fn WebNavbar() -> Element {
     use_context_provider(|| AutoDownloadSignal(auto_download_signal));
 
     #[cfg(feature = "web")]
+    use_future(move || async move {
+        if !auth.is_logged_in() {
+            return;
+        }
+        if let Ok(overview) = auth.call(api::list_download_requests()).await {
+            let active = !overview.pending.is_empty()
+                || overview.requests.iter().any(|request| {
+                    request
+                        .tracks
+                        .iter()
+                        .any(|track| !matches!(track.state, DownloadState::Imported))
+                });
+            if *has_downloads.peek() != active {
+                has_downloads.set(active);
+            }
+        }
+    });
+
+    #[cfg(feature = "web")]
     use_resilient_websocket(
         || api::download_updates_ws(WebSocketOptions::new()),
         move |event: DownloadEvent| match event {
@@ -168,7 +194,7 @@ fn WebNavbar() -> Element {
                         );
                     map.insert(file.item.clone(), file);
                 }
-                let active = !map.is_empty();
+                let active = has_untagged(&map);
                 drop(map);
                 if *has_downloads.peek() != active {
                     has_downloads.set(active);
@@ -184,7 +210,7 @@ fn WebNavbar() -> Element {
                 let mut map = downloads.write();
                 map.remove(&previous_item);
                 map.insert(entry.item.clone(), entry);
-                let active = !map.is_empty();
+                let active = has_untagged(&map);
                 drop(map);
                 if *has_downloads.peek() != active {
                     has_downloads.set(active);
@@ -200,7 +226,17 @@ fn WebNavbar() -> Element {
                     map.remove(&item);
                 }
                 map.retain(|_, file| file.batch_id.as_deref() != Some(request_id.as_str()));
-                let active = !map.is_empty();
+                let active = has_untagged(&map);
+                drop(map);
+                if *has_downloads.peek() != active {
+                    has_downloads.set(active);
+                }
+                download_tick += 1;
+            }
+            DownloadEvent::ItemRemoved { item } => {
+                let mut map = downloads.write();
+                map.remove(&item);
+                let active = has_untagged(&map);
                 drop(map);
                 if *has_downloads.peek() != active {
                     has_downloads.set(active);

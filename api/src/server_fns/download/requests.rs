@@ -50,7 +50,7 @@ use crate::models::download_request::{
 #[cfg(feature = "server")]
 use crate::models::request_queue::LibraryRequestRow;
 #[cfg(feature = "server")]
-use crate::server_fns::server_error;
+use crate::server_fns::{refusal_error, server_error};
 #[cfg(feature = "server")]
 use crate::services::download_backend;
 #[cfg(feature = "server")]
@@ -710,6 +710,37 @@ pub async fn dismiss_failed_download_requests() -> Result<Vec<String>, ServerFnE
         }
     }
     Ok(removed)
+}
+
+#[post("/api/downloads/requests/dismiss-track", auth: AuthSession)]
+pub async fn dismiss_download_track(request_id: String, item: String) -> Result<(), ServerFnError> {
+    let Some(track) = DownloadRequestTrackRow::find_for_request(&request_id, &auth.0.sub, &item)
+        .await
+        .map_err(server_error)?
+    else {
+        return Ok(());
+    };
+    if track.state != "imported" {
+        return Err(refusal_error("Only tagged tracks can be cleared"));
+    }
+
+    DownloadRequestTrackRow::delete(&track.request_id, &track.item_key)
+        .await
+        .map_err(server_error)?;
+    crate::import_queue::forget_retries(&auth.0.username, std::slice::from_ref(&item)).await;
+    let completed = DownloadRequestRow::mark_completed_if_idle(&track.request_id)
+        .await
+        .unwrap_or(false);
+    let removed = DownloadRequestRow::delete_if_empty(&track.request_id)
+        .await
+        .map_err(server_error)?;
+    if completed || removed {
+        forget_request_token(&track.request_id).await;
+    }
+
+    let (tx, _) = get_or_create_user_channel(&auth.0.username).await;
+    let _ = tx.send(DownloadEvent::ItemRemoved { item });
+    Ok(())
 }
 
 #[post("/api/downloads/requests/dismiss-finished", auth: AuthSession)]

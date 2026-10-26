@@ -1,5 +1,7 @@
 use dioxus::prelude::*;
-use ui::dashboard::{DashboardTab, DashboardTabs, DeletionHistoryTab, LibraryTab, StatsOverview};
+use ui::dashboard::{
+    DashboardTab, DashboardTabs, DeletionHistoryTab, LibraryFocus, LibraryTab, StatsOverview,
+};
 use ui::discovery::DiscoveryOverview;
 
 #[cfg_attr(not(feature = "web"), allow(dead_code))]
@@ -11,6 +13,25 @@ fn parse_dashboard_tab(query: &str) -> DashboardTab {
         }
     }
     DashboardTab::default()
+}
+
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+fn parse_library_focus(query: &str) -> LibraryFocus {
+    let query = query.strip_prefix('?').unwrap_or(query);
+    let mut focus = LibraryFocus::default();
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        let value = value.into_owned();
+        if value.is_empty() {
+            continue;
+        }
+        match key.as_ref() {
+            "release" => focus.release = Some(value),
+            "artist" => focus.artist = Some(value),
+            "album" => focus.album = Some(value),
+            _ => {}
+        }
+    }
+    focus
 }
 
 #[cfg_attr(not(feature = "web"), allow(dead_code))]
@@ -32,6 +53,19 @@ fn read_dashboard_tab() -> DashboardTab {
 }
 
 #[cfg(feature = "web")]
+fn read_library_focus() -> LibraryFocus {
+    let Some(window) = web_sys::window() else {
+        return LibraryFocus::default();
+    };
+    parse_library_focus(&window.location().search().unwrap_or_default())
+}
+
+#[cfg(not(feature = "web"))]
+fn read_library_focus() -> LibraryFocus {
+    LibraryFocus::default()
+}
+
+#[cfg(feature = "web")]
 fn write_dashboard_tab(tab: DashboardTab) {
     let Some(window) = web_sys::window() else {
         return;
@@ -49,9 +83,13 @@ fn write_dashboard_tab(_: DashboardTab) {}
 #[component]
 pub fn DashboardPage() -> Element {
     let mut active_tab = use_signal(read_dashboard_tab);
+    let mut library_focus = use_signal(read_library_focus);
 
     let change_tab = move |tab: DashboardTab| {
         active_tab.set(tab);
+        if tab != DashboardTab::Library {
+            library_focus.set(LibraryFocus::default());
+        }
         write_dashboard_tab(tab);
     };
 
@@ -76,7 +114,7 @@ pub fn DashboardPage() -> Element {
             div { class: "pt-6",
                 match active_tab() {
                     DashboardTab::Overview => rsx! { OverviewTab {} },
-                    DashboardTab::Library => rsx! { LibraryTab {} },
+                    DashboardTab::Library => rsx! { LibraryTab { focus: library_focus() } },
                     DashboardTab::History => rsx! { DeletionHistoryTab {} },
                     DashboardTab::Discovery => rsx! { DiscoveryOverview {} },
                 }
@@ -111,6 +149,19 @@ mod tests {
             dashboard_tab_url(DashboardTab::Overview),
             "/dashboard?tab=overview"
         );
+    }
+
+    #[test]
+    fn parses_the_library_focus_from_the_url() {
+        assert_eq!(
+            parse_library_focus("?tab=library&release=abc&artist=Ed+Sheeran&album=%C3%B7"),
+            LibraryFocus {
+                release: Some("abc".to_string()),
+                artist: Some("Ed Sheeran".to_string()),
+                album: Some("÷".to_string()),
+            }
+        );
+        assert!(parse_library_focus("?tab=library").is_empty());
     }
 }
 

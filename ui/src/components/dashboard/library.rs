@@ -2,9 +2,10 @@ use dioxus::logger::tracing::info;
 use dioxus::prelude::*;
 use shared::download::DownloadQuery;
 use shared::library::{
-    album_activity_key, normalize_key, track_activity_key, DownloadActivity, LibraryRelease,
-    LibraryReleaseDetail, LibraryTagApplyRequest, LibraryTagApplyTrack, LibraryTagPreview,
-    LibraryTagPreviewRequest, LibraryTagTrack, LibraryTrackInfo, ReleaseCompleteness,
+    album_activity_key, normalize_key, track_activity_key, DownloadActivity, LibraryMissingTrack,
+    LibraryRelease, LibraryReleaseDetail, LibraryTagApplyRequest, LibraryTagApplyTrack,
+    LibraryTagPreview, LibraryTagPreviewRequest, LibraryTagTrack, LibraryTrackInfo,
+    ReleaseCompleteness,
 };
 use shared::metadata::{Album, Track};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -25,6 +26,131 @@ enum PendingRemoval {
 enum PendingRequest {
     Release(Box<LibraryRelease>),
     Track(Box<LibraryRelease>, Box<LibraryTrackInfo>),
+    Missing(Box<LibraryRelease>, Box<LibraryMissingTrack>),
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LibraryFocus {
+    pub release: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+impl LibraryFocus {
+    pub fn is_empty(&self) -> bool {
+        self.release.is_none() && self.artist.is_none() && self.album.is_none()
+    }
+
+    fn matches(&self, release: &LibraryRelease) -> bool {
+        if let Some(wanted) = self.release.as_deref() {
+            if release.id == wanted || release.mbid.as_deref() == Some(wanted) {
+                return true;
+            }
+        }
+        if self.artist.is_none() && self.album.is_none() {
+            return false;
+        }
+        let artist_matches = self
+            .artist
+            .as_deref()
+            .is_none_or(|wanted| normalize_key(wanted) == normalize_key(&release.album_artist));
+        let album_matches = self
+            .album
+            .as_deref()
+            .is_none_or(|wanted| normalize_key(wanted) == normalize_key(&release.album));
+        artist_matches && album_matches
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum LibraryRow {
+    Track(LibraryTrackInfo),
+    Missing(LibraryMissingTrack),
+}
+
+impl LibraryRow {
+    fn disc_number(&self) -> Option<u32> {
+        match self {
+            Self::Track(track) => track.disc_number,
+            Self::Missing(track) => track.disc_number,
+        }
+    }
+
+    fn track_number(&self) -> Option<u32> {
+        match self {
+            Self::Track(track) => track.track_number,
+            Self::Missing(track) => track.track_number,
+        }
+    }
+
+    fn title(&self) -> &str {
+        match self {
+            Self::Track(track) => &track.title,
+            Self::Missing(track) => &track.title,
+        }
+    }
+}
+
+fn ordered_library_rows(detail: &LibraryReleaseDetail) -> Vec<LibraryRow> {
+    let mut rows: Vec<LibraryRow> = detail
+        .tracks
+        .iter()
+        .cloned()
+        .map(LibraryRow::Track)
+        .chain(
+            detail
+                .missing_tracks
+                .iter()
+                .cloned()
+                .map(LibraryRow::Missing),
+        )
+        .collect();
+    rows.sort_by(|left, right| {
+        left.disc_number()
+            .unwrap_or(1)
+            .cmp(&right.disc_number().unwrap_or(1))
+            .then_with(|| {
+                left.track_number()
+                    .unwrap_or(u32::MAX)
+                    .cmp(&right.track_number().unwrap_or(u32::MAX))
+            })
+            .then_with(|| {
+                left.title()
+                    .to_lowercase()
+                    .cmp(&right.title().to_lowercase())
+            })
+    });
+    rows
+}
+
+fn track_number_label(disc: Option<u32>, number: Option<u32>) -> String {
+    match (disc, number) {
+        (Some(disc), Some(number)) if disc > 1 => format!("{disc}.{number:02}"),
+        (_, Some(number)) => format!("{number:02}"),
+        _ => "—".to_string(),
+    }
+}
+
+fn relative_track_path(path: &str, folder_path: &str) -> String {
+    let relative = std::path::Path::new(path)
+        .strip_prefix(folder_path)
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    relative.trim_start_matches(['/', '\\']).to_string()
+}
+
+fn scroll_to_release(release_id: &str) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(element) = window
+        .document()
+        .and_then(|document| document.get_element_by_id(&format!("library-release-{release_id}")))
+    else {
+        return;
+    };
+    element.scroll_into_view();
 }
 
 fn format_size(bytes: u64) -> String {
@@ -210,6 +336,206 @@ fn track_quality_badge(track: &LibraryTrackInfo) -> Element {
             bitrate: track.bitrate.map(|value| value as i32),
             bit_depth: track.bit_depth.map(|value| value as i32),
             sample_rate: track.sample_rate.map(|value| value as i32),
+            compact: true,
+        }
+    }
+}
+
+fn format_track_duration(seconds: u32) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+#[component]
+fn LibraryTrackRow(
+    track: LibraryTrackInfo,
+    folder_path: String,
+    download_state: Option<String>,
+    on_tag: EventHandler,
+    on_search: EventHandler,
+    on_request: EventHandler,
+    on_remove: EventHandler,
+) -> Element {
+    let player = use_player();
+    let play_track = PlayerTrack {
+        url: library_audio_url(&track.id),
+        title: track.title.clone(),
+        artist: track.artist.clone(),
+        album: track.album.clone(),
+        duration: track.duration,
+    };
+    let path = relative_track_path(&track.path, &folder_path);
+    let number = track_number_label(track.disc_number, track.track_number);
+
+    rsx! {
+        div { class: "flex items-start gap-3 p-2 rounded hover:bg-white/5 group",
+            span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0 pt-0.5",
+                "{number}"
+            }
+            div { class: "flex-1 min-w-0",
+                div { class: "flex items-center gap-2 min-w-0",
+                    p { class: "text-xs font-mono text-gray-300 break-words min-w-0 flex-1",
+                        "{track.title}"
+                    }
+                    {track_quality_badge(&track)}
+                    {download_state_badge(download_state.as_ref())}
+                }
+                p { class: "text-[10px] font-mono text-gray-600 break-all mt-0.5",
+                    "{path}"
+                    if let Some(duration) = track.duration {
+                        span { " · {format_track_duration(duration)}" }
+                    }
+                }
+            }
+            div { class: "flex items-center gap-1 shrink-0",
+                button {
+                    class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-accent transition-all cursor-pointer opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100",
+                    title: "Preview track",
+                    aria_label: "Preview track",
+                    onclick: move |_| player.play_track(play_track.clone()),
+                    svg {
+                        class: "w-3.5 h-3.5",
+                        fill: "currentColor",
+                        view_box: "0 0 24 24",
+                        path { d: "M8 5v14l11-7z" }
+                    }
+                }
+                if !track.matched {
+                    button {
+                        class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-leaf transition-colors cursor-pointer",
+                        title: "Tag this track with beets",
+                        aria_label: "Tag this track with beets",
+                        onclick: move |_| on_tag.call(()),
+                        svg {
+                            class: "w-3.5 h-3.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                d: "M16.862 3.487a2.25 2.25 0 113.182 3.182L7.5 19.213l-4.5 1.5 1.5-4.5L16.862 3.487z",
+                            }
+                        }
+                    }
+                    button {
+                        class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-accent transition-colors cursor-pointer",
+                        title: "Search Soulseek for this track",
+                        aria_label: "Search Soulseek for this track",
+                        onclick: move |_| on_search.call(()),
+                        svg {
+                            class: "w-3.5 h-3.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z",
+                            }
+                        }
+                    }
+                    button {
+                        class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-leaf transition-colors cursor-pointer",
+                        title: "Re-request this track",
+                        aria_label: "Re-request this track",
+                        onclick: move |_| on_request.call(()),
+                        svg {
+                            class: "w-3.5 h-3.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4",
+                            }
+                        }
+                    }
+                }
+                button {
+                    class: "p-1.5 rounded-full hover:bg-red-900/30 text-gray-500 hover:text-red-400 transition-colors cursor-pointer",
+                    title: "Remove track and delete file",
+                    aria_label: "Remove track and delete file",
+                    onclick: move |_| on_remove.call(()),
+                    svg {
+                        class: "w-3.5 h-3.5",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            d: "M6 18L18 6M6 6l12 12",
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn LibraryMissingRow(
+    missing: LibraryMissingTrack,
+    on_search: EventHandler,
+    on_request: EventHandler,
+) -> Element {
+    let number = track_number_label(missing.disc_number, missing.track_number);
+
+    rsx! {
+        div { class: "flex items-start gap-3 p-2 rounded hover:bg-white/5 group",
+            span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0 pt-0.5",
+                "{number}"
+            }
+            div { class: "flex-1 min-w-0",
+                p { class: "text-xs font-mono text-gray-500 break-words", "{missing.title}" }
+                span {
+                    class: "inline-block text-[9px] font-mono px-1.5 py-0.5 rounded border bg-red-600/20 text-red-300 border-red-500/40 mt-0.5",
+                    "MISSING"
+                }
+            }
+            div { class: "flex items-center gap-1 shrink-0",
+                button {
+                    class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-accent transition-colors cursor-pointer",
+                    title: "Search Soulseek for this track",
+                    aria_label: "Search Soulseek for this track",
+                    onclick: move |_| on_search.call(()),
+                    svg {
+                        class: "w-3.5 h-3.5",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z",
+                        }
+                    }
+                }
+                button {
+                    class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-leaf transition-colors cursor-pointer",
+                    title: "Download this missing track",
+                    aria_label: "Download this missing track",
+                    onclick: move |_| on_request.call(()),
+                    svg {
+                        class: "w-3.5 h-3.5",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4",
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -234,9 +560,8 @@ fn release_quality_badge(release: &LibraryRelease) -> Element {
 }
 
 #[component]
-pub fn LibraryTab() -> Element {
+pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
     let auth = use_auth();
-    let player = use_player();
     let mut overview =
         use_resource(move || async move { auth.call(api::get_library_overview()).await });
 
@@ -249,6 +574,7 @@ pub fn LibraryTab() -> Element {
     let mut pending_request = use_signal(|| None::<PendingRequest>);
     let mut message = use_signal(String::new);
     let mut scanning = use_signal(|| false);
+    let mut focus_applied = use_signal(|| false);
 
     let mut tag_preview = use_signal::<Option<LibraryTagPreview>>(|| None);
     let mut tag_folder_id = use_signal(String::new);
@@ -499,6 +825,52 @@ pub fn LibraryTab() -> Element {
         });
     };
 
+    let mut request_missing_track = move |release: LibraryRelease, missing: LibraryMissingTrack| {
+        message.set(String::new());
+        let artist = if missing.artist.trim().is_empty() {
+            release.album_artist.clone()
+        } else {
+            missing.artist.clone()
+        };
+        let metadata = Track {
+            id: format!(
+                "library-missing:{}:{}:{}",
+                release.id,
+                missing.disc_number.unwrap_or(1),
+                missing.track_number.unwrap_or(0)
+            ),
+            title: missing.title.clone(),
+            artist,
+            album_id: release.mbid.clone(),
+            album_title: Some(release.album.clone()),
+            release_date: release.year.map(|year| year.to_string()),
+            duration: None,
+            track_number: missing.track_number,
+            disc_number: missing.disc_number,
+            mbid: None,
+            release_mbid: release.mbid.clone(),
+        };
+        let request = api::AutoDownloadRequest {
+            query: DownloadQuery::from(metadata),
+            folder_id: release.folder_id.clone(),
+            folder_path: release.folder_path.clone(),
+        };
+        spawn(async move {
+            let mut overview = overview;
+            match auth.call(api::auto_download(request)).await {
+                Ok(api::AutoDownloadResult::Accepted { .. }) => {
+                    message.set(format!("Requested {}", missing.title));
+                }
+                Ok(api::AutoDownloadResult::Error(e)) => {
+                    message.set(format!("Could not request track: {e}"));
+                }
+                Err(e) => message.set(format!("Could not request track: {e}")),
+            }
+            details.write().clear();
+            overview.restart();
+        });
+    };
+
     let mut confirm_request = move |_| {
         let Some(action) = pending_request() else {
             return;
@@ -507,6 +879,7 @@ pub fn LibraryTab() -> Element {
         match action {
             PendingRequest::Release(release) => request_release(*release),
             PendingRequest::Track(release, track) => request_track(*release, *track),
+            PendingRequest::Missing(release, missing) => request_missing_track(*release, *missing),
         }
     };
 
@@ -672,6 +1045,46 @@ pub fn LibraryTab() -> Element {
         });
     };
 
+    use_effect(move || {
+        if focus.is_empty() || focus_applied() {
+            return;
+        }
+        let release = {
+            let data = overview.read();
+            match &*data {
+                Some(Ok(data)) => data
+                    .releases
+                    .iter()
+                    .find(|release| focus.matches(release))
+                    .cloned(),
+                _ => None,
+            }
+        };
+        let Some(release) = release else {
+            return;
+        };
+
+        focus_applied.set(true);
+        selected_folder.set(Some(release.folder_id.clone()));
+        let release_id = release.id.clone();
+        expanded.write().insert(release_id.clone());
+        if !details.peek().contains_key(&release_id) {
+            let mut details = details;
+            let id = release_id.clone();
+            spawn(async move {
+                if let Ok(Some(detail)) =
+                    auth.call(api::get_library_release_detail(id.clone())).await
+                {
+                    details.write().insert(id, detail);
+                }
+            });
+        }
+        spawn(async move {
+            gloo_timers::future::TimeoutFuture::new(250).await;
+            scroll_to_release(&release_id);
+        });
+    });
+
     let mut select_candidate = move |index: usize| {
         tag_candidate.set(index);
         let Some(preview) = tag_preview.peek().clone() else {
@@ -701,6 +1114,7 @@ pub fn LibraryTab() -> Element {
             .as_ref()
             .map(|detail| &detail.release)
             .unwrap_or(&release);
+        let folder_path = display_release.folder_path.clone();
         let album_key = album_activity_key(&release.album_artist, &release.album);
         let activity_guard = activity.read();
         let download_state = activity_guard.albums.get(&album_key).cloned();
@@ -736,6 +1150,7 @@ pub fn LibraryTab() -> Element {
         .collect();
         rsx! {
             div { key: "{release.id}",
+                id: "library-release-{release.id}",
                 class: "bg-white/5 border rounded-lg transition-colors",
                 class: if is_open { "border-beet-accent/30" } else { "border-white/5 hover:border-white/10" },
                 div {
@@ -915,189 +1330,67 @@ pub fn LibraryTab() -> Element {
                                 }
                             },
                             Some(detail) => rsx! {
-                                for track in detail.tracks.iter() {
-                                    {
-                                        let track = track.clone();
-                                        let track_for_remove = track.clone();
-                                        let track_for_request = track.clone();
-                                        let track_for_search = track.clone();
-                                        let track_for_tag = track.clone();
-                                        let release_for_track_tag = release.clone();
-                                        let release_for_track_request = release.clone();
-                                        let play_track = PlayerTrack {
-                                            url: library_audio_url(&track.id),
-                                            title: track.title.clone(),
-                                            artist: track.artist.clone(),
-                                            album: track.album.clone(),
-                                            duration: track.duration,
-                                        };
-                                        let track_download_state = activity
-                                            .read()
-                                            .tracks
-                                            .get(&track_activity_key(&track.artist, &track.title))
-                                            .cloned();
-                                        rsx! {
-                                            div { class: "flex flex-wrap items-center gap-3 p-1.5 rounded hover:bg-white/5 group",
-                                                span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0",
-                                                    {
-                                                        match (track.disc_number, track.track_number) {
-                                                            (Some(disc), Some(number)) if disc > 1 => format!("{disc}.{number:02}"),
-                                                            (_, Some(number)) => format!("{number:02}"),
-                                                            _ => "—".to_string(),
-                                                        }
-                                                    }
-                                                }
-                                                div { class: "flex-grow min-w-0",
-                                                    p { class: "text-xs font-mono text-gray-300 break-words", "{track.title}" }
-                                                    p { class: "text-[10px] font-mono text-gray-600 break-all", "{track.path}" }
-                                                }
-                                                {track_quality_badge(&track)}
-                                                {download_state_badge(track_download_state.as_ref())}
-                                                if track.matched {
-                                                    span { class: "text-[9px] font-mono px-1.5 py-0.5 rounded border bg-green-600/20 text-green-300 border-green-500/40 shrink-0",
-                                                        "MATCHED"
-                                                    }
-                                                } else {
-                                                    span { class: "text-[9px] font-mono px-1.5 py-0.5 rounded border bg-gray-600/20 text-gray-400 border-gray-500/40 shrink-0",
-                                                        "UNTAGGED"
-                                                    }
-                                                }
-                                                if let Some(duration) = track.duration {
-                                                    {
-                                                        let duration_label = format!("{}:{:02}", duration / 60, duration % 60);
-                                                        rsx! {
-                                                            span { class: "text-[10px] font-mono text-gray-500 shrink-0",
-                                                                "{duration_label}"
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                div { class: "flex items-center gap-1 shrink-0",
-                                                    button {
-                                                        class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-accent transition-all cursor-pointer opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100",
-                                                        title: "Preview track",
-                                                        aria_label: "Preview track",
-                                                        onclick: move |_| player.play_track(play_track.clone()),
-                                                        svg {
-                                                            class: "w-3.5 h-3.5",
-                                                            fill: "currentColor",
-                                                            view_box: "0 0 24 24",
-                                                            path { d: "M8 5v14l11-7z" }
-                                                        }
-                                                    }
-                                                    if !track.matched {
-                                                        button {
-                                                            class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-leaf transition-colors cursor-pointer",
-                                                            title: "Tag this track with beets",
-                                                            onclick: move |_| open_tag_preview(LibraryTagPreviewRequest {
-                                                                folder_id: release_for_track_tag.folder_id.clone(),
-                                                                release_id: Some(release_for_track_tag.id.clone()),
-                                                                path: track_for_tag.path.clone(),
-                                                                artist: Some(track_for_tag.artist.clone()),
-                                                                album: Some(track_for_tag.title.clone()),
-                                                                is_track: true,
-                                                            }),
-                                                            svg {
-                                                                class: "w-3.5 h-3.5",
-                                                                fill: "none",
-                                                                stroke: "currentColor",
-                                                                stroke_width: "2",
-                                                                view_box: "0 0 24 24",
-                                                                path {
-                                                                    stroke_linecap: "round",
-                                                                    stroke_linejoin: "round",
-                                                                    d: "M16.862 3.487a2.25 2.25 0 113.182 3.182L7.5 19.213l-4.5 1.5 1.5-4.5L16.862 3.487z",
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    if !track.matched {
-                                                        button {
-                                                            class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-accent transition-colors cursor-pointer",
-                                                            title: "Search Soulseek for this track",
-                                                            onclick: move |_| open_search(
-                                                                &track_for_search.artist,
-                                                                &track_for_search.title,
-                                                                None,
-                                                                "track",
-                                                            ),
-                                                            svg {
-                                                                class: "w-3.5 h-3.5",
-                                                                fill: "none",
-                                                                stroke: "currentColor",
-                                                                stroke_width: "2",
-                                                                view_box: "0 0 24 24",
-                                                                path {
-                                                                    stroke_linecap: "round",
-                                                                    stroke_linejoin: "round",
-                                                                    d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z",
-                                                                }
-                                                            }
-                                                        }
-                                                        button {
-                                                            class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-leaf transition-colors cursor-pointer",
-                                                            title: "Re-request this track",
-                                                            onclick: move |_| pending_request.set(Some(PendingRequest::Track(
-                                                                Box::new(release_for_track_request.clone()),
-                                                                Box::new(track_for_request.clone()),
-                                                            ))),
-                                                            svg {
-                                                                class: "w-3.5 h-3.5",
-                                                                fill: "none",
-                                                                stroke: "currentColor",
-                                                                stroke_width: "2",
-                                                                view_box: "0 0 24 24",
-                                                                path {
-                                                                    stroke_linecap: "round",
-                                                                    stroke_linejoin: "round",
-                                                                    d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4",
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    button {
-                                                        class: "p-1.5 rounded-full hover:bg-red-900/30 text-gray-500 hover:text-red-400 transition-colors cursor-pointer",
-                                                        title: "Remove track and delete file",
-                                                        onclick: move |_| pending.set(Some(PendingRemoval::Track(track_for_remove.id.clone()))),
-                                                        svg {
-                                                            class: "w-3.5 h-3.5",
-                                                            fill: "none",
-                                                            stroke: "currentColor",
-                                                            stroke_width: "2",
-                                                            view_box: "0 0 24 24",
-                                                            path {
-                                                                stroke_linecap: "round",
-                                                                stroke_linejoin: "round",
-                                                                d: "M6 18L18 6M6 6l12 12",
-                                                            }
-                                                        }
-                                                    }
+                                for row in ordered_library_rows(&detail) {
+                                    match row {
+                                        LibraryRow::Track(track) => {
+                                            let track_for_row = track.clone();
+                                            let track_for_tag = track.clone();
+                                            let track_for_search = track.clone();
+                                            let track_for_request = track.clone();
+                                            let track_for_remove = track.clone();
+                                            let release_for_tag = release.clone();
+                                            let release_for_request = release.clone();
+                                            let track_download_state = activity
+                                                .read()
+                                                .tracks
+                                                .get(&track_activity_key(&track.artist, &track.title))
+                                                .cloned();
+                                            rsx! {
+                                                LibraryTrackRow {
+                                                    track: track_for_row,
+                                                    folder_path: folder_path.clone(),
+                                                    download_state: track_download_state,
+                                                    on_tag: move |_| open_tag_preview(LibraryTagPreviewRequest {
+                                                        folder_id: release_for_tag.folder_id.clone(),
+                                                        release_id: Some(release_for_tag.id.clone()),
+                                                        path: track_for_tag.path.clone(),
+                                                        artist: Some(track_for_tag.artist.clone()),
+                                                        album: Some(track_for_tag.title.clone()),
+                                                        is_track: true,
+                                                    }),
+                                                    on_search: move |_| open_search(
+                                                        &track_for_search.artist,
+                                                        &track_for_search.title,
+                                                        None,
+                                                        "track",
+                                                    ),
+                                                    on_request: move |_| pending_request.set(Some(PendingRequest::Track(
+                                                        Box::new(release_for_request.clone()),
+                                                        Box::new(track_for_request.clone()),
+                                                    ))),
+                                                    on_remove: move |_| pending.set(Some(PendingRemoval::Track(track_for_remove.id.clone()))),
                                                 }
                                             }
                                         }
-                                    }
-                                }
-                                if !detail.missing_tracks.is_empty() {
-                                    div { class: "mt-2 pt-2 border-t border-white/5 space-y-1",
-                                        p { class: "text-[10px] font-mono uppercase tracking-widest text-yellow-500/80 mb-1",
-                                            "Missing tracks"
-                                        }
-                                        for missing in detail.missing_tracks.iter() {
-                                            div { class: "flex items-center gap-3 p-1.5 rounded",
-                                                span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0",
-                                                    {
-                                                        match (missing.disc_number, missing.track_number) {
-                                                            (Some(disc), Some(number)) if disc > 1 => format!("{disc}.{number:02}"),
-                                                            (_, Some(number)) => format!("{number:02}"),
-                                                            _ => "—".to_string(),
-                                                        }
-                                                    }
-                                                }
-                                                span { class: "text-xs font-mono text-gray-500 flex-grow truncate",
-                                                    "{missing.title}"
-                                                }
-                                                span { class: "text-[9px] font-mono px-1.5 py-0.5 rounded border bg-red-600/20 text-red-300 border-red-500/40 shrink-0",
-                                                    "MISSING"
+                                        LibraryRow::Missing(missing) => {
+                                            let missing_for_row = missing.clone();
+                                            let missing_for_search = missing.clone();
+                                            let missing_for_request = missing.clone();
+                                            let release_for_search = release.clone();
+                                            let release_for_request = release.clone();
+                                            rsx! {
+                                                LibraryMissingRow {
+                                                    missing: missing_for_row,
+                                                    on_search: move |_| open_search(
+                                                        &missing_for_search.artist,
+                                                        &missing_for_search.title,
+                                                        release_for_search.mbid.as_deref(),
+                                                        "track",
+                                                    ),
+                                                    on_request: move |_| pending_request.set(Some(PendingRequest::Missing(
+                                                        Box::new(release_for_request.clone()),
+                                                        Box::new(missing_for_request.clone()),
+                                                    ))),
                                                 }
                                             }
                                         }
@@ -1330,21 +1623,32 @@ pub fn LibraryTab() -> Element {
 
         if let Some(action) = pending_request() {
             {
-                let message = match &action {
-                    PendingRequest::Release(release) => format!(
-                        "Re-request {}? The existing files will be deleted first, then a fresh copy will be downloaded.",
-                        release.album
+                let danger = !matches!(&action, PendingRequest::Missing(..));
+                let (message, confirm_label) = match &action {
+                    PendingRequest::Release(release) => (
+                        format!(
+                            "Re-request {}? The existing files will be deleted first, then a fresh copy will be downloaded.",
+                            release.album
+                        ),
+                        "Re-request",
                     ),
-                    PendingRequest::Track(_, track) => format!(
-                        "Re-request {}? The existing file will be deleted first, then a fresh copy will be downloaded.",
-                        track.title
+                    PendingRequest::Track(_, track) => (
+                        format!(
+                            "Re-request {}? The existing file will be deleted first, then a fresh copy will be downloaded.",
+                            track.title
+                        ),
+                        "Re-request",
+                    ),
+                    PendingRequest::Missing(_, track) => (
+                        format!("Download the missing track {}?", track.title),
+                        "Download",
                     ),
                 };
                 rsx! {
                     ConfirmModal {
                         message,
-                        confirm_label: "Re-request".to_string(),
-                        danger: true,
+                        confirm_label: confirm_label.to_string(),
+                        danger,
                         on_confirm: move |_| confirm_request(()),
                         on_cancel: move |_| pending_request.set(None),
                     }
@@ -1414,5 +1718,76 @@ mod tests {
             release_subtitle(&release("÷", None, None)),
             "Ed Sheeran · 2017 · GB"
         );
+    }
+
+    #[test]
+    fn track_paths_drop_the_library_prefix() {
+        assert_eq!(
+            relative_track_path("/music/Ed Sheeran/÷/01.flac", "/music"),
+            "Ed Sheeran/÷/01.flac"
+        );
+        assert_eq!(
+            relative_track_path("/other/01.flac", "/music"),
+            "other/01.flac"
+        );
+    }
+
+    #[test]
+    fn missing_tracks_keep_their_place_between_present_tracks() {
+        let detail = LibraryReleaseDetail {
+            tracks: vec![
+                LibraryTrackInfo {
+                    id: "3".into(),
+                    track_number: Some(3),
+                    title: "Third".into(),
+                    ..LibraryTrackInfo::default()
+                },
+                LibraryTrackInfo {
+                    id: "1".into(),
+                    track_number: Some(1),
+                    title: "First".into(),
+                    ..LibraryTrackInfo::default()
+                },
+            ],
+            missing_tracks: vec![LibraryMissingTrack {
+                track_number: Some(2),
+                title: "Second".into(),
+                ..LibraryMissingTrack::default()
+            }],
+            ..LibraryReleaseDetail::default()
+        };
+
+        let rows = ordered_library_rows(&detail);
+        let titles: Vec<&str> = rows.iter().map(LibraryRow::title).collect();
+        assert_eq!(titles, ["First", "Second", "Third"]);
+        assert!(matches!(&rows[1], LibraryRow::Missing(_)));
+    }
+
+    #[test]
+    fn a_library_focus_matches_an_mbid_or_the_artist_and_album() {
+        let target = LibraryRelease {
+            id: "release-id".into(),
+            mbid: Some("mbid".into()),
+            album: "÷".into(),
+            album_artist: "Ed Sheeran".into(),
+            ..LibraryRelease::default()
+        };
+        assert!(LibraryFocus {
+            release: Some("mbid".into()),
+            ..LibraryFocus::default()
+        }
+        .matches(&target));
+        assert!(LibraryFocus {
+            artist: Some("ed sheeran".into()),
+            album: Some("÷".into()),
+            ..LibraryFocus::default()
+        }
+        .matches(&target));
+        assert!(!LibraryFocus {
+            artist: Some("Someone Else".into()),
+            album: Some("÷".into()),
+            ..LibraryFocus::default()
+        }
+        .matches(&target));
     }
 }

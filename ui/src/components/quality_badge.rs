@@ -27,25 +27,28 @@ fn quality_label(
 
     if quality == "mp3" {
         match bitrate {
-            Some(br) if br >= 320 => "320k".to_string(),
-            Some(br) if br >= 256 => "256k".to_string(),
-            Some(br) if br >= 192 => "192k".to_string(),
-            Some(br) if br > 0 => format!("{}k", br),
+            Some(br) if br > 0 => format!("MP3 {br} kbps"),
             _ => "MP3".to_string(),
         }
     } else if matches!(
         quality.as_str(),
         "flac" | "wav" | "alac" | "aiff" | "aif" | "ape"
     ) {
-        // Lossless: show bit depth / sample rate like slskd does (e.g. FLAC 16/44.1)
         match (bit_depth, sample_rate) {
-            (Some(d), Some(r)) => format!("{} {}/{}", quality.to_uppercase(), d, format_khz(r)),
-            (None, Some(r)) => format!("{} {}", quality.to_uppercase(), format_khz(r)),
+            (Some(depth), Some(rate)) => {
+                format!(
+                    "{} {depth}-Bit/{} kHz",
+                    quality.to_uppercase(),
+                    format_khz(rate)
+                )
+            }
+            (Some(depth), None) => format!("{} {depth}-Bit", quality.to_uppercase()),
+            (None, Some(rate)) => format!("{} {} kHz", quality.to_uppercase(), format_khz(rate)),
             _ => quality.to_uppercase(),
         }
     } else if matches!(quality.as_str(), "m4a" | "aac" | "ogg" | "opus" | "wma") {
         match bitrate {
-            Some(br) if br > 0 => format!("{} {}k", quality.to_uppercase(), br),
+            Some(br) if br > 0 => format!("{} {br} kbps", quality.to_uppercase()),
             _ => quality.to_uppercase(),
         }
     } else {
@@ -71,6 +74,7 @@ pub fn QualityBadge(
     #[props(default)] bit_depth: Option<i32>,
     #[props(default)] sample_rate: Option<i32>,
     #[props(default)] label: Option<String>,
+    #[props(default)] compact: bool,
 ) -> Element {
     let label = label.unwrap_or_else(|| {
         quality_label(
@@ -82,10 +86,15 @@ pub fn QualityBadge(
         )
     });
     let color = quality_color(&quality);
+    let size = if compact {
+        "text-[9px] px-1 py-0 leading-tight"
+    } else {
+        "text-[10px] px-1.5 py-0.5"
+    };
 
     rsx! {
         span {
-            class: "text-[10px] font-mono px-1.5 py-0.5 rounded border {color} uppercase shrink-0",
+            class: "font-mono rounded border {size} {color} uppercase shrink-0",
             "{label}"
         }
     }
@@ -98,7 +107,12 @@ mod tests {
     #[test]
     fn mp3_shows_the_bitrate_when_the_search_reported_one() {
         assert_eq!(quality_label("mp3", None, None, None, None), "MP3");
-        for (bitrate, label) in [(320, "320k"), (256, "256k"), (192, "192k"), (128, "128k")] {
+        for (bitrate, label) in [
+            (320, "MP3 320 kbps"),
+            (256, "MP3 256 kbps"),
+            (192, "MP3 192 kbps"),
+            (128, "MP3 128 kbps"),
+        ] {
             let data = format!(
                 r#"{{"username":"u","filename":"a.mp3","size":1,"bitrate":{bitrate},"duration":1,"hasFreeUploadSlot":true,"uploadSpeed":0,"queueLength":0}}"#
             );
@@ -111,7 +125,7 @@ mod tests {
         let data = r#"{"username":"u","filename":"a.flac","size":1,"bitrate":null,"duration":1,"sampleRate":44100,"bitDepth":16,"hasFreeUploadSlot":true,"uploadSpeed":0,"queueLength":0}"#;
         assert_eq!(
             quality_label("flac", None, None, None, Some(data)),
-            "FLAC 16/44.1"
+            "FLAC 16-Bit/44.1 kHz"
         );
         assert_eq!(quality_label("flac", None, None, None, None), "FLAC");
     }
@@ -120,13 +134,16 @@ mod tests {
     fn explicit_library_quality_wins_over_search_data() {
         assert_eq!(
             quality_label("flac", None, Some(24), Some(96000), None),
-            "FLAC 24/96"
+            "FLAC 24-Bit/96 kHz"
         );
         assert_eq!(
             quality_label("flac", Some(320), Some(16), Some(44100), None),
-            "FLAC 16/44.1"
+            "FLAC 16-Bit/44.1 kHz"
         );
-        assert_eq!(quality_label("mp3", Some(320), None, None, None), "320k");
+        assert_eq!(
+            quality_label("mp3", Some(320), None, None, None),
+            "MP3 320 kbps"
+        );
     }
 
     #[test]
@@ -134,7 +151,7 @@ mod tests {
         assert_eq!(quality_label("m4a", None, None, None, None), "M4A");
         assert_eq!(
             quality_label("m4a", Some(256), None, None, None),
-            "M4A 256k"
+            "M4A 256 kbps"
         );
         assert_eq!(quality_label("", None, None, None, None), "");
     }

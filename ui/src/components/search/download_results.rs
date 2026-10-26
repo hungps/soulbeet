@@ -43,6 +43,10 @@ fn get_track_id(track: &DownloadableItem) -> String {
     format!("{}{}", track.id, track.source)
 }
 
+fn group_key(group: &DownloadableGroup) -> String {
+    format!("{}::{}", group.source, group.group_id)
+}
+
 /// The file name a peer served, without its path.
 fn file_name(item: &DownloadableItem) -> String {
     let normalized = item.id.replace('\\', "/");
@@ -205,12 +209,13 @@ fn AlbumResultItem(props: AlbumResultItemProps) -> Element {
     let album = props.album.clone();
     let group_for_download = album.clone();
     let folder_path = album.group_id.clone();
+    let key = group_key(&album);
     let facts = release_facts(&album, &props.request);
     let mut is_expanded = use_signal(|| props.starts_expanded);
 
     rsx! {
         div {
-            key: "{album.group_id}",
+            key: "{key}",
             class: "bg-white/5 border border-white/5 p-4 rounded-md",
 
             // Clickable header for expand/collapse
@@ -302,8 +307,13 @@ pub fn DownloadResults(props: Props) -> Element {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.release_fit
+                    .partial_cmp(&a.release_fit)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| group_key(a).cmp(&group_key(b)))
     });
-    let best_group_id = sorted_results.first().map(|group| group.group_id.clone());
     let results = sorted_results;
     let selected_release = props.request.clone();
     let selected_release_meta = selected_release_facts(&selected_release);
@@ -491,7 +501,7 @@ pub fn DownloadResults(props: Props) -> Element {
                         on_download_group: handle_download_group,
                         request: item_request.clone(),
                         can_download: !selected_folder.read().is_empty() && !*is_downloading.read(),
-                        is_best: best_group_id.as_deref() == Some(album.group_id.as_str()),
+                        is_best: idx == 0,
                         starts_expanded: idx == 0,
                     }
                 }

@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use shared::navidrome::LibraryStats;
 
 pub mod library;
-pub use library::LibraryTab;
+pub use library::{LibraryFocus, LibraryTab};
 
 #[derive(PartialEq, Clone, Copy, Default, Debug)]
 pub enum DashboardTab {

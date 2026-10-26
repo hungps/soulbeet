@@ -635,6 +635,8 @@ pub enum DownloadEvent {
         request_id: String,
         items: Vec<String>,
     },
+    /// One tagged track was cleared from the panel; its library file stays.
+    ItemRemoved { item: String },
 }
 
 /// Events from the auto-download pipeline, sent over WebSocket
