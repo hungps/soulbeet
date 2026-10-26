@@ -615,6 +615,26 @@ impl DownloadRequestTrackRow {
         .map_err(|e| e.to_string())
     }
 
+    #[cfg(feature = "server")]
+    pub async fn find_for_request(
+        request_id: &str,
+        user_id: &str,
+        item_key: &str,
+    ) -> Result<Option<Self>, String> {
+        sqlx::query_as::<_, Self>(
+            "SELECT t.* FROM download_request_tracks t
+             JOIN download_requests r ON r.id = t.request_id
+             WHERE t.request_id = ? AND r.user_id = ? AND t.item_key = ?
+             LIMIT 1",
+        )
+        .bind(request_id)
+        .bind(user_id)
+        .bind(item_key)
+        .fetch_optional(&*DB)
+        .await
+        .map_err(|e| e.to_string())
+    }
+
     /// Insert a track if the request does not already hold the same remote file.
     /// Returns true when a row was created.
     #[cfg(feature = "server")]

@@ -8,7 +8,7 @@ use shared::download::{
 
 use super::picker::{ChoicesLoader, MatchPicker};
 use super::Failure;
-use crate::{Disclosure, QualityBadge, RowAction};
+use crate::{request_audio_url, use_player, Disclosure, PlayerTrack, QualityBadge, RowAction};
 
 /// A track's length as `M:SS`.
 fn format_duration(seconds: u32) -> String {
@@ -130,6 +130,34 @@ pub(super) fn shows_choices(row: &DownloadProgress) -> bool {
     shows_retry(row) && row.can_choose_import
 }
 
+fn preview_track(
+    file: &DownloadProgress,
+    display_name: &str,
+    track: Option<&DownloadRequestTrack>,
+) -> Option<PlayerTrack> {
+    let handed_off = matches!(
+        file.state,
+        DownloadState::Completed | DownloadState::ImportQueued(_)
+    );
+    let kept = matches!(
+        file.state,
+        DownloadState::ImportSkipped | DownloadState::Failed(_)
+    ) && file.local_path.is_some();
+    if !handed_off && !kept {
+        return None;
+    }
+    let request_id = file.batch_id.as_deref()?;
+    Some(PlayerTrack {
+        url: request_audio_url(request_id, &file.item),
+        title: track
+            .map(|track| track.title.clone())
+            .unwrap_or_else(|| display_name.to_string()),
+        artist: track.map(|track| track.artist.clone()).unwrap_or_default(),
+        album: track.map(|track| track.album.clone()).unwrap_or_default(),
+        duration: track.and_then(|track| track.duration),
+    })
+}
+
 /// Retry import, Import as-is, Force import and the match picker for one kept
 /// import job. Every row of a job shares that job, so the album renders this
 /// once with the first row that kept it.
@@ -242,6 +270,8 @@ pub fn DownloadItem(
             .to_string_lossy()
             .into_owned(),
     };
+    let player = use_player();
+    let preview = preview_track(&file, &display_name, track.as_ref());
 
     rsx! {
       div { class: "bg-white/5 border {border_class} p-4 rounded-lg hover:border-beet-accent/50 transition-colors group",
@@ -256,6 +286,23 @@ pub fn DownloadItem(
               class: "text-[10px] font-mono {badge_class} px-1.5 py-0.5 rounded uppercase cursor-help",
               title: "{status_text}",
               "{badge_text}"
+            }
+            if let Some(preview) = preview {
+              button {
+                class: "p-1 rounded-full border border-transparent text-gray-500 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 hover:text-beet-accent hover:border-beet-accent/40 hover:bg-white/5 transition-all cursor-pointer",
+                title: "Preview downloaded file",
+                aria_label: "Preview downloaded file",
+                onclick: move |evt: Event<MouseData>| {
+                    evt.stop_propagation();
+                    player.play_track(preview.clone());
+                },
+                svg {
+                  class: "w-3.5 h-3.5",
+                  fill: "currentColor",
+                  view_box: "0 0 24 24",
+                  path { d: "M8 5v14l11-7z" }
+                }
+              }
             }
             if is_cancellable {
               { let file_clone = file.clone();
@@ -439,6 +486,49 @@ mod tests {
             reason(&with_error(DownloadState::InProgress, Some("stale"))),
             None
         );
+    }
+
+    #[test]
+    fn preview_is_offered_after_a_request_hands_a_file_off() {
+        let previewable =
+            row(DownloadState::Completed, None).with_batch("request".into(), "X".into());
+        assert!(preview_track(&previewable, "01.flac", None).is_some());
+        assert!(preview_track(
+            &DownloadProgress {
+                state: DownloadState::ImportQueued(2),
+                ..previewable.clone()
+            },
+            "01.flac",
+            None
+        )
+        .is_some());
+        assert!(preview_track(
+            &DownloadProgress {
+                state: DownloadState::Imported,
+                ..previewable.clone()
+            },
+            "01.flac",
+            None
+        )
+        .is_none());
+        assert!(preview_track(
+            &DownloadProgress {
+                state: DownloadState::Failed("no source".into()),
+                ..previewable.clone()
+            },
+            "01.flac",
+            None
+        )
+        .is_none());
+        assert!(preview_track(
+            &DownloadProgress {
+                batch_id: None,
+                ..previewable
+            },
+            "01.flac",
+            None
+        )
+        .is_none());
     }
 
     #[test]

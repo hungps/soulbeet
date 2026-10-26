@@ -3,13 +3,13 @@
 > THIS FORK IS MADE WITH CLANKER, USE WITH CAUTION
 
 > What's added:
-> - Download queue per release: stop, resume, retry, remove, and parked requests retried later
-> - Filter album by release type and medium
-> - Able to pick album releases
 > - Plex integration
 > - Selfhosted MusicBrainz support
 > - Library management, unknown release/track matching
-> - slskd download path mapping
+> - Filter album by release type and medium
+> - Able to pick specific album release
+> - Download queue
+> - Play downloaded track
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/hungps/soulbeet)](https://hub.docker.com/r/hungps/soulbeet)
 [![Docker Image Size](https://img.shields.io/docker/image-size/hungps/soulbeet)](https://hub.docker.com/r/hungps/soulbeet/tags)
@@ -47,6 +47,7 @@ Every download becomes a request, shown in the **Downloads** drawer (the icon in
 - One card per download. A card groups that download's files and shows how many have landed, plus a status: PENDING, QUEUED, DOWNLOADING, DOWNLOADED, TAGGING, TAGGED, SKIPPED, STOPPED or FAILED.
 - Expand a card (click it) for its per-file rows. Each row has its own badge — QUEUED, SLSK, DOWNLOADED, WAIT, BEETS, LIB, SKIP, ERR, CANCEL or STOP — the reason when it failed, and "Show beets output" for imports.
 - Cards keep the release selected in search (artist, country, medium, track count and date) and per-file rows show the requested artist, title, album, audio quality and duration when the request stored them.
+- Hover a file row that is already on disk and press play to preview it. The mini player at the bottom of the page has play/pause, stop and seek, and only one track plays at a time.
 - **Stop request** cancels the running transfers and keeps the rows; **Resume request** queues them again.
 - **Retry failed tracks** re-enqueues only the files that failed.
 - **Remove request** cancels what is still running, deletes that request's downloaded files from the download folder and drops its rows. Files already imported into a library stay there.
@@ -210,7 +211,7 @@ For more beets commands, see the [beets documentation](https://beets.readthedocs
 - **Native file watch**: re-index a folder as files change on disk, while the app is running.
 - **Retry unavailable requests**: how often parked download requests are re-checked on Soulseek (see [Download Requests](#download-requests)).
 
-Releases and tracks in **Dashboard > Library** show the audio quality read during the last scan, such as `FLAC 16/44.1` or `MP3 320k`. A release whose tracks use different formats is marked `Mixed`. The format comes from the file extension and the details from the beets fields `bitrate`, `bitdepth` and `samplerate`; scan a folder again after upgrading if its existing rows predate these fields.
+Releases and tracks in **Dashboard > Library** show the audio quality read during the last scan, such as `FLAC 16/44.1` or `MP3 320k`. A release whose tracks use different formats is marked `Mixed`. The format comes from the file extension and the details from the beets fields `bitrate`, `bitdepth` and `samplerate`; scan a folder again after upgrading if its existing rows predate these fields. Hover a track row and press play to preview the file in the mini player.
 
 #### Album Mode
 

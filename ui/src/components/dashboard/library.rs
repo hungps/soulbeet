@@ -10,7 +10,10 @@ use shared::metadata::{Album, Track};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::use_auth;
-use crate::{ConfirmModal, CoverImage, DownloadTick, Modal, QualityBadge};
+use crate::{
+    library_audio_url, use_player, ConfirmModal, CoverImage, DownloadTick, Modal, PlayerTrack,
+    QualityBadge,
+};
 
 #[derive(Clone, PartialEq)]
 enum PendingRemoval {
@@ -233,6 +236,7 @@ fn release_quality_badge(release: &LibraryRelease) -> Element {
 #[component]
 pub fn LibraryTab() -> Element {
     let auth = use_auth();
+    let player = use_player();
     let mut overview =
         use_resource(move || async move { auth.call(api::get_library_overview()).await });
 
@@ -920,13 +924,20 @@ pub fn LibraryTab() -> Element {
                                         let track_for_tag = track.clone();
                                         let release_for_track_tag = release.clone();
                                         let release_for_track_request = release.clone();
+                                        let play_track = PlayerTrack {
+                                            url: library_audio_url(&track.id),
+                                            title: track.title.clone(),
+                                            artist: track.artist.clone(),
+                                            album: track.album.clone(),
+                                            duration: track.duration,
+                                        };
                                         let track_download_state = activity
                                             .read()
                                             .tracks
                                             .get(&track_activity_key(&track.artist, &track.title))
                                             .cloned();
                                         rsx! {
-                                            div { class: "flex flex-wrap items-center gap-3 p-1.5 rounded hover:bg-white/5",
+                                            div { class: "flex flex-wrap items-center gap-3 p-1.5 rounded hover:bg-white/5 group",
                                                 span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0",
                                                     {
                                                         match (track.disc_number, track.track_number) {
@@ -962,6 +973,18 @@ pub fn LibraryTab() -> Element {
                                                     }
                                                 }
                                                 div { class: "flex items-center gap-1 shrink-0",
+                                                    button {
+                                                        class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-accent transition-all cursor-pointer opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100",
+                                                        title: "Preview track",
+                                                        aria_label: "Preview track",
+                                                        onclick: move |_| player.play_track(play_track.clone()),
+                                                        svg {
+                                                            class: "w-3.5 h-3.5",
+                                                            fill: "currentColor",
+                                                            view_box: "0 0 24 24",
+                                                            path { d: "M8 5v14l11-7z" }
+                                                        }
+                                                    }
                                                     if !track.matched {
                                                         button {
                                                             class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-leaf transition-colors cursor-pointer",

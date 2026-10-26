@@ -1,5 +1,7 @@
 use dioxus::prelude::*;
 
+#[cfg(feature = "server")]
+pub mod audio;
 pub mod auth;
 pub mod discovery;
 pub mod download;
@@ -14,6 +16,8 @@ pub mod settings;
 pub mod system;
 pub mod user;
 
+#[cfg(feature = "server")]
+pub use audio::*;
 pub use auth::*;
 pub use discovery::*;
 pub use download::*;
