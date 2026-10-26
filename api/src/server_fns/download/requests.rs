@@ -132,6 +132,9 @@ pub async fn open_request(
         if existing.target_folder != target_folder {
             DownloadRequestRow::update_target_folder(&existing.id, target_folder).await?;
         }
+        if existing.context_json.is_none() {
+            let _ = DownloadRequestRow::update_context(&existing.id, context).await;
+        }
         DownloadRequestRow::set_state(&existing.id, "active").await?;
         return Ok(existing);
     }

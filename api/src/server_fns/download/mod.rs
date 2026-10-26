@@ -284,6 +284,7 @@ pub async fn download(req: DownloadRequest) -> Result<Vec<QueuedDownload>, Serve
                 .unwrap_or_else(|| "Unknown release".to_string()),
             artist: first.map(|item| item.artist.clone()),
             track_count: None,
+            release: Default::default(),
         }
     } else {
         req.request

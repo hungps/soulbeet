@@ -97,6 +97,21 @@ pub struct LibraryRelease {
     pub matched_track_count: u32,
     pub expected_track_count: Option<u32>,
     pub total_size: u64,
+    /// Most common audio format in the release, e.g. `flac`.
+    #[serde(default)]
+    pub audio_format: Option<String>,
+    /// Most common bitrate in kbps, when the release is lossy.
+    #[serde(default)]
+    pub bitrate: Option<u32>,
+    /// Most common bit depth, when the release is lossless.
+    #[serde(default)]
+    pub bit_depth: Option<u32>,
+    /// Most common sample rate in Hz, when known.
+    #[serde(default)]
+    pub sample_rate: Option<u32>,
+    /// Whether the release mixes audio formats across its tracks.
+    #[serde(default)]
+    pub quality_varies: bool,
     pub completeness: ReleaseCompleteness,
     pub scanned_at: String,
     #[serde(default)]
@@ -118,6 +133,18 @@ pub struct LibraryTrackInfo {
     pub mb_track_id: Option<String>,
     pub mb_album_id: Option<String>,
     pub size: Option<u64>,
+    /// Audio format, e.g. `flac`, inferred from the file or beets.
+    #[serde(default)]
+    pub audio_format: Option<String>,
+    /// Bitrate in kbps, when the track is lossy.
+    #[serde(default)]
+    pub bitrate: Option<u32>,
+    /// Bit depth, when the track is lossless.
+    #[serde(default)]
+    pub bit_depth: Option<u32>,
+    /// Sample rate in Hz, when known.
+    #[serde(default)]
+    pub sample_rate: Option<u32>,
     pub matched: bool,
 }
 

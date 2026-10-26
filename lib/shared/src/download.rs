@@ -48,6 +48,18 @@ impl DownloadQuery {
                 label: album.title.clone(),
                 artist: Some(album.artist.clone()),
                 track_count: album.track_count,
+                release: DownloadReleaseInfo {
+                    release_mbid: album
+                        .mbid
+                        .clone()
+                        .filter(|id| is_mbid(id))
+                        .or_else(|| Some(album.id.clone()).filter(|id| is_mbid(id))),
+                    recording_mbid: None,
+                    release_date: album.release_date.clone(),
+                    country: album.country.clone(),
+                    media: album.media.clone(),
+                    cover_url: album.cover_url.clone(),
+                },
             };
         }
 
@@ -65,10 +77,64 @@ impl DownloadQuery {
                     .unwrap_or_else(|| track.title.clone()),
                 artist: Some(track.artist.clone()),
                 track_count: None,
+                release: DownloadReleaseInfo {
+                    release_mbid: track
+                        .release_mbid
+                        .clone()
+                        .filter(|id| is_mbid(id))
+                        .or_else(|| track.album_id.clone().filter(|id| is_mbid(id))),
+                    recording_mbid: (self.tracks.len() == 1)
+                        .then(|| {
+                            track
+                                .mbid
+                                .clone()
+                                .filter(|id| is_mbid(id))
+                                .or_else(|| Some(track.id.clone()).filter(|id| is_mbid(id)))
+                        })
+                        .flatten(),
+                    release_date: track.release_date.clone(),
+                    country: None,
+                    media: None,
+                    cover_url: None,
+                },
             };
         }
 
         DownloadRequestContext::default()
+    }
+}
+
+/// Whether `value` looks like a MusicBrainz identifier.
+pub fn is_mbid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
+/// The release or recording selected in search, kept with a request so the
+/// row can import onto that exact entity instead of beets' own matches.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DownloadReleaseInfo {
+    #[serde(default)]
+    pub release_mbid: Option<String>,
+    #[serde(default)]
+    pub recording_mbid: Option<String>,
+    #[serde(default)]
+    pub release_date: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub media: Option<String>,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+}
+
+impl DownloadReleaseInfo {
+    pub fn has_force_target(&self) -> bool {
+        self.release_mbid.is_some() || self.recording_mbid.is_some()
     }
 }
 
@@ -85,6 +151,9 @@ pub struct DownloadRequestContext {
     /// Tracks the release has, when the provider reports it.
     #[serde(default)]
     pub track_count: Option<u32>,
+    /// The edition selected in search, when known.
+    #[serde(default)]
+    pub release: DownloadReleaseInfo,
 }
 
 /// A persisted request session shown as one expandable card in the transfer panel.
@@ -98,6 +167,12 @@ pub struct DownloadRequestSummary {
     /// `active`, `stopped` or `completed`.
     pub state: String,
     pub tracks: Vec<DownloadRequestTrack>,
+    /// The edition selected in search, when known.
+    #[serde(default)]
+    pub release: DownloadReleaseInfo,
+    /// Tracks the selected release has, when the provider reported it.
+    #[serde(default)]
+    pub track_count: Option<u32>,
 }
 
 /// A request that has not reached the transfer stage yet.
@@ -125,6 +200,10 @@ pub struct DownloadRequestTrack {
     pub album: String,
     pub size: u64,
     pub quality: String,
+    #[serde(default)]
+    pub duration: Option<u32>,
+    #[serde(default)]
+    pub backend_data: Option<String>,
     pub transferred: u64,
     pub percent: f64,
     pub speed: f64,
@@ -416,6 +495,13 @@ pub enum ImportChoice {
     Candidate { data_source: String, id: String },
     /// A MusicBrainz link or ID as the user typed it.
     MusicBrainz(String),
+    /// The release or recording selected when the download was requested.
+    Force {
+        #[serde(default)]
+        release_mbid: Option<String>,
+        #[serde(default)]
+        recording_mbid: Option<String>,
+    },
 }
 
 /// What the server still keeps for a row after it refused a retry or a
@@ -638,6 +724,106 @@ mod tests {
     fn track_queries_fall_back_to_the_recording_identity() {
         let context = DownloadQuery::from(track(None)).request_context();
         assert_eq!(context.key, "track:recording");
+    }
+
+    #[test]
+    fn album_queries_keep_the_selected_edition() {
+        let album = Album {
+            id: "1ccaf444-9043-43f2-b431-72f4c0b94044".to_string(),
+            title: "The Nights".to_string(),
+            artist: "Avicii".to_string(),
+            release_date: Some("2014-12-01".to_string()),
+            mbid: Some("1ccaf444-9043-43f2-b431-72f4c0b94044".to_string()),
+            cover_url: Some("cover".to_string()),
+            country: Some("SE".to_string()),
+            media: Some("CD".to_string()),
+            track_count: Some(1),
+        };
+        let context = DownloadQuery::new(Vec::new())
+            .album(album)
+            .request_context();
+        assert_eq!(
+            context.release.release_mbid.as_deref(),
+            Some("1ccaf444-9043-43f2-b431-72f4c0b94044")
+        );
+        assert_eq!(context.release.country.as_deref(), Some("SE"));
+        assert_eq!(context.release.media.as_deref(), Some("CD"));
+        assert_eq!(context.release.release_date.as_deref(), Some("2014-12-01"));
+        assert_eq!(context.release.cover_url.as_deref(), Some("cover"));
+        assert!(context.release.has_force_target());
+    }
+
+    #[test]
+    fn non_musicbrainz_album_ids_do_not_become_force_targets() {
+        let album = Album {
+            id: "lastfm:the-nights".to_string(),
+            title: "The Nights".to_string(),
+            artist: "Avicii".to_string(),
+            release_date: None,
+            mbid: Some("not-an-mbid".to_string()),
+            cover_url: None,
+            country: None,
+            media: None,
+            track_count: None,
+        };
+        let context = DownloadQuery::new(Vec::new())
+            .album(album)
+            .request_context();
+        assert!(context.release.release_mbid.is_none());
+        assert!(!context.release.has_force_target());
+    }
+
+    #[test]
+    fn track_queries_keep_the_release_and_recording_ids() {
+        let release = "1ccaf444-9043-43f2-b431-72f4c0b94044";
+        let recording = "11111111-1111-1111-1111-111111111111";
+        let track = Track {
+            id: recording.to_string(),
+            title: "The Nights".to_string(),
+            artist: "Avicii".to_string(),
+            album_id: Some(release.to_string()),
+            album_title: Some("The Nights".to_string()),
+            release_date: Some("2014-12-01".to_string()),
+            duration: Some("2:56".to_string()),
+            track_number: None,
+            disc_number: None,
+            mbid: Some(recording.to_string()),
+            release_mbid: Some(release.to_string()),
+        };
+        let context = DownloadQuery::from(track).request_context();
+        assert_eq!(context.release.release_mbid.as_deref(), Some(release));
+        assert_eq!(context.release.recording_mbid.as_deref(), Some(recording));
+        assert!(context.release.has_force_target());
+    }
+
+    #[test]
+    fn multi_track_queries_do_not_force_one_recording_onto_all_rows() {
+        let release = "1ccaf444-9043-43f2-b431-72f4c0b94044";
+        let track = Track {
+            id: "11111111-1111-1111-1111-111111111111".to_string(),
+            title: "The Nights".to_string(),
+            artist: "Avicii".to_string(),
+            album_id: Some(release.to_string()),
+            album_title: Some("The Nights".to_string()),
+            release_date: None,
+            duration: None,
+            track_number: None,
+            disc_number: None,
+            mbid: Some("11111111-1111-1111-1111-111111111111".to_string()),
+            release_mbid: Some(release.to_string()),
+        };
+        let context = DownloadQuery::new(vec![track.clone(), track]).request_context();
+        assert_eq!(context.release.release_mbid.as_deref(), Some(release));
+        assert!(context.release.recording_mbid.is_none());
+    }
+
+    #[test]
+    fn musicbrainz_ids_are_recognized_by_shape() {
+        assert!(is_mbid("1ccaf444-9043-43f2-b431-72f4c0b94044"));
+        assert!(is_mbid("1CCAF444-9043-43F2-B431-72F4C0B94044"));
+        assert!(!is_mbid("lastfm:avicii:the-nights"));
+        assert!(!is_mbid("1ccaf444-9043-43f2-b431-72f4c0b9404"));
+        assert!(!is_mbid("1ccaf444_9043-43f2-b431-72f4c0b94044"));
     }
 
     #[test]

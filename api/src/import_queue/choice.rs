@@ -72,8 +72,9 @@ impl Refusal {
     }
 }
 
-/// The importer's choice for `choice` on `job`. Anything but Auto needs the
-/// matches of a skipped automatic run, and a listed match must be one of them.
+/// The importer's choice for `choice` on `job`. Anything but Auto and Force
+/// needs the matches of a skipped automatic run, and a listed match must be one
+/// of them.
 pub(super) fn resolve(choice: &ImportChoice, job: &ImportJob) -> Result<DriverChoice, Refusal> {
     let choices = || job.choices.as_deref().ok_or_else(Refusal::no_choices);
     match choice {
@@ -97,6 +98,23 @@ pub(super) fn resolve(choice: &ImportChoice, job: &ImportJob) -> Result<DriverCh
             Ok(DriverChoice::Pick {
                 data_source: MUSICBRAINZ.to_string(),
                 id: musicbrainz_id(text, job.mode).map_err(Refusal::bad_choice)?,
+            })
+        }
+        ImportChoice::Force {
+            release_mbid,
+            recording_mbid,
+        } => {
+            let (id, entity) = match job.mode {
+                ImportMode::Album => (release_mbid.as_deref(), "release"),
+                ImportMode::Singleton => (recording_mbid.as_deref(), "recording"),
+            };
+            let id = id.ok_or_else(|| {
+                Refusal::bad_choice(format!("This request has no selected MusicBrainz {entity}"))
+            })?;
+            let id = mbid(id).ok_or_else(|| Refusal::bad_choice(NOT_AN_ID))?;
+            Ok(DriverChoice::Pick {
+                data_source: MUSICBRAINZ.to_string(),
+                id,
             })
         }
     }
@@ -342,6 +360,61 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn force_uses_the_selected_entity_for_the_import_mode() {
+        let recording = "11111111-1111-1111-1111-111111111111";
+        let force = ImportChoice::Force {
+            release_mbid: Some(MBID.into()),
+            recording_mbid: Some(recording.into()),
+        };
+        // Force does not need the automatic run's matches.
+        let album = ImportJob {
+            mode: ImportMode::Album,
+            ..job(PathBuf::from("/dl/a.flac"), Path::new("/music"))
+        };
+        assert_eq!(
+            resolve(&force, &album),
+            Ok(pick(MUSICBRAINZ, MBID)),
+            "album mode"
+        );
+        let singleton = job(PathBuf::from("/dl/a.flac"), Path::new("/music"));
+        assert_eq!(
+            resolve(&force, &singleton),
+            Ok(pick(MUSICBRAINZ, recording)),
+            "singleton mode"
+        );
+    }
+
+    #[test]
+    fn force_refuses_a_missing_or_invalid_selected_entity() {
+        let album = ImportJob {
+            mode: ImportMode::Album,
+            ..job(PathBuf::from("/dl/a.flac"), Path::new("/music"))
+        };
+        assert_eq!(
+            resolve(
+                &ImportChoice::Force {
+                    release_mbid: None,
+                    recording_mbid: Some(MBID.into()),
+                },
+                &album
+            ),
+            Err(Refusal::bad_choice(
+                "This request has no selected MusicBrainz release"
+            ))
+        );
+        assert_eq!(
+            resolve(
+                &ImportChoice::Force {
+                    release_mbid: Some("not-an-mbid".into()),
+                    recording_mbid: None,
+                },
+                &album
+            ),
+            Err(Refusal::bad_choice(NOT_AN_ID))
+        );
     }
 
     #[test]

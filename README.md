@@ -46,6 +46,7 @@ Every download becomes a request, shown in the **Downloads** drawer (the icon in
 
 - One card per download. A card groups that download's files and shows how many have landed, plus a status: PENDING, QUEUED, DOWNLOADING, DOWNLOADED, TAGGING, TAGGED, SKIPPED, STOPPED or FAILED.
 - Expand a card (click it) for its per-file rows. Each row has its own badge — QUEUED, SLSK, DOWNLOADED, WAIT, BEETS, LIB, SKIP, ERR, CANCEL or STOP — the reason when it failed, and "Show beets output" for imports.
+- Cards keep the release selected in search (artist, country, medium, track count and date) and per-file rows show the requested artist, title, album, audio quality and duration when the request stored them.
 - **Stop request** cancels the running transfers and keeps the rows; **Resume request** queues them again.
 - **Retry failed tracks** re-enqueues only the files that failed.
 - **Remove request** cancels what is still running, deletes that request's downloaded files from the download folder and drops its rows. Files already imported into a library stay there.
@@ -163,11 +164,12 @@ Default `beet import` flags used:
 In quiet mode beets skips files it cannot match closely, and the row says "No close match". Soulbeet keeps the downloaded files and the row offers:
 -   **Retry import**: the same import again, for example after you changed the beets config.
 
-When beets handled the import as one task (one track, or one album folder that beets reads as one album) and Soulbeet could read the matches beets weighed for it, the row also offers the two choices below. Otherwise it offers only Retry import.
+When beets handled the import as one task (one track, or one album folder that beets reads as one album), the row also offers the choices below. Show matches and Import as-is need the matches beets weighed for it; Force import needs only the selection stored with the request.
 -   **Show matches**: the matches beets weighed for that import, with their score and what differs. Pick one, or paste a MusicBrainz link or ID (a recording for singletons, a release in album mode), then click **Import with this match**. beets applies exactly that match (`-S <id>`), however low its score.
 -   **Import as-is**: beets imports the files with their own tags (`-A`) and looks nothing up. Every file needs artist and title tags, and in album mode an album tag too. If one lacks them, nothing is imported and the row names the files that lack them: beets would file untagged music under empty names, and with `duplicate_action: remove` a second untagged import would replace the first.
+-   **Force import**: beets imports onto the release or recording selected when the download was requested, instead of any match it found itself. Album mode uses the selected release, singleton mode the selected recording. It does not need beets' match list, so it also works when beets found no candidates at all. When a request predates the stored selection, Soulbeet recovers the MusicBrainz ID from its request key.
 
-The reason, the beets output, the kept folder and whether the row can still be retried are stored with the request, and so is the import job itself (its files, target folder, album-or-single mode and the matches beets found). A page reload and a server restart therefore both keep **Retry import**, **Import as-is** and **Show matches** working. A job is dropped when you clear the row, retry it, remove its request, or when the newest 200 per user push it out.
+The reason, the beets output, the kept folder and whether the row can still be retried are stored with the request, and so is the import job itself (its files, target folder, album-or-single mode and the matches beets found). A page reload and a server restart therefore both keep **Retry import**, **Import as-is**, **Force import** and **Show matches** working. A job is dropped when you clear the row, retry it, remove its request, or when the newest 200 per user push it out.
 
 ### Image Tiers
 
@@ -207,6 +209,8 @@ For more beets commands, see the [beets documentation](https://beets.readthedocs
 - **Periodic scan**: re-index a folder and synchronise its beets database on a schedule (off, 2h, 6h, 12h, 1 day or 1 week). Every folder is also scanned once at startup.
 - **Native file watch**: re-index a folder as files change on disk, while the app is running.
 - **Retry unavailable requests**: how often parked download requests are re-checked on Soulseek (see [Download Requests](#download-requests)).
+
+Releases and tracks in **Dashboard > Library** show the audio quality read during the last scan, such as `FLAC 16/44.1` or `MP3 320k`. A release whose tracks use different formats is marked `Mixed`. The format comes from the file extension and the details from the beets fields `bitrate`, `bitdepth` and `samplerate`; scan a folder again after upgrading if its existing rows predate these fields.
 
 #### Album Mode
 

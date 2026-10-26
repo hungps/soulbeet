@@ -28,6 +28,10 @@ pub struct ScannedTrack {
     pub mb_album_id: Option<String>,
     pub mb_release_group_id: Option<String>,
     pub size: Option<u64>,
+    pub audio_format: Option<String>,
+    pub bitrate: Option<u32>,
+    pub bit_depth: Option<u32>,
+    pub sample_rate: Option<u32>,
     pub has_metadata: bool,
 }
 
@@ -76,6 +80,9 @@ struct BeetsTrack {
     mb_album_id: Option<String>,
     mb_release_group_id: Option<String>,
     year: Option<i32>,
+    bitrate: Option<u32>,
+    bit_depth: Option<u32>,
+    sample_rate: Option<u32>,
 }
 
 fn beets_config_path() -> String {
@@ -160,9 +167,20 @@ fn parse_duration(value: &str) -> Option<u32> {
         .map(|seconds| seconds.round() as u32)
 }
 
+fn parse_positive(value: &str) -> Option<u32> {
+    parse_number(value).filter(|number: &u32| *number > 0)
+}
+
+fn audio_format(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_lowercase())
+        .filter(|extension| !extension.is_empty())
+}
+
 fn parse_beets_line(root: &Path, line: &str) -> Option<(PathBuf, BeetsTrack)> {
     let parts: Vec<&str> = line.split('\u{1f}').collect();
-    if parts.len() < 15 {
+    if parts.len() < 18 {
         return None;
     }
     let path = canonical_path(root, parts[0]);
@@ -181,6 +199,9 @@ fn parse_beets_line(root: &Path, line: &str) -> Option<(PathBuf, BeetsTrack)> {
         album_disambig: non_empty(parts[12]),
         media: non_empty(parts[13]),
         country: non_empty(parts[14]),
+        bitrate: parse_positive(parts[15]),
+        bit_depth: parse_positive(parts[16]),
+        sample_rate: parse_positive(parts[17]),
     };
     Some((path, track))
 }
@@ -222,7 +243,7 @@ async fn query_beets(root: &Path) -> Result<HashMap<PathBuf, BeetsTrack>, String
         return Ok(HashMap::new());
     }
     let config = beets_config_path();
-    let format = "$path\u{1f}$title\u{1f}$artist\u{1f}$album\u{1f}$albumartist\u{1f}$track\u{1f}$disc\u{1f}$mb_trackid\u{1f}$mb_albumid\u{1f}$mb_releasegroupid\u{1f}$length\u{1f}$year\u{1f}$albumdisambig\u{1f}$media\u{1f}$country";
+    let format = "$path\u{1f}$title\u{1f}$artist\u{1f}$album\u{1f}$albumartist\u{1f}$track\u{1f}$disc\u{1f}$mb_trackid\u{1f}$mb_albumid\u{1f}$mb_releasegroupid\u{1f}$length\u{1f}$year\u{1f}$albumdisambig\u{1f}$media\u{1f}$country\u{1f}$bitrate\u{1f}$bitdepth\u{1f}$samplerate";
 
     let mut cmd = Command::new("beet");
     cmd.arg("-c")
@@ -451,6 +472,10 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
                 mb_album_id: meta.mb_album_id.clone(),
                 mb_release_group_id: meta.mb_release_group_id.clone(),
                 size,
+                audio_format: audio_format(&file),
+                bitrate: meta.bitrate,
+                bit_depth: meta.bit_depth,
+                sample_rate: meta.sample_rate,
                 has_metadata,
             };
 
@@ -525,6 +550,10 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
                 mb_album_id: None,
                 mb_release_group_id: None,
                 size,
+                audio_format: audio_format(&file),
+                bitrate: None,
+                bit_depth: None,
+                sample_rate: None,
                 has_metadata: false,
             });
         }
@@ -857,7 +886,7 @@ mod tests {
     #[test]
     fn parses_beets_metadata_including_musicbrainz_ids() {
         let root = Path::new("/music/user");
-        let line = "Artist/Album/01 - One.flac\u{1f}One\u{1f}Artist\u{1f}Album\u{1f}Album Artist\u{1f}1\u{1f}2\u{1f}recording-id\u{1f}release-id\u{1f}release-group-id\u{1f}215.4\u{1f}2019\u{1f}deluxe edition\u{1f}CD\u{1f}GB";
+        let line = "Artist/Album/01 - One.flac\u{1f}One\u{1f}Artist\u{1f}Album\u{1f}Album Artist\u{1f}1\u{1f}2\u{1f}recording-id\u{1f}release-id\u{1f}release-group-id\u{1f}215.4\u{1f}2019\u{1f}deluxe edition\u{1f}CD\u{1f}GB\u{1f}320\u{1f}16\u{1f}44100";
         let (path, track) = parse_beets_line(root, line).unwrap();
         assert_eq!(path, Path::new("/music/user/Artist/Album/01 - One.flac"));
         assert_eq!(track.title, "One");
@@ -874,6 +903,9 @@ mod tests {
         assert_eq!(track.album_disambig.as_deref(), Some("deluxe edition"));
         assert_eq!(track.media.as_deref(), Some("CD"));
         assert_eq!(track.country.as_deref(), Some("GB"));
+        assert_eq!(track.bitrate, Some(320));
+        assert_eq!(track.bit_depth, Some(16));
+        assert_eq!(track.sample_rate, Some(44100));
     }
 
     #[test]

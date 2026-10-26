@@ -4,7 +4,7 @@ use crate::db::DB;
 use shared::download::DownloadProgress;
 use shared::download::DownloadState;
 #[cfg(feature = "server")]
-use shared::download::{DownloadRequestContext, DownloadableItem};
+use shared::download::{DownloadReleaseInfo, DownloadRequestContext, DownloadableItem};
 #[cfg(feature = "server")]
 use shared::download::{DownloadRequestSummary, DownloadRequestTrack};
 #[cfg(feature = "server")]
@@ -23,6 +23,7 @@ pub struct DownloadRequestRow {
     pub state: String,
     pub created_at: String,
     pub updated_at: String,
+    pub context_json: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +101,21 @@ pub fn state_is_terminal_key(state: &str) -> bool {
 }
 
 #[cfg(feature = "server")]
+fn fill_release_from_key(release: &mut DownloadReleaseInfo, key: &str) {
+    let id = key
+        .strip_prefix("album:")
+        .or_else(|| key.strip_prefix("track:"));
+    let Some(id) = id.filter(|id| shared::download::is_mbid(id)) else {
+        return;
+    };
+    if key.starts_with("album:") {
+        release.release_mbid = Some(id.to_string());
+    } else {
+        release.recording_mbid = Some(id.to_string());
+    }
+}
+
+#[cfg(feature = "server")]
 async fn track_in_library(user_id: &str, artist: &str, title: &str) -> Result<bool, String> {
     let exists: i64 = sqlx::query_scalar(
         "SELECT EXISTS(
@@ -134,6 +150,8 @@ impl DownloadRequestTrackRow {
             album: self.album.clone(),
             size: self.size.max(0) as u64,
             quality: self.quality.clone(),
+            duration: self.duration.map(|d| d.max(0) as u32),
+            backend_data: self.backend_data.clone(),
             transferred: self.transferred.max(0) as u64,
             percent: self.percent,
             speed: self.speed,
@@ -190,6 +208,17 @@ impl DownloadRequestTrackRow {
 impl DownloadRequestRow {
     #[cfg(feature = "server")]
     pub fn to_summary(&self, tracks: Vec<DownloadRequestTrackRow>) -> DownloadRequestSummary {
+        let context = self
+            .context_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<DownloadRequestContext>(json).ok());
+        let mut release = context
+            .as_ref()
+            .map(|context| context.release.clone())
+            .unwrap_or_default();
+        if !release.has_force_target() {
+            fill_release_from_key(&mut release, &self.request_key);
+        }
         DownloadRequestSummary {
             id: self.id.clone(),
             label: self.label.clone(),
@@ -200,6 +229,8 @@ impl DownloadRequestRow {
                 .iter()
                 .map(DownloadRequestTrackRow::to_shared)
                 .collect(),
+            release,
+            track_count: context.and_then(|context| context.track_count),
         }
     }
 
@@ -226,10 +257,11 @@ impl DownloadRequestRow {
         target_folder: &str,
         backend: Option<&str>,
     ) -> Result<Self, String> {
+        let context_json = serde_json::to_string(context).map_err(|e| e.to_string())?;
         sqlx::query_as::<_, Self>(
             "INSERT INTO download_requests
-                (id, user_id, request_key, label, artist, target_folder, backend)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+                (id, user_id, request_key, label, artist, target_folder, backend, context_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING *",
         )
         .bind(id)
@@ -239,9 +271,26 @@ impl DownloadRequestRow {
         .bind(context.artist.as_deref())
         .bind(target_folder)
         .bind(backend)
+        .bind(context_json)
         .fetch_one(&*DB)
         .await
         .map_err(|e| e.to_string())
+    }
+
+    #[cfg(feature = "server")]
+    pub async fn update_context(id: &str, context: &DownloadRequestContext) -> Result<(), String> {
+        let context_json = serde_json::to_string(context).map_err(|e| e.to_string())?;
+        sqlx::query(
+            "UPDATE download_requests
+             SET context_json = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?",
+        )
+        .bind(context_json)
+        .bind(id)
+        .execute(&*DB)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     #[cfg(feature = "server")]
@@ -792,6 +841,26 @@ mod tests {
             state_from_key("failed", Some("peer offline")),
             DownloadState::Failed("peer offline".to_string())
         );
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn legacy_request_keys_supply_a_force_target() {
+        let release_id = "1ccaf444-9043-43f2-b431-72f4c0b94044";
+        let recording_id = "11111111-1111-1111-1111-111111111111";
+        let mut release = DownloadReleaseInfo::default();
+        fill_release_from_key(&mut release, &format!("album:{release_id}"));
+        assert_eq!(release.release_mbid.as_deref(), Some(release_id));
+        assert!(release.recording_mbid.is_none());
+
+        let mut release = DownloadReleaseInfo::default();
+        fill_release_from_key(&mut release, &format!("track:{recording_id}"));
+        assert_eq!(release.recording_mbid.as_deref(), Some(recording_id));
+        assert!(release.release_mbid.is_none());
+
+        let mut release = DownloadReleaseInfo::default();
+        fill_release_from_key(&mut release, "album:Stories");
+        assert!(!release.has_force_target());
     }
 
     #[test]

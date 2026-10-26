@@ -492,6 +492,7 @@ pub async fn apply_library_tagging(
             label: format!("Tagging: {label}"),
             artist,
             track_count: None,
+            release: Default::default(),
         };
         let row = DownloadRequestRow::create(
             &request_id,

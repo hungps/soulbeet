@@ -2,11 +2,18 @@ use std::future::Future;
 use std::pin::Pin;
 
 use dioxus::prelude::*;
-use shared::download::{DownloadProgress, DownloadState, ImportChoice};
+use shared::download::{
+    DownloadProgress, DownloadReleaseInfo, DownloadRequestTrack, DownloadState, ImportChoice,
+};
 
 use super::picker::{ChoicesLoader, MatchPicker};
 use super::Failure;
-use crate::{Disclosure, RowAction};
+use crate::{Disclosure, QualityBadge, RowAction};
+
+/// A track's length as `M:SS`.
+fn format_duration(seconds: u32) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
 
 /// How a row's state is shown: badge text and tooltip, plus row and badge classes.
 #[derive(Debug, PartialEq)]
@@ -123,14 +130,15 @@ pub(super) fn shows_choices(row: &DownloadProgress) -> bool {
     shows_retry(row) && row.can_choose_import
 }
 
-/// Retry import, Import as-is and the match picker for one kept import job.
-/// Every row of a job shares that job, so the album renders this once with the
-/// first row that kept it.
+/// Retry import, Import as-is, Force import and the match picker for one kept
+/// import job. Every row of a job shares that job, so the album renders this
+/// once with the first row that kept it.
 #[component]
 pub(super) fn ImportActions(
     item: String,
     state: DownloadState,
     can_choose: bool,
+    #[props(default)] force: DownloadReleaseInfo,
     on_import: ImportHandler,
     on_load_choices: ChoicesLoader,
 ) -> Element {
@@ -161,11 +169,24 @@ pub(super) fn ImportActions(
         });
     });
 
+    let forced = force.has_force_target().then(|| ImportChoice::Force {
+        release_mbid: force.release_mbid.clone(),
+        recording_mbid: force.recording_mbid.clone(),
+    });
+
     rsx! {
         div { class: "mt-2 flex flex-wrap gap-2",
             RowAction { busy: busy(), onclick: move |_| import.call(ImportChoice::Auto), "Retry import" }
             if can_choose {
                 RowAction { busy: busy(), onclick: move |_| import.call(ImportChoice::AsIs), "Import as-is" }
+            }
+            if let Some(choice) = forced {
+                RowAction {
+                    busy: busy(),
+                    title: "Import using the release or track you selected when searching, instead of beets' matches",
+                    onclick: move |_| import.call(choice.clone()),
+                    "Force import"
+                }
             }
         }
         if can_choose {
@@ -186,6 +207,12 @@ pub fn DownloadItem(
     /// Whether the row offers its own import actions, or its album does.
     #[props(default = true)]
     show_import_actions: bool,
+    /// The edition selected in search, used by Force import.
+    #[props(default)]
+    release: DownloadReleaseInfo,
+    /// The requested track behind this row, when the request stores it.
+    #[props(default)]
+    track: Option<DownloadRequestTrack>,
     on_cancel: EventHandler<DownloadProgress>,
     on_import: ImportHandler,
     on_load_choices: ChoicesLoader,
@@ -218,9 +245,9 @@ pub fn DownloadItem(
 
     rsx! {
       div { class: "bg-white/5 border {border_class} p-4 rounded-lg hover:border-beet-accent/50 transition-colors group",
-        div { class: "flex justify-between items-start mb-2",
+        div { class: "flex justify-between items-start gap-2 mb-2",
           div {
-            class: "text-sm font-bold text-white truncate w-3/4 pr-2",
+            class: "text-sm font-bold text-white break-words min-w-0 flex-1",
             title: "{file.item}",
             "{display_name}"
           }
@@ -246,15 +273,35 @@ pub fn DownloadItem(
             }
           }
         }
-        div { class: "flex justify-between text-xs text-gray-400 font-mono mb-1",
-          span {
-            if matches!(state, DownloadState::InProgress) && file.speed > 0.0 {
-              "{format_size(file.speed as u64)}/s"
-            } else {
-              "{format_size(file.size)}"
+        if let Some(meta) = track.as_ref() {
+          div { class: "text-[11px] text-gray-400 font-mono break-words mb-1",
+            span { class: "text-gray-300", "{meta.artist}" }
+            span { " · {meta.title}" }
+            if !meta.album.is_empty() && meta.album != meta.title {
+              span { class: "text-gray-500", " · {meta.album}" }
             }
           }
-          span { "{percent}%" }
+        }
+        div { class: "flex justify-between items-center gap-2 text-xs text-gray-400 font-mono mb-1",
+          div { class: "flex items-center gap-1.5 min-w-0 flex-wrap",
+            if let Some(meta) = track.as_ref() {
+              QualityBadge {
+                quality: meta.quality.clone(),
+                backend_data: meta.backend_data.clone(),
+              }
+              if let Some(seconds) = meta.duration {
+                span { class: "text-gray-500", "{format_duration(seconds)}" }
+              }
+            }
+            span {
+              if matches!(state, DownloadState::InProgress) && file.speed > 0.0 {
+                "{format_size(file.speed as u64)}/s"
+              } else {
+                "{format_size(file.size)}"
+              }
+            }
+          }
+          span { class: "shrink-0", "{percent}%" }
         }
         // Progress Bar
         if matches!(state, DownloadState::InProgress | DownloadState::Importing) {
@@ -287,6 +334,7 @@ pub fn DownloadItem(
             item: item.clone(),
             state: file.state.clone(),
             can_choose: shows_choices(&file),
+            force: release.clone(),
             on_import,
             on_load_choices,
           }
@@ -345,6 +393,14 @@ mod tests {
                 .with_state(state)
                 .with_import_details(kept.map(str::to_string), None)
         }
+    }
+
+    #[test]
+    fn duration_reads_as_minutes_and_seconds() {
+        assert_eq!(format_duration(0), "0:00");
+        assert_eq!(format_duration(9), "0:09");
+        assert_eq!(format_duration(176), "2:56");
+        assert_eq!(format_duration(3_600), "60:00");
     }
 
     #[test]

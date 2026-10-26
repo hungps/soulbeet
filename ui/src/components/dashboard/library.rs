@@ -10,7 +10,7 @@ use shared::metadata::{Album, Track};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::use_auth;
-use crate::{ConfirmModal, CoverImage, DownloadTick, Modal};
+use crate::{ConfirmModal, CoverImage, DownloadTick, Modal, QualityBadge};
 
 #[derive(Clone, PartialEq)]
 enum PendingRemoval {
@@ -195,6 +195,39 @@ fn release_subtitle(release: &LibraryRelease) -> String {
     parts.extend(filled(release.media.as_ref()).map(str::to_string));
     parts.extend(filled(release.country.as_ref()).map(str::to_string));
     parts.join(" · ")
+}
+
+fn track_quality_badge(track: &LibraryTrackInfo) -> Element {
+    let Some(format) = track.audio_format.as_deref() else {
+        return rsx! {};
+    };
+    rsx! {
+        QualityBadge {
+            quality: format.to_string(),
+            bitrate: track.bitrate.map(|value| value as i32),
+            bit_depth: track.bit_depth.map(|value| value as i32),
+            sample_rate: track.sample_rate.map(|value| value as i32),
+        }
+    }
+}
+
+fn release_quality_badge(release: &LibraryRelease) -> Element {
+    let Some(format) = release.audio_format.as_deref() else {
+        return rsx! {};
+    };
+    if release.quality_varies {
+        return rsx! {
+            QualityBadge { quality: "mixed".to_string(), label: Some("Mixed".to_string()) }
+        };
+    }
+    rsx! {
+        QualityBadge {
+            quality: format.to_string(),
+            bitrate: release.bitrate.map(|value| value as i32),
+            bit_depth: release.bit_depth.map(|value| value as i32),
+            sample_rate: release.sample_rate.map(|value| value as i32),
+        }
+    }
 }
 
 #[component]
@@ -709,16 +742,17 @@ pub fn LibraryTab() -> Element {
                     }
                     div { class: "flex-grow min-w-0",
                         div { class: "flex items-center gap-2 min-w-0 flex-wrap",
-                            p { class: "text-sm font-bold text-white truncate",
+                            p { class: "text-sm font-bold text-white break-words min-w-0",
                                 "{release_title(&release)}"
                             }
                             span {
                                 class: "text-[10px] font-mono px-1.5 py-0.5 rounded border shrink-0 {badge_class}",
                                 "{badge}"
                             }
+                            {release_quality_badge(&release)}
                             {download_state_badge(download_state.as_ref())}
                         }
-                        p { class: "text-xs text-gray-400 font-mono truncate",
+                        p { class: "text-xs text-gray-400 font-mono break-words",
                             "{release_subtitle(&release)}"
                         }
                         div { class: "flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] font-mono text-gray-600 mt-0.5",
@@ -892,7 +926,7 @@ pub fn LibraryTab() -> Element {
                                             .get(&track_activity_key(&track.artist, &track.title))
                                             .cloned();
                                         rsx! {
-                                            div { class: "flex items-center gap-3 p-1.5 rounded hover:bg-white/5",
+                                            div { class: "flex flex-wrap items-center gap-3 p-1.5 rounded hover:bg-white/5",
                                                 span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0",
                                                     {
                                                         match (track.disc_number, track.track_number) {
@@ -903,9 +937,10 @@ pub fn LibraryTab() -> Element {
                                                     }
                                                 }
                                                 div { class: "flex-grow min-w-0",
-                                                    p { class: "text-xs font-mono text-gray-300 truncate", "{track.title}" }
-                                                    p { class: "text-[10px] font-mono text-gray-600 truncate", "{track.path}" }
+                                                    p { class: "text-xs font-mono text-gray-300 break-words", "{track.title}" }
+                                                    p { class: "text-[10px] font-mono text-gray-600 break-all", "{track.path}" }
                                                 }
+                                                {track_quality_badge(&track)}
                                                 {download_state_badge(track_download_state.as_ref())}
                                                 if track.matched {
                                                     span { class: "text-[9px] font-mono px-1.5 py-0.5 rounded border bg-green-600/20 text-green-300 border-green-500/40 shrink-0",

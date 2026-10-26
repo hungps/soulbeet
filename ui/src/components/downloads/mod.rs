@@ -5,8 +5,8 @@ use std::pin::Pin;
 use dioxus::logger::tracing::warn;
 use dioxus::prelude::*;
 use shared::download::{
-    DownloadProgress, DownloadRequestSummary, DownloadState, ImportChoice, KeptImport,
-    MatchChoices, PendingRequestSummary,
+    DownloadProgress, DownloadReleaseInfo, DownloadRequestSummary, DownloadState, ImportChoice,
+    KeptImport, MatchChoices, PendingRequestSummary,
 };
 
 mod item;
@@ -226,6 +226,19 @@ fn group_percent(group: &TransferGroup) -> f64 {
     (transferred as f64 / total as f64) * 100.0
 }
 
+/// The selected edition's country, medium and date, as the search card shows them.
+fn release_facts(release: &DownloadReleaseInfo, track_count: Option<u32>) -> String {
+    let media = release.media.as_ref().map(|media| match track_count {
+        Some(count) => format!("{media} ({count})"),
+        None => media.clone(),
+    });
+    [release.country.clone(), media, release.release_date.clone()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<String>>()
+        .join(" · ")
+}
+
 #[component]
 pub fn Downloads(mut props: DownloadsProps) -> Element {
     let auth = use_auth();
@@ -234,6 +247,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
     let mut clearing = use_signal(|| false);
     let mut clearing_failed = use_signal(|| false);
     let mut pending = use_signal::<Vec<PendingRequestSummary>>(Vec::new);
+    let mut requests = use_signal::<HashMap<String, DownloadRequestSummary>>(HashMap::new);
     let is_open = props.is_open;
     let mut downloads_signal = props.downloads;
 
@@ -261,6 +275,14 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                                 seed_request_tracks(request, &mut map);
                             }
                         }
+                        let by_id: HashMap<String, DownloadRequestSummary> = overview
+                            .requests
+                            .iter()
+                            .map(|request| (request.id.clone(), request.clone()))
+                            .collect();
+                        if *requests.peek() != by_id {
+                            requests.set(by_id);
+                        }
                         if *pending.peek() != overview.pending {
                             pending.set(overview.pending);
                         }
@@ -274,6 +296,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
 
     let active_downloads = sorted_rows(&props.downloads.read());
     let groups = group_tracks(&props.downloads.read());
+    let requests_by_id = requests.read().clone();
 
     let processing_count = active_downloads
         .iter()
@@ -491,14 +514,14 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                     div { class: "flex items-start justify-between gap-2",
                       div { class: "min-w-0 flex-grow",
                         div { class: "flex items-center gap-2 min-w-0",
-                          h4 { class: "text-sm font-bold text-beet-leaf truncate", "{entry.label}" }
+                          h4 { class: "text-sm font-bold text-beet-leaf break-words min-w-0 flex-1", "{entry.label}" }
                           span {
                             class: "text-[9px] font-mono px-1.5 py-0.5 rounded border uppercase shrink-0 {status_class}",
                             "{status_label}"
                           }
                         }
                         if let Some(artist) = entry.artist.as_ref() {
-                          p { class: "text-[10px] font-mono text-gray-500 truncate", "{artist}" }
+                          p { class: "text-[10px] font-mono text-gray-500 break-words", "{artist}" }
                         }
                         p { class: "text-[10px] font-mono text-gray-500 uppercase tracking-widest",
                           if entry.track_count > 0 {
@@ -573,6 +596,19 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                 let resume_busy = busy_key.clone();
                 let retry_busy = busy_key.clone();
                 let remove_busy = busy_key.clone();
+                let request = group_id
+                    .as_ref()
+                    .and_then(|id| requests_by_id.get(id))
+                    .cloned();
+                let release = request
+                    .as_ref()
+                    .map(|request| request.release.clone())
+                    .unwrap_or_default();
+                let group_artist = request.as_ref().and_then(|request| request.artist.clone());
+                let group_facts = request
+                    .as_ref()
+                    .map(|request| release_facts(&request.release, request.track_count))
+                    .unwrap_or_default();
 
                 rsx! {
                   div { key: "{key}", class: "bg-white/5 border border-white/5 rounded-lg overflow-hidden",
@@ -591,12 +627,18 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                       },
                       div { class: "flex items-start justify-between gap-2",
                         div { class: "min-w-0 flex-grow",
-                          div { class: "flex items-center gap-2 min-w-0",
-                            h4 { class: "text-sm font-bold text-beet-leaf truncate", "{group.label}" }
+                          div { class: "flex items-start gap-2 min-w-0",
+                            h4 { class: "text-sm font-bold text-beet-leaf break-words min-w-0 flex-1", "{group.label}" }
                             span {
                               class: "text-[9px] font-mono px-1.5 py-0.5 rounded border uppercase shrink-0 {status_class}",
                               "{status_label}"
                             }
+                          }
+                          if let Some(artist) = group_artist.as_ref() {
+                            p { class: "text-[10px] font-mono text-gray-400 break-words", "{artist}" }
+                          }
+                          if !group_facts.is_empty() {
+                            p { class: "text-[10px] font-mono text-gray-500 break-words", "{group_facts}" }
                           }
                           p { class: "text-[10px] font-mono text-gray-500 uppercase tracking-widest",
                             "{finished}/{total} tracks"
@@ -783,17 +825,30 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                             item: row.item.clone(),
                             state: row.state.clone(),
                             can_choose: shows_choices(row),
+                            force: release.clone(),
                             on_import: import_again,
                             on_load_choices: load_choices,
                           }
                         }
                         for file in group.tracks.iter() {
-                          DownloadItem {
-                            file: file.clone(),
-                            show_import_actions: group_import_row(group).is_none(),
-                            on_cancel: cancel_download,
-                            on_import: import_again,
-                            on_load_choices: load_choices,
+                          {
+                            let track = request
+                              .as_ref()
+                              .and_then(|request| {
+                                request.tracks.iter().find(|track| track.item == file.item)
+                              })
+                              .cloned();
+                            rsx! {
+                              DownloadItem {
+                                file: file.clone(),
+                                show_import_actions: group_import_row(group).is_none(),
+                                release: release.clone(),
+                                track,
+                                on_cancel: cancel_download,
+                                on_import: import_again,
+                                on_load_choices: load_choices,
+                              }
+                            }
                           }
                         }
                       }
@@ -998,7 +1053,7 @@ mod tests {
         serde_json::from_value(sent).unwrap()
     }
 
-    fn every_choice() -> [ImportChoice; 4] {
+    fn every_choice() -> [ImportChoice; 5] {
         [
             ImportChoice::Auto,
             ImportChoice::AsIs,
@@ -1007,7 +1062,24 @@ mod tests {
                 id: "r1".into(),
             },
             ImportChoice::MusicBrainz("https://musicbrainz.org/release/x".into()),
+            ImportChoice::Force {
+                release_mbid: Some("1ccaf444-9043-43f2-b431-72f4c0b94044".into()),
+                recording_mbid: Some("11111111-1111-1111-1111-111111111111".into()),
+            },
         ]
+    }
+
+    #[test]
+    fn release_facts_read_country_medium_count_and_date() {
+        let release = DownloadReleaseInfo {
+            country: Some("SE".into()),
+            media: Some("CD".into()),
+            release_date: Some("2014-12-01".into()),
+            ..Default::default()
+        };
+        assert_eq!(release_facts(&release, Some(1)), "SE · CD (1) · 2014-12-01");
+        assert_eq!(release_facts(&release, None), "SE · CD · 2014-12-01");
+        assert_eq!(release_facts(&DownloadReleaseInfo::default(), None), "");
     }
 
     fn after(choice: &ImportChoice, error: &ServerFnError) -> (DownloadProgress, Failure) {

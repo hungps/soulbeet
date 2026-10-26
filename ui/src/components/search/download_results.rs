@@ -3,65 +3,7 @@ use dioxus::prelude::*;
 use shared::download::{DownloadRequestContext, DownloadableGroup, DownloadableItem};
 use std::collections::HashSet;
 
-use crate::{use_auth, Checkbox, FIELD_CLASS};
-
-/// Format a sample rate in Hz as kHz, trimming a trailing .0 (44100 -> "44.1", 48000 -> "48").
-fn format_khz(hz: i32) -> String {
-    let khz = hz as f64 / 1000.0;
-    if khz.fract() == 0.0 {
-        format!("{}", khz as i64)
-    } else {
-        format!("{khz:.1}")
-    }
-}
-
-fn quality_badge(item: &DownloadableItem) -> Element {
-    let quality = item.quality.as_str();
-
-    let search_result = item
-        .backend_data
-        .as_ref()
-        .and_then(|data| serde_json::from_str::<shared::slskd::SearchResult>(data).ok());
-
-    let label = if quality == "mp3" {
-        let bitrate = search_result.as_ref().and_then(|sr| sr.bitrate);
-        match bitrate {
-            Some(br) if br >= 320 => "320k".to_string(),
-            Some(br) if br >= 256 => "256k".to_string(),
-            Some(br) if br >= 192 => "192k".to_string(),
-            Some(br) if br > 0 => format!("{}k", br),
-            _ => "MP3".to_string(),
-        }
-    } else if matches!(quality, "flac" | "wav") {
-        // Lossless: show bit depth / sample rate like slskd does (e.g. FLAC 16/44.1)
-        let (depth, rate) = search_result
-            .as_ref()
-            .map(|sr| (sr.bit_depth, sr.sample_rate))
-            .unwrap_or((None, None));
-        match (depth, rate) {
-            (Some(d), Some(r)) => {
-                format!("{} {}/{}", quality.to_uppercase(), d, format_khz(r))
-            }
-            (None, Some(r)) => format!("{} {}", quality.to_uppercase(), format_khz(r)),
-            _ => quality.to_uppercase(),
-        }
-    } else {
-        quality.to_uppercase()
-    };
-
-    let color = match quality {
-        "flac" | "wav" => "bg-blue-600/30 text-blue-300 border-blue-500/40",
-        "m4a" | "aac" | "ogg" => "bg-green-600/30 text-green-300 border-green-500/40",
-        _ => "bg-gray-600/30 text-gray-300 border-gray-500/40",
-    };
-
-    rsx! {
-        span {
-            class: "text-[10px] font-mono px-1.5 py-0.5 rounded border {color} uppercase shrink-0",
-            "{label}"
-        }
-    }
-}
+use crate::{use_auth, Checkbox, QualityBadge, FIELD_CLASS};
 
 #[derive(Props, PartialEq, Clone)]
 pub struct Props {
@@ -120,6 +62,19 @@ fn track_fit(group: &DownloadableGroup, request: &DownloadRequestContext) -> Str
     }
 }
 
+/// The selected edition's country, medium and date, as the album card shows them.
+fn selected_release_facts(request: &DownloadRequestContext) -> String {
+    [
+        request.release.country.clone(),
+        request.release.media.clone(),
+        request.release.release_date.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<String>>()
+    .join(" · ")
+}
+
 /// The line under the folder path: who serves it, how it matches, its score.
 fn release_facts(group: &DownloadableGroup, request: &DownloadRequestContext) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -163,7 +118,18 @@ mod tests {
             label: "÷ (Deluxe)".to_string(),
             artist: Some("Ed Sheeran".to_string()),
             track_count,
+            release: Default::default(),
         }
+    }
+
+    #[test]
+    fn selected_release_facts_join_the_known_edition_parts() {
+        let mut req = request(Some(1));
+        assert_eq!(selected_release_facts(&req), "");
+        req.release.country = Some("SE".into());
+        req.release.media = Some("CD".into());
+        req.release.release_date = Some("2014-12-01".into());
+        assert_eq!(selected_release_facts(&req), "SE · CD · 2014-12-01");
     }
 
     #[test]
@@ -199,7 +165,10 @@ mod tests {
             quality_score: 1.0,
             backend_data: None,
         };
-        assert_eq!(file_name(&item("Music\\÷\\01 - Eraser.flac")), "01 - Eraser.flac");
+        assert_eq!(
+            file_name(&item("Music\\÷\\01 - Eraser.flac")),
+            "01 - Eraser.flac"
+        );
         assert_eq!(file_name(&item("Eraser.flac")), "Eraser.flac");
     }
 }
@@ -216,14 +185,17 @@ fn TrackItem(props: TrackItemProps) -> Element {
 
             Checkbox { is_selected: props.is_selected }
 
-            label { class: "cursor-pointer text-gray-300 font-mono text-sm flex-1 min-w-0 truncate",
-                span { class: "block truncate", "{props.track.title}" }
-                span { class: "block truncate text-[11px] text-gray-500", title: "{props.track.id}",
+            label { class: "cursor-pointer text-gray-300 font-mono text-sm flex-1 min-w-0",
+                span { class: "block break-words", "{props.track.title}" }
+                span { class: "block break-all text-[11px] text-gray-500", title: "{props.track.id}",
                     "{file_name(&props.track)}"
                 }
             }
 
-            {quality_badge(&props.track)}
+            QualityBadge {
+                quality: props.track.quality.clone(),
+                backend_data: props.track.backend_data.clone(),
+            }
         }
     }
 }
@@ -334,6 +306,7 @@ pub fn DownloadResults(props: Props) -> Element {
     let best_group_id = sorted_results.first().map(|group| group.group_id.clone());
     let results = sorted_results;
     let selected_release = props.request.clone();
+    let selected_release_meta = selected_release_facts(&selected_release);
     let item_request = props.request.clone();
     let preferred_folder_id = props.selected_folder_id.clone();
     let mut folders = use_signal(std::vec::Vec::new);
@@ -485,11 +458,14 @@ pub fn DownloadResults(props: Props) -> Element {
                         span { class: "text-[10px] font-mono uppercase tracking-widest text-beet-accent",
                             "Selected release"
                         }
-                        h4 { class: "text-md font-bold text-white truncate", "{selected_release.label}" }
+                        h4 { class: "text-md font-bold text-white break-words", "{selected_release.label}" }
                         if let Some(artist) = selected_release.artist.as_ref() {
                             if !artist.is_empty() {
-                                p { class: "text-xs text-gray-400 font-mono truncate", "{artist}" }
+                                p { class: "text-xs text-gray-400 font-mono break-words", "{artist}" }
                             }
+                        }
+                        if !selected_release_meta.is_empty() {
+                            p { class: "text-xs text-gray-500 font-mono break-words", "{selected_release_meta}" }
                         }
                         if let Some(track_count) = selected_release.track_count {
                             p { class: "text-xs text-gray-500 font-mono", "{track_count} tracks" }

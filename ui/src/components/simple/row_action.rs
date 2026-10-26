@@ -8,6 +8,9 @@ pub struct RowActionProps {
     /// The action cannot run yet.
     #[props(default)]
     pub disabled: bool,
+    /// Tooltip explaining what the action does.
+    #[props(default)]
+    pub title: Option<String>,
     pub onclick: EventHandler,
     pub children: Element,
 }
@@ -25,6 +28,7 @@ pub fn RowAction(props: RowActionProps) -> Element {
             class: "text-xs font-mono px-2 py-1 rounded border border-white/10 text-gray-300 enabled:hover:border-beet-accent/50 enabled:hover:text-white transition-colors disabled:opacity-50 {cursor}",
             disabled: props.busy || props.disabled,
             aria_busy: props.busy,
+            title: props.title.clone().unwrap_or_default(),
             onclick: move |evt: Event<MouseData>| {
                 evt.stop_propagation();
                 props.onclick.call(());

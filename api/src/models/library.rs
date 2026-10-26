@@ -1,8 +1,10 @@
+use std::collections::{HashMap, HashSet};
+
 use shared::library::{
     normalize_key, LibraryFolderInfo, LibraryMatchInfo, LibraryMatchQuery, LibraryMatchResult,
     LibraryRelease, LibraryReleaseDetail, LibraryTrackInfo, ReleaseCompleteness,
 };
-use soulbeet::library::ScannedLibrary;
+use soulbeet::library::{ScannedLibrary, ScannedTrack};
 use uuid::Uuid;
 
 use crate::db::DB;
@@ -27,6 +29,11 @@ pub struct LibraryReleaseRow {
     pub matched_track_count: i64,
     pub expected_track_count: Option<i64>,
     pub total_size: i64,
+    pub audio_format: Option<String>,
+    pub bitrate: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub sample_rate: Option<i64>,
+    pub quality_varies: i64,
     pub scanned_at: String,
     pub ignored: i64,
     pub folder_name: String,
@@ -51,6 +58,10 @@ pub struct LibraryTrackRow {
     pub mb_track_id: Option<String>,
     pub mb_album_id: Option<String>,
     pub size: Option<i64>,
+    pub audio_format: Option<String>,
+    pub bitrate: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub sample_rate: Option<i64>,
     pub matched: i64,
     pub indexed_at: String,
 }
@@ -78,6 +89,54 @@ fn completeness(track_count: i64, matched: i64, expected: Option<i64>) -> Releas
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct AudioQuality {
+    audio_format: Option<String>,
+    bitrate: Option<u32>,
+    bit_depth: Option<u32>,
+    sample_rate: Option<u32>,
+}
+
+impl AudioQuality {
+    fn of(track: &ScannedTrack) -> Self {
+        Self {
+            audio_format: track.audio_format.clone(),
+            bitrate: track.bitrate,
+            bit_depth: track.bit_depth,
+            sample_rate: track.sample_rate,
+        }
+    }
+}
+
+fn release_quality(tracks: &[ScannedTrack]) -> (AudioQuality, bool) {
+    let mut counts: HashMap<AudioQuality, usize> = HashMap::new();
+    let mut formats = HashSet::new();
+    for track in tracks {
+        let quality = AudioQuality::of(track);
+        if quality.audio_format.is_none() {
+            continue;
+        }
+        formats.extend(quality.audio_format.clone());
+        *counts.entry(quality).or_default() += 1;
+    }
+    let quality = counts
+        .into_iter()
+        .max_by(|(left, left_count), (right, right_count)| {
+            left_count.cmp(right_count).then_with(|| left.cmp(right))
+        })
+        .map(|(quality, _)| quality)
+        .unwrap_or_default();
+    (quality, formats.len() > 1)
+}
+
+fn audio_format_from_path(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_lowercase())
+        .filter(|extension| !extension.is_empty())
+}
+
 impl LibraryReleaseRow {
     pub fn to_shared(&self) -> LibraryRelease {
         LibraryRelease {
@@ -101,6 +160,11 @@ impl LibraryReleaseRow {
             matched_track_count: self.matched_track_count.max(0) as u32,
             expected_track_count: self.expected_track_count.map(|value| value.max(0) as u32),
             total_size: self.total_size.max(0) as u64,
+            audio_format: self.audio_format.clone(),
+            bitrate: self.bitrate.map(|value| value.max(0) as u32),
+            bit_depth: self.bit_depth.map(|value| value.max(0) as u32),
+            sample_rate: self.sample_rate.map(|value| value.max(0) as u32),
+            quality_varies: self.quality_varies != 0,
             completeness: completeness(
                 self.track_count,
                 self.matched_track_count,
@@ -128,6 +192,13 @@ impl LibraryTrackRow {
             mb_track_id: self.mb_track_id.clone().filter(|value| !value.is_empty()),
             mb_album_id: self.mb_album_id.clone().filter(|value| !value.is_empty()),
             size: self.size.map(|value| value.max(0) as u64),
+            audio_format: self
+                .audio_format
+                .clone()
+                .or_else(|| audio_format_from_path(&self.path)),
+            bitrate: self.bitrate.map(|value| value.max(0) as u32),
+            bit_depth: self.bit_depth.map(|value| value.max(0) as u32),
+            sample_rate: self.sample_rate.map(|value| value.max(0) as u32),
             matched: self.matched != 0,
         }
     }
@@ -186,14 +257,16 @@ impl LibraryReleaseRow {
             } else {
                 release.path.clone()
             };
+            let (quality, quality_varies) = release_quality(&release.tracks);
 
             sqlx::query(
                 "INSERT INTO library_releases
                     (id, folder_id, folder_path, album, album_artist, album_key, album_artist_key,
                      album_disambig, media, country, year, mb_album_id, mb_release_group_id,
                      release_path, track_count, matched_track_count, expected_track_count,
-                     total_size, scanned_at, ignored)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                     total_size, audio_format, bitrate, bit_depth, sample_rate, quality_varies,
+                     scanned_at, ignored)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&release_id)
             .bind(folder_id)
@@ -212,6 +285,11 @@ impl LibraryReleaseRow {
             .bind(release.tracks.len() as i64)
             .bind(matched)
             .bind(total_size)
+            .bind(&quality.audio_format)
+            .bind(quality.bitrate.map(|value| value as i64))
+            .bind(quality.bit_depth.map(|value| value as i64))
+            .bind(quality.sample_rate.map(|value| value as i64))
+            .bind(if quality_varies { 1i64 } else { 0i64 })
             .bind(&scanned_at)
             .bind(prior_ignored.get(&release_path).copied().unwrap_or(0))
             .execute(&mut *tx)
@@ -223,8 +301,9 @@ impl LibraryReleaseRow {
                     "INSERT INTO library_tracks
                         (id, release_id, folder_id, path, title, artist, album, album_artist,
                          title_key, artist_key, album_key, track_number, disc_number, duration,
-                         mb_track_id, mb_album_id, size, matched, indexed_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         mb_track_id, mb_album_id, size, audio_format, bitrate, bit_depth,
+                         sample_rate, matched, indexed_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(Uuid::new_v4().to_string())
                 .bind(&release_id)
@@ -243,6 +322,10 @@ impl LibraryReleaseRow {
                 .bind(&track.mb_track_id)
                 .bind(&track.mb_album_id)
                 .bind(track.size.map(|value| value as i64))
+                .bind(&track.audio_format)
+                .bind(track.bitrate.map(|value| value as i64))
+                .bind(track.bit_depth.map(|value| value as i64))
+                .bind(track.sample_rate.map(|value| value as i64))
                 .bind(if track.has_metadata { 1i64 } else { 0i64 })
                 .bind(&scanned_at)
                 .execute(&mut *tx)
@@ -661,6 +744,11 @@ mod tests {
             matched_track_count: matched,
             expected_track_count: expected,
             total_size: 0,
+            audio_format: None,
+            bitrate: None,
+            bit_depth: None,
+            sample_rate: None,
+            quality_varies: 0,
             scanned_at: String::new(),
             ignored: 0,
             folder_name: "Main".to_string(),
@@ -670,5 +758,28 @@ mod tests {
         assert!(info.complete);
         assert_eq!(info.release_ids, vec!["a", "b"]);
         assert_eq!(info.track_count, 4);
+    }
+
+    #[test]
+    fn release_quality_uses_the_most_common_track_quality() {
+        let track = |format: &str, bitrate: Option<u32>, bit_depth: Option<u32>| ScannedTrack {
+            audio_format: Some(format.to_string()),
+            bitrate,
+            bit_depth,
+            sample_rate: Some(44100),
+            ..ScannedTrack::default()
+        };
+        let (quality, varies) = release_quality(&[
+            track("flac", None, Some(16)),
+            track("flac", None, Some(16)),
+            track("mp3", Some(320), None),
+        ]);
+        assert_eq!(quality.audio_format.as_deref(), Some("flac"));
+        assert_eq!(quality.bit_depth, Some(16));
+        assert!(varies);
+
+        let (quality, varies) = release_quality(&[track("mp3", Some(320), None)]);
+        assert_eq!(quality.audio_format.as_deref(), Some("mp3"));
+        assert!(!varies);
     }
 }
