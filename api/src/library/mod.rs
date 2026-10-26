@@ -11,6 +11,8 @@ use crate::models::app_config::{keys, AppConfig};
 use crate::models::folder::Folder;
 use crate::models::library::{LibraryReleaseRow, LibraryScanStateRow};
 
+#[cfg(feature = "server")]
+pub mod quality;
 pub mod watcher;
 
 static SCAN_LOCKS: LazyLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
@@ -48,7 +50,9 @@ pub async fn scan_folder_internal(
 
     let root = PathBuf::from(&folder.path);
     match soulbeet::library::scan_library(&root, sync_beets).await {
-        Ok(scan) => {
+        Ok(mut scan) => {
+            #[cfg(feature = "server")]
+            quality::apply(&root, &mut scan).await;
             let (release_count, track_count) =
                 LibraryReleaseRow::replace_folder(folder_id, &folder.path, &scan).await?;
             LibraryScanStateRow::set_status(

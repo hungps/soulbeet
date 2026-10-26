@@ -171,6 +171,44 @@ fn parse_positive(value: &str) -> Option<u32> {
     parse_number(value).filter(|number: &u32| *number > 0)
 }
 
+/// beets prints `bitrate` as `128kbps`; a bare number is kbps too, unless it
+/// is large enough to be the raw bits-per-second value.
+fn parse_bitrate(value: &str) -> Option<u32> {
+    let value = value.trim();
+    let unit = value.to_lowercase();
+    let number: f64 = match unit.strip_suffix("kbps") {
+        Some(_) => value[..value.len() - 4].trim().parse().ok()?,
+        None => {
+            let number: f64 = value.parse().ok()?;
+            return (number > 0.0).then(|| {
+                if number >= 10_000.0 {
+                    (number / 1000.0).round() as u32
+                } else {
+                    number.round() as u32
+                }
+            });
+        }
+    };
+    (number > 0.0).then(|| number.round() as u32)
+}
+
+/// beets prints `samplerate` as `44kHz`, which truncates: 44100 Hz reads as
+/// `44kHz`. A bare number under 1000 can only be kHz.
+fn parse_samplerate(value: &str) -> Option<u32> {
+    let value = value.trim();
+    let unit = value.to_lowercase();
+    let (number, scale) = if unit.ends_with("khz") {
+        (&value[..value.len() - 3], 1000.0)
+    } else if unit.ends_with("hz") {
+        (&value[..value.len() - 2], 1.0)
+    } else {
+        let hertz: f64 = value.parse().ok()?;
+        (value, if hertz < 1000.0 { 1000.0 } else { 1.0 })
+    };
+    let number: f64 = number.trim().parse().ok()?;
+    (number > 0.0).then(|| (number * scale).round() as u32)
+}
+
 fn audio_format(path: &Path) -> Option<String> {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -199,9 +237,9 @@ fn parse_beets_line(root: &Path, line: &str) -> Option<(PathBuf, BeetsTrack)> {
         album_disambig: non_empty(parts[12]),
         media: non_empty(parts[13]),
         country: non_empty(parts[14]),
-        bitrate: parse_positive(parts[15]),
+        bitrate: parse_bitrate(parts[15]),
         bit_depth: parse_positive(parts[16]),
-        sample_rate: parse_positive(parts[17]),
+        sample_rate: parse_samplerate(parts[17]),
     };
     Some((path, track))
 }
@@ -906,6 +944,35 @@ mod tests {
         assert_eq!(track.bitrate, Some(320));
         assert_eq!(track.bit_depth, Some(16));
         assert_eq!(track.sample_rate, Some(44100));
+    }
+
+    #[test]
+    fn beets_human_formatted_quality_reads_back_as_numbers() {
+        // `beet ls -f` prints the fields the way beets shows them.
+        for (value, kbps) in [
+            ("128kbps", Some(128)),
+            ("320kbps", Some(320)),
+            ("128", Some(128)),
+            ("128000", Some(128)),
+            ("", None),
+            ("0kbps", None),
+        ] {
+            assert_eq!(parse_bitrate(value), kbps, "{value}");
+        }
+        // 44100 is printed as 44kHz by beets, which the raw database read
+        // corrects after the scan.
+        for (value, hertz) in [
+            ("44kHz", Some(44000)),
+            ("48kHz", Some(48000)),
+            ("96kHz", Some(96000)),
+            ("44.1kHz", Some(44100)),
+            ("44100Hz", Some(44100)),
+            ("44100", Some(44100)),
+            ("44", Some(44000)),
+            ("", None),
+        ] {
+            assert_eq!(parse_samplerate(value), hertz, "{value}");
+        }
     }
 
     #[test]

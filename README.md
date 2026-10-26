@@ -213,7 +213,7 @@ For more beets commands, see the [beets documentation](https://beets.readthedocs
 - **Native file watch**: re-index a folder as files change on disk, while the app is running.
 - **Retry unavailable requests**: how often parked download requests are re-checked on Soulseek (see [Download Requests](#download-requests)).
 
-Releases and tracks in **Dashboard > Library** show the audio quality read during the last scan, such as `FLAC 16/44.1` or `MP3 320k`. A release whose tracks use different formats is marked `Mixed`. The format comes from the file extension and the details from the beets fields `bitrate`, `bitdepth` and `samplerate`; scan a folder again after upgrading if its existing rows predate these fields. Hover a track row and press play to preview the file in the mini player.
+Releases and tracks in **Dashboard > Library** show the audio quality read during the last scan, such as `FLAC 16/44.1` or `MP3 320k`, the same badge the search and transfer panels use. A release whose tracks use different formats is marked `Mixed`. The format comes from the file extension; the bitrate, bit depth and sample rate are read straight from the beets library database, because `beet ls` prints them rounded (`128kbps`, `44kHz`). Scan a folder again after upgrading if its rows predate these fields. Hover a track row and press play to preview the file in the mini player.
 
 #### Album Mode
 
