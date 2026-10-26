@@ -204,10 +204,12 @@ pub struct DownloadableGroup {
     pub score: f64,
 }
 
-/// A source may only be picked without asking when it scores at least this and
-/// matches the release it was searched for.
+/// A source may only be picked without asking when its score reaches
+/// `MIN_AUTO_SCORE`, it matches the release it was searched for, and its files
+/// reach `MIN_AUTO_FORMAT_SCORE`.
 pub const MIN_AUTO_SCORE: f64 = 0.7;
 pub const MIN_AUTO_RELEASE_FIT: f64 = 0.5;
+pub const MIN_AUTO_FORMAT_SCORE: f64 = 0.5;
 
 impl DownloadableGroup {
     pub fn size_mb(&self) -> u64 {
@@ -218,8 +220,22 @@ impl DownloadableGroup {
         self.release_fit >= MIN_AUTO_RELEASE_FIT
     }
 
+    pub fn average_quality_score(&self) -> Option<f64> {
+        (!self.items.is_empty()).then(|| {
+            self.items
+                .iter()
+                .map(|item| item.quality_score)
+                .sum::<f64>()
+                / self.items.len() as f64
+        })
+    }
+
     pub fn auto_pickable(&self) -> bool {
-        self.score >= MIN_AUTO_SCORE && self.fits_release()
+        self.score >= MIN_AUTO_SCORE
+            && self.fits_release()
+            && self
+                .average_quality_score()
+                .is_none_or(|score| score >= MIN_AUTO_FORMAT_SCORE)
     }
 }
 
@@ -645,28 +661,49 @@ mod tests {
         assert!(DownloadState::ImportQueued(9) < DownloadState::Importing);
     }
 
+    fn group(score: f64, release_fit: f64) -> DownloadableGroup {
+        DownloadableGroup {
+            source: "p".to_string(),
+            group_id: "g".to_string(),
+            title: "An Album".to_string(),
+            artist: None,
+            item_count: 1,
+            total_size: 0,
+            items: Vec::new(),
+            quality: "flac".to_string(),
+            file_count: 1,
+            release_fit,
+            score,
+        }
+    }
+
     #[test]
     fn only_a_scoring_source_that_matches_the_release_is_picked_unseen() {
-        let group = |score: f64, release_fit: f64| DownloadableGroup {
-            score,
-            release_fit,
-            ..DownloadableGroup {
-                source: "p".to_string(),
-                group_id: "g".to_string(),
-                title: "An Album".to_string(),
-                artist: None,
-                item_count: 1,
-                total_size: 0,
-                items: Vec::new(),
-                quality: "flac".to_string(),
-                file_count: 1,
-                release_fit: 1.0,
-                score: 0.0,
-            }
-        };
         assert!(group(0.9, 1.0).auto_pickable());
         assert!(!group(0.9, 0.4).auto_pickable(), "another edition");
         assert!(!group(0.6, 1.0).auto_pickable(), "too weak");
+    }
+
+    #[test]
+    fn a_source_whose_files_are_too_poor_is_not_picked_unseen() {
+        let with_quality = |quality_score: f64| DownloadableGroup {
+            items: vec![DownloadableItem {
+                id: "1.wma".to_string(),
+                source: "p".to_string(),
+                title: "An Album".to_string(),
+                artist: "Someone".to_string(),
+                album: "An Album".to_string(),
+                size: None,
+                duration: None,
+                quality: "wma".to_string(),
+                quality_score,
+                backend_data: None,
+            }],
+            ..group(0.9, 1.0)
+        };
+
+        assert!(!with_quality(0.1).auto_pickable());
+        assert!(with_quality(0.75).auto_pickable());
     }
 
     #[test]

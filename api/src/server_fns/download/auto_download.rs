@@ -317,8 +317,8 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
                 },
             ));
             info!(
-                "Auto-download: nothing scored {:.1} and matched the release, falling back to manual for '{}'",
-                shared::download::MIN_AUTO_SCORE, query_desc
+                "Auto-download: no source passed the score, release and format checks, falling back to manual for '{}'",
+                query_desc
             );
             return;
         };

@@ -529,9 +529,9 @@ export const peers: Peer[] = [
     shares: albumShares('Music\\mp3', glassAtlas, 'mp3', 320, 44100, null),
   },
   // Only source for Driftwood Codes: a low-bitrate WMA rip. The name match is
-  // good (the search has to find it at all) but the format score drags the
-  // group below the 0.7 auto-select threshold, forcing the manual-pick
-  // fallback the specs assert on.
+  // good (the search has to find it at all) but the format is below the
+  // auto-pick quality floor, forcing the manual-pick fallback the specs assert
+  // on.
   {
     username: 'cryptic_archivist',
     uploadSpeed: 300,
