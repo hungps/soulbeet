@@ -28,6 +28,13 @@ use url::Url;
 
 const MAX_SEARCH_RESULTS: usize = 50;
 
+/// A search query that found nothing this long after it started is given up
+/// on, so the broader queries after it still get to run.
+const SEARCH_FALLBACK_AFTER: Duration = Duration::seconds(30);
+/// How long each fallback query is left open. Their results are broader, so
+/// peers answer them sooner than a fully qualified query.
+const SEARCH_FALLBACK_TIMEOUT: Duration = Duration::seconds(40);
+
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 
@@ -72,6 +79,8 @@ struct SearchSession {
     current_search_id: String,
     seen_response_count: usize,
     collected: Vec<AlbumResult>,
+    /// The query being polled found at least one album.
+    found: bool,
     start_time: DateTime<Utc>,
     timeout: Duration,
 }
@@ -81,6 +90,16 @@ impl SearchSession {
         self.tiers
             .get(self.tier_index)
             .and_then(|tier| tier.get(self.query_index))
+    }
+
+    /// Whether a broader query is left to try.
+    fn has_next_query(&self) -> bool {
+        let tier_len = self
+            .tiers
+            .get(self.tier_index)
+            .map(Vec::len)
+            .unwrap_or_default();
+        self.query_index + 1 < tier_len || self.tier_index + 1 < self.tiers.len()
     }
 }
 
@@ -344,6 +363,7 @@ impl SoulseekClient {
             current_search_id,
             seen_response_count: 0,
             collected: Vec::new(),
+            found: false,
             start_time: Utc::now(),
             timeout,
         };
@@ -415,7 +435,7 @@ impl SoulseekClient {
     ) -> Result<Option<Vec<AlbumResult>>> {
         let mut finished: Option<Vec<AlbumResult>> = None;
         let mut next_query: Option<String> = None;
-        let timeout;
+        let mut timeout;
 
         let previous_search = {
             let mut searches = self.active_searches.lock().await;
@@ -444,6 +464,10 @@ impl SoulseekClient {
                 } else if session.tier_index + 1 < session.tiers.len() {
                     session.tier_index += 1;
                     session.query_index = 0;
+                    // Broader queries are left less time: they are the last
+                    // chance, and the caller waits for the whole session.
+                    session.timeout = session.timeout.min(SEARCH_FALLBACK_TIMEOUT);
+                    timeout = session.timeout;
                     next_query = Some(session.tiers[session.tier_index][0].text.clone());
                 } else {
                     finished = Some(Vec::new());
@@ -478,6 +502,8 @@ impl SoulseekClient {
                 if let Some(session) = self.active_searches.lock().await.get_mut(session_id) {
                     session.current_search_id = search_id;
                     session.seen_response_count = 0;
+                    session.found = false;
+                    session.timeout = timeout;
                     session.start_time = Utc::now();
                 }
                 Ok(None)
@@ -515,6 +541,28 @@ impl SoulseekClient {
                 };
             }
 
+            // Nothing yet: Soulseek drops some words from its index, so a
+            // broader query may still find the release. Give up on this one
+            // once it has had its chance, without waiting out its window.
+            if !session.found
+                && session.collected.is_empty()
+                && session.has_next_query()
+                && (Utc::now() - session.start_time) >= SEARCH_FALLBACK_AFTER
+            {
+                info!(
+                    "Search '{}' found nothing in {}s, trying a broader query",
+                    session
+                        .current_query()
+                        .map(|query| query.text.as_str())
+                        .unwrap_or_default(),
+                    SEARCH_FALLBACK_AFTER.num_seconds()
+                );
+                return match self.finish_query(&search_id, Vec::new()).await? {
+                    Some(albums) => Ok((albums, false, SearchState::Completed)),
+                    None => continue,
+                };
+            }
+
             let endpoint = format!("searches/{}/responses", session.current_search_id);
             match self
                 .make_request::<Vec<SearchResponse>, ()>(Method::GET, &endpoint, None)
@@ -535,6 +583,12 @@ impl SoulseekClient {
                         }
 
                         let mut albums = self.process_responses(&session, &current_responses);
+                        if !albums.is_empty() {
+                            let mut guard = self.active_searches.lock().await;
+                            if let Some(active) = guard.get_mut(&search_id) {
+                                active.found = true;
+                            }
+                        }
 
                         if slskd_finished {
                             info!("Search {} completed on slskd side", search_id);
@@ -1236,10 +1290,6 @@ fn without_qualifiers(title: &str) -> String {
     collapse_whitespace(&BRACKETED_QUALIFIER.replace_all(title, " "))
 }
 
-fn word_count(value: &str) -> usize {
-    value.split_whitespace().count()
-}
-
 const RELEASE_BOILERPLATE: &[&str] = &[
     "the",
     "a",
@@ -1295,15 +1345,28 @@ fn build_search_tiers(album: Option<&Album>, tracks: &[Track]) -> Vec<Vec<Search
         let Some(track) = tracks.first() else {
             return Vec::new();
         };
-        let text = query_text(&[&artist, &track.title]);
-        return if text.is_empty() {
-            Vec::new()
-        } else {
-            vec![vec![SearchQuery {
+        let title = collapse_whitespace(&track.title);
+        let mut tiers = Vec::new();
+        let text = query_text(&[&artist, &title]);
+        if !text.is_empty() {
+            tiers.push(vec![SearchQuery {
                 text,
                 requires_artist: false,
-            }]]
-        };
+            }]);
+        }
+        // Soulseek drops some words from its search index, the artist name
+        // included, so the title alone is searched next and its results are
+        // kept only when they name the artist.
+        if !is_various_artist(&artist) {
+            let text = query_text(&[&title]);
+            if !text.is_empty() {
+                tiers.push(vec![SearchQuery {
+                    text,
+                    requires_artist: true,
+                }]);
+            }
+        }
+        return tiers;
     };
 
     let title = collapse_whitespace(&album.title);
@@ -1337,52 +1400,57 @@ fn build_search_tiers(album: Option<&Album>, tracks: &[Track]) -> Vec<Vec<Search
         tiers.push(primary);
     }
 
-    if tracks.len() > 1 {
-        if word_count(&broad_title) >= 2 {
-            let already_searched: Vec<String> = tiers
+    // The album name on its own, for searches the credited artist makes
+    // unfindable: Soulseek drops some words (artist names included) from its
+    // index, so `<artist> <album>` can come back empty while the album alone
+    // finds it. Every result of this tier must still name the artist.
+    let already_searched: Vec<String> = tiers
+        .iter()
+        .flatten()
+        .map(|query| query.text.clone())
+        .collect();
+    let mut fallback = Vec::new();
+    let mut push_fallback = |text: String, requires_artist: bool| {
+        if !text.is_empty()
+            && !already_searched.contains(&text)
+            && !fallback
                 .iter()
-                .flatten()
-                .map(|query| query.text.clone())
-                .collect();
-            let mut fallback = Vec::new();
-            let mut push_fallback = |text: String, requires_artist: bool| {
-                if !text.is_empty()
-                    && !already_searched.contains(&text)
-                    && !fallback
-                        .iter()
-                        .any(|query: &SearchQuery| query.text == text)
-                {
-                    fallback.push(SearchQuery {
-                        text,
-                        requires_artist,
-                    });
-                }
-            };
-            if various {
-                let distinctive = distinctive_title(&title);
-                push_fallback(query_text(&[&distinctive]), false);
-            } else {
-                let distinctive = distinctive_title(&title);
-                push_fallback(query_text(&[&broad_title]), true);
-                push_fallback(query_text(&[&distinctive]), true);
-            }
-            if !fallback.is_empty() {
-                tiers.push(fallback);
-            }
+                .any(|query: &SearchQuery| query.text == text)
+        {
+            fallback.push(SearchQuery {
+                text,
+                requires_artist,
+            });
         }
-    } else if let Some(track) = tracks.first() {
-        let track_title = collapse_whitespace(&track.title);
-        if !track_title.eq_ignore_ascii_case(&title) {
-            let text = if various {
-                query_text(&[&track_title])
-            } else {
-                query_text(&[&artist, &track_title])
-            };
-            if !text.is_empty() {
-                tiers.push(vec![SearchQuery {
-                    text,
-                    requires_artist: false,
-                }]);
+    };
+    let distinctive = distinctive_title(&title);
+    if various {
+        push_fallback(query_text(&[&distinctive]), false);
+    } else {
+        push_fallback(query_text(&[&broad_title]), true);
+        if !distinctive.eq_ignore_ascii_case(&broad_title) {
+            push_fallback(query_text(&[&distinctive]), true);
+        }
+    }
+    if !fallback.is_empty() {
+        tiers.push(fallback);
+    }
+
+    if tracks.len() <= 1 {
+        if let Some(track) = tracks.first() {
+            let track_title = collapse_whitespace(&track.title);
+            if !track_title.eq_ignore_ascii_case(&title) {
+                let text = if various {
+                    query_text(&[&track_title])
+                } else {
+                    query_text(&[&artist, &track_title])
+                };
+                if !text.is_empty() {
+                    tiers.push(vec![SearchQuery {
+                        text,
+                        requires_artist: false,
+                    }]);
+                }
             }
         }
     }
@@ -1630,12 +1698,21 @@ mod tests {
     }
 
     #[test]
-    fn title_only_fallback_needs_a_distinctive_title() {
+    fn a_short_title_still_falls_back_to_the_title_alone() {
+        // Soulseek drops some words from its index, the artist name included,
+        // so even an album called "OST" gets a search without the artist. Its
+        // results must name the artist to be kept.
         let short = album("OST");
+        let tiers = build_search_tiers(Some(&short), &tracks(&["Theme A", "Theme B"]));
         assert_eq!(
             texts(Some(&short), &tracks(&["Theme A", "Theme B"])),
-            vec![vec!["Static Harbor OST".to_string()]]
+            vec![
+                vec!["Static Harbor OST".to_string()],
+                vec!["OST".to_string()],
+            ]
         );
+        assert!(!tiers[0][0].requires_artist);
+        assert!(tiers[1][0].requires_artist);
 
         let long = album("Random Access Memories (Deluxe Edition)");
         let tiers = build_search_tiers(Some(&long), &tracks(&["Get Lucky", "Instant Crush"]));
@@ -1681,6 +1758,7 @@ mod tests {
             texts(Some(&album), &tracks(&["Northern Line"])),
             vec![
                 vec!["Static Harbor Glass Atlas".to_string()],
+                vec!["Glass Atlas".to_string()],
                 vec!["Static Harbor Northern Line".to_string()],
             ]
         );
@@ -1688,10 +1766,31 @@ mod tests {
 
     #[test]
     fn track_queries_use_the_track_artist_and_title() {
+        let tiers = build_search_tiers(None, &tracks(&["Northern Line"]));
         assert_eq!(
             texts(None, &tracks(&["Northern Line"])),
-            vec![vec!["Static Harbor Northern Line".to_string()]]
+            vec![
+                vec!["Static Harbor Northern Line".to_string()],
+                vec!["Northern Line".to_string()],
+            ]
         );
+        assert!(!tiers[0][0].requires_artist);
+        assert!(tiers[1][0].requires_artist);
+    }
+
+    #[test]
+    fn various_artists_are_never_filtered_by_an_artist_name() {
+        let mut compilation = album("OST");
+        compilation.artist = "Various Artists".to_string();
+        assert_eq!(
+            texts(Some(&compilation), &tracks(&["Theme A", "Theme B"])),
+            vec![vec!["OST".to_string()]]
+        );
+        // Without an artist to filter on, a title-only search would only
+        // return noise, so it is not added.
+        let mut various_track = tracks(&["Theme A"]);
+        various_track[0].artist = "Various Artists".to_string();
+        assert_eq!(build_search_tiers(None, &various_track).len(), 1);
     }
 
     #[test]
@@ -1701,6 +1800,7 @@ mod tests {
             texts(Some(&album), &tracks(&["Track"])),
             vec![
                 vec!["Static Harbor Ology".to_string()],
+                vec!["Ology".to_string()],
                 vec!["Static Harbor Track".to_string()],
             ]
         );

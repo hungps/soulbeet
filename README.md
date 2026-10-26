@@ -56,6 +56,8 @@ Every download becomes a request, shown in the **Downloads** drawer (the icon in
 
 When a search finds no source for a request, or nothing can be queued, the request is parked instead of failed: the search row shows **Requested** and the drawer shows **REQUESTED — Waiting to retry**. Soulbeet re-checks Soulseek for parked requests on the interval set in **Settings > Library > Retry unavailable requests** (off, 2h, 6h, 12h, 1 day or 1 week) and drops the parked request once a source is queued.
 
+A Soulseek search starts with the artist and the album title. When that returns nothing, Soulbeet searches the album title on its own — Soulseek quietly drops some words, artist names included, from what it matches — and keeps only the results whose file paths still name the artist. Release qualifiers such as `(Deluxe Edition)` and `Original Soundtrack` are dropped next, and a single-track release is also searched by its track title.
+
 ## Self-Hosting with Docker
 
 The recommended way to run Soulbeet is via Docker Compose. This ensures all dependencies (like `beets` and `python`) are correctly set up.

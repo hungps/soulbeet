@@ -37,7 +37,7 @@ test('falls back to manual source picking when no source scores high enough', as
   await page.getByText('Pick a source manually').click();
 
   await expect(page.getByText('Download Options')).toBeVisible();
-  await expect(page.getByText('WMA', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('WMA 96 kbps').first()).toBeVisible();
 });
 
 test('fails tracks whose transfer never shows up in slskd', async ({ context, page }) => {

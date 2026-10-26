@@ -39,9 +39,10 @@ use super::failover::{align_pool_tracks, SourcePool};
 #[cfg(feature = "server")]
 use super::monitor::{DownloadMonitor, WatchedTransfer};
 
-/// Maximum time to wait for search results from a single backend.
+/// Maximum time to wait for search results from a single backend. Long
+/// enough for the backend to try its broader queries after a silent one.
 #[cfg(feature = "server")]
-const SEARCH_TIMEOUT: Duration = Duration::from_secs(120);
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Poll interval when waiting for search results.
 #[cfg(feature = "server")]

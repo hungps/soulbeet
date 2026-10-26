@@ -19,8 +19,9 @@ use crate::models::user::User;
 #[cfg(feature = "server")]
 use crate::services::{available_download_backends, download_backend};
 
+/// Long enough for the backend to try its broader queries after a silent one.
 #[cfg(feature = "server")]
-const SEARCH_TIMEOUT: Duration = Duration::from_secs(120);
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(180);
 #[cfg(feature = "server")]
 const SEARCH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
