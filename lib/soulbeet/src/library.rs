@@ -629,6 +629,9 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
 
     for release in &mut releases {
         resolve_release_path(root, release);
+    }
+    merge_one_folder(&mut releases);
+    for release in &mut releases {
         release.tracks.sort_by(|a, b| {
             a.disc_number
                 .cmp(&b.disc_number)
@@ -644,6 +647,79 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
     });
 
     Ok(ScannedLibrary { releases, warnings })
+}
+
+/// One folder holding one album is one release, even when its tracks credit
+/// different artists: the artist most of them name becomes the album's
+/// artist, so a release with feature credits is not split per artist.
+fn merge_one_folder(releases: &mut Vec<ScannedRelease>) {
+    let mut merged: Vec<ScannedRelease> = Vec::with_capacity(releases.len());
+    for release in releases.drain(..) {
+        let same_album = merged.iter_mut().find(|candidate| {
+            candidate.path == release.path
+                && scoped_key(&candidate.album) == scoped_key(&release.album)
+                && scoped_key(candidate.album_disambig.as_deref().unwrap_or(""))
+                    == scoped_key(release.album_disambig.as_deref().unwrap_or(""))
+                && match (&candidate.mb_album_id, &release.mb_album_id) {
+                    (Some(left), Some(right)) => left == right,
+                    _ => true,
+                }
+        });
+        match same_album {
+            Some(existing) => {
+                if existing.mb_album_id.is_none() {
+                    existing.mb_album_id = release.mb_album_id;
+                }
+                if existing.mb_release_group_id.is_none() {
+                    existing.mb_release_group_id = release.mb_release_group_id;
+                }
+                if existing.year.is_none() {
+                    existing.year = release.year;
+                }
+                if existing.media.is_none() {
+                    existing.media = release.media;
+                }
+                if existing.country.is_none() {
+                    existing.country = release.country;
+                }
+                existing.tracks.extend(release.tracks);
+            }
+            None => merged.push(release),
+        }
+    }
+
+    for release in &mut merged {
+        let Some(artist) = main_artist(release) else {
+            continue;
+        };
+        release.album_artist = artist.clone();
+        for track in &mut release.tracks {
+            track.album_artist = artist.clone();
+        }
+    }
+    *releases = merged;
+}
+
+/// The artist most of the release's tracks credit, the first one on a tie.
+fn main_artist(release: &ScannedRelease) -> Option<String> {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for track in &release.tracks {
+        let artist = track.album_artist.trim();
+        if artist.is_empty() {
+            continue;
+        }
+        match counts.iter_mut().find(|(name, _)| *name == artist) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((artist, 1)),
+        }
+    }
+    let mut best: Option<(&str, usize)> = None;
+    for entry in counts {
+        if best.is_none_or(|current| entry.1 > current.1) {
+            best = Some(entry);
+        }
+    }
+    best.map(|(artist, _)| artist.to_string())
 }
 
 fn release_for_untagged(
@@ -709,7 +785,15 @@ pub async fn beets_known_paths(root: &Path) -> Result<std::collections::HashSet<
     Ok(paths)
 }
 
-pub async fn import_as_is(root: &Path, path: &Path) -> Result<(), String> {
+/// Imports `path` with `fields` set on it, as one beets singleton import.
+/// `--set` is applied before beets places the file, so it lands under the
+/// artist, album and title the caller chose; beets moves it out of the source
+/// folder into the library on its own, per the site's `import.move`.
+pub async fn import_tagged(
+    root: &Path,
+    path: &Path,
+    fields: &[(&str, String)],
+) -> Result<(), String> {
     let db = library_db(root);
     let config = beets_config_path();
     let mut cmd = Command::new("beet");
@@ -722,10 +806,15 @@ pub async fn import_as_is(root: &Path, path: &Path) -> Result<(), String> {
         .arg("import")
         .arg("-A")
         .arg("-q")
-        .arg("-M")
         .arg("-C")
-        .arg("-s")
-        .arg(path)
+        .arg("-s");
+    for (key, value) in fields {
+        if value.trim().is_empty() {
+            continue;
+        }
+        cmd.arg("--set").arg(format!("{key}={value}"));
+    }
+    cmd.arg(path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let child = cmd.spawn().map_err(|e| e.to_string())?;
@@ -979,6 +1068,70 @@ mod tests {
     fn a_line_without_the_edition_fields_is_ignored() {
         let line = "Artist/Album/01 - One.flac\u{1f}One\u{1f}Artist\u{1f}Album\u{1f}Album Artist\u{1f}1\u{1f}2\u{1f}\u{1f}\u{1f}215.4\u{1f}2019";
         assert!(parse_beets_line(Path::new("/music"), line).is_none());
+    }
+
+    fn scanned(artist: &str, dir: &str) -> ScannedRelease {
+        ScannedRelease {
+            album: "An Album".to_string(),
+            album_artist: artist.to_string(),
+            path: dir.to_string(),
+            tracks: vec![ScannedTrack {
+                album_artist: artist.to_string(),
+                artist: artist.to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn one_folder_with_several_artists_is_one_release_under_its_main_artist() {
+        let mut releases = vec![
+            scanned("Featured One", "/music/An Album"),
+            scanned("Main Artist", "/music/An Album"),
+            scanned("Main Artist", "/music/An Album"),
+            scanned("Featured Two", "/music/An Album"),
+        ];
+
+        merge_one_folder(&mut releases);
+
+        assert_eq!(releases.len(), 1);
+        let release = &releases[0];
+        assert_eq!(release.album_artist, "Main Artist");
+        assert_eq!(release.tracks.len(), 4);
+        assert!(release
+            .tracks
+            .iter()
+            .all(|track| track.album_artist == "Main Artist"));
+    }
+
+    #[test]
+    fn a_tie_keeps_the_first_artist_and_other_folders_stay_apart() {
+        let mut releases = vec![
+            scanned("First", "/music/An Album"),
+            scanned("Second", "/music/An Album"),
+            scanned("Elsewhere", "/music/Other Album"),
+        ];
+
+        merge_one_folder(&mut releases);
+
+        assert_eq!(releases.len(), 2);
+        assert_eq!(releases[0].album_artist, "First");
+        assert_eq!(releases[0].tracks.len(), 2);
+        assert_eq!(releases[1].album_artist, "Elsewhere");
+    }
+
+    #[test]
+    fn different_releases_in_one_folder_stay_apart() {
+        let mut first = scanned("One", "/music/Folder");
+        first.mb_album_id = Some("release-one".to_string());
+        let mut second = scanned("Two", "/music/Folder");
+        second.mb_album_id = Some("release-two".to_string());
+        let mut releases = vec![first, second];
+
+        merge_one_folder(&mut releases);
+
+        assert_eq!(releases.len(), 2);
     }
 
     #[test]

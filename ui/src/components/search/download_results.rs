@@ -17,6 +17,9 @@ pub struct Props {
     pub on_download: EventHandler<(Vec<DownloadableItem>, String, DownloadRequestContext)>,
     #[props(into)]
     pub on_back: EventHandler<()>,
+    /// Searches the same release again, after a search found nothing.
+    #[props(into, default)]
+    pub on_retry: EventHandler<()>,
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -490,7 +493,15 @@ pub fn DownloadResults(props: Props) -> Element {
                         }
                     }
                 } else if results.is_empty() {
-                    div { class: "text-center text-gray-500 py-8 font-mono", "No results found" }
+                    div { class: "flex flex-col items-center gap-3 py-8",
+                        p { class: "text-center text-gray-500 font-mono", "No results found" }
+                        button {
+                            class: "px-4 py-2 text-xs font-mono uppercase tracking-widest border border-beet-accent/40 text-beet-accent hover:bg-beet-accent/10 rounded transition-colors cursor-pointer disabled:opacity-40 disabled:pointer-events-none",
+                            disabled: *is_downloading.read(),
+                            onclick: move |_| props.on_retry.call(()),
+                            "Search again"
+                        }
+                    }
                 }
                 for (idx, album) in results.iter().enumerate() {
                     AlbumResultItem {

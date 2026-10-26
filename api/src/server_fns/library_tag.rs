@@ -624,24 +624,12 @@ fn tag_progress(
     }
 }
 
-/// Registers `path` in beets when it is not known yet, then writes `track`'s
-/// fields onto it, in place.
+/// The beets fields a tagged track carries.
 #[cfg(feature = "server")]
-pub(crate) async fn tag_library_file(
-    root: &std::path::Path,
-    path: &std::path::Path,
+pub(crate) fn tag_fields(
     track: &shared::library::LibraryTagApplyTrack,
-    known: &std::collections::HashSet<std::path::PathBuf>,
-) -> Result<(), String> {
-    let path_key = tokio::fs::canonicalize(path)
-        .await
-        .unwrap_or_else(|_| path.to_path_buf());
-    if !known.contains(&path_key) {
-        soulbeet::library::import_as_is(root, path)
-            .await
-            .map_err(|e| format!("beets import failed: {e}"))?;
-    }
-    let fields = vec![
+) -> Vec<(&'static str, String)> {
+    vec![
         ("title", track.title.clone()),
         ("artist", track.artist.clone()),
         ("album", track.album.clone()),
@@ -666,7 +654,28 @@ pub(crate) async fn tag_library_file(
         ),
         ("mb_trackid", track.mb_track_id.clone().unwrap_or_default()),
         ("mb_albumid", track.mb_album_id.clone().unwrap_or_default()),
-    ];
+    ]
+}
+
+/// Writes `track`'s fields onto `path`. A file beets does not know yet is
+/// imported with the fields already set, so it is filed under them; a file it
+/// knows is modified in place.
+#[cfg(feature = "server")]
+pub(crate) async fn tag_library_file(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    track: &shared::library::LibraryTagApplyTrack,
+    known: &std::collections::HashSet<std::path::PathBuf>,
+) -> Result<(), String> {
+    let fields = tag_fields(track);
+    let path_key = tokio::fs::canonicalize(path)
+        .await
+        .unwrap_or_else(|_| path.to_path_buf());
+    if !known.contains(&path_key) {
+        return soulbeet::library::import_tagged(root, path, &fields)
+            .await
+            .map_err(|e| format!("beets import failed: {e}"));
+    }
     soulbeet::library::modify_track(root, path, &fields)
         .await
         .map_err(|e| format!("beets modify failed: {e}"))

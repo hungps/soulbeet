@@ -183,6 +183,9 @@ pub fn Search(
     let mut filter_provider = use_signal(String::new);
     let mut selected_edition = use_signal::<HashMap<String, usize>>(HashMap::new);
     let mut download_request_context = use_signal::<Option<DownloadRequestContext>>(|| None);
+    // What the source search in the options view was asked for, so it can be
+    // run again when it comes back empty.
+    let mut download_query = use_signal::<Option<DownloadQuery>>(|| None);
     let mut selected_provider = use_signal(|| settings.default_provider());
     let mut provider_synced = use_signal(|| false);
     let mut library_matches = use_signal::<HashMap<String, LibraryMatchInfo>>(HashMap::new);
@@ -667,6 +670,7 @@ pub fn Search(
 
     let download = move |query: DownloadQuery| async move {
         download_request_context.set(Some(query.request_context()));
+        download_query.set(Some(query.clone()));
 
         let mut match_query = LibraryMatchQuery::default();
         if let Some(album) = &query.album {
@@ -1276,8 +1280,14 @@ pub fn Search(
                 sync_url(None);
                 source_item.set(None);
                 download_options.set(None);
+                download_query.set(None);
                 download_error.set(String::new());
                 loading.set(false);
+            },
+            on_retry: move |_| {
+                if let Some(query) = download_query() {
+                    spawn(download(query));
+                }
             },
           }
         } else if loading() {
