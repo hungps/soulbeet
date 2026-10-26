@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 use shared::metadata::Track;
 
 use super::download_icon::{DownloadIcon, DownloadRowState};
+use super::preview_button::{length_in_seconds, PreviewButton};
 use super::request_badge;
 
 #[derive(Props, PartialEq, Clone)]
@@ -53,6 +54,13 @@ pub fn InlineTrackRow(props: Props) -> Element {
             }
 
             // Track from find_album (MusicBrainz) lacks quality metadata. Badge hidden per D-06 caveat.
+
+            PreviewButton {
+                artist: track.artist.clone(),
+                title: track.title.clone(),
+                album: track.album_title.clone().unwrap_or_default(),
+                duration: track.duration.as_deref().and_then(length_in_seconds),
+            }
 
             // Per-track download
             DownloadIcon {

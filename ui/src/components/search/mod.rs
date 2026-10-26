@@ -11,6 +11,7 @@ mod download_options_menu;
 
 mod inline_track_panel;
 mod inline_track_row;
+mod preview_button;
 
 mod folder_chip;
 use folder_chip::FolderChip;

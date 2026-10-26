@@ -4,6 +4,7 @@ use shared::library::LibraryMatchInfo;
 use shared::metadata::Track;
 
 use super::download_icon::{DownloadIcon, DownloadRowState};
+use super::preview_button::{length_in_seconds, PreviewButton};
 use super::{library_badge, request_badge};
 
 #[derive(Props, PartialEq, Clone)]
@@ -114,6 +115,13 @@ pub fn TrackResult(props: Props) -> Element {
                 d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z",
               }
             }
+          }
+
+          PreviewButton {
+            artist: track.artist.clone(),
+            title: track.title.clone(),
+            album: track.album_title.clone().unwrap_or_default(),
+            duration: track.duration.as_deref().and_then(length_in_seconds),
           }
 
           // Auto-download button

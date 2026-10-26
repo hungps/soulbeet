@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 use shared::download::{DownloadRequestContext, DownloadableGroup, DownloadableItem};
 use std::collections::HashSet;
 
+use super::preview_button::PreviewButton;
 use crate::{use_auth, Checkbox, QualityBadge, FIELD_CLASS};
 
 #[derive(Props, PartialEq, Clone)]
@@ -189,6 +190,13 @@ fn TrackItem(props: TrackItemProps) -> Element {
             key: "{unique_id}",
             class: "flex items-center gap-2 p-1 rounded-md hover:bg-white/10 cursor-pointer",
             onclick: move |_| props.on_toggle.call(unique_id.clone()),
+
+            PreviewButton {
+                artist: props.track.artist.clone(),
+                title: props.track.title.clone(),
+                album: props.track.album.clone(),
+                duration: props.track.duration,
+            }
 
             Checkbox { is_selected: props.is_selected }
 

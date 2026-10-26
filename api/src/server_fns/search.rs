@@ -42,6 +42,42 @@ pub struct PollQuery {
     pub backend: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewQuery {
+    pub artist: String,
+    pub title: String,
+    /// The track's length, so a version of another length is not offered.
+    #[serde(default)]
+    pub duration: Option<u32>,
+}
+
+/// A 30-second Deezer clip of a search result, so the release can be heard
+/// before its sources are searched. `None` when the catalogue has no clip for
+/// it, which is a normal answer for the releases a Soulseek download targets.
+#[post("/api/metadata/search/preview", _: AuthSession)]
+pub async fn preview_clip(query: PreviewQuery) -> Result<Option<String>, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        match soulbeet::previews::find_clip(&query.artist, &query.title, query.duration).await {
+            Ok(clip) => Ok(clip),
+            Err(error) => {
+                tracing::warn!(
+                    "Could not ask Deezer for a preview of '{} - {}': {}",
+                    query.artist,
+                    query.title,
+                    error
+                );
+                Ok(None)
+            }
+        }
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = query;
+        Ok(None)
+    }
+}
+
 #[post("/api/metadata/search/album", auth: AuthSession)]
 pub async fn search_album(input: SearchQuery) -> Result<SearchResults, ServerFnError> {
     let user_settings = UserSettings::get(&auth.0.sub).await.map_err(server_error)?;

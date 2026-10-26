@@ -9,6 +9,7 @@ pub mod listenbrainz;
 pub mod musicbrainz;
 pub mod navidrome;
 pub mod plex;
+pub mod previews;
 pub mod services;
 pub mod slskd;
 pub mod traits;
