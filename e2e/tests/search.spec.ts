@@ -43,6 +43,26 @@ test('narrows a track search with the artist field', async ({ context, page }) =
   await expect(page.getByText(maritime.artist).first()).toBeVisible({ timeout: RESULT_TIMEOUT });
 });
 
+test('searches by artist with the query box empty', async ({ context, page }) => {
+  await freshSession(context, page, 'search-artist-only');
+
+  await page
+    .getByLabel('Metadata Provider')
+    .selectOption({ label: metadataServerName });
+  await page
+    .getByPlaceholder('Artist (opt)')
+    .filter({ visible: true })
+    .fill(maritime.artist);
+
+  // The button used to stay disabled without a query, so only Enter searched.
+  const button = page.getByRole('button', { name: 'SEARCH' }).filter({ visible: true });
+  await expect(button).toBeEnabled();
+  await button.click();
+
+  await expect(page.getByText('Search Results')).toBeVisible({ timeout: RESULT_TIMEOUT });
+  await expect(page.getByText(maritime.title).first()).toBeVisible({ timeout: RESULT_TIMEOUT });
+});
+
 test('finds an album and expands its tracklist', async ({ context, page }) => {
   await freshSession(context, page, 'search-album');
 

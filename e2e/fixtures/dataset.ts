@@ -406,6 +406,39 @@ export const importReleases: FixtureRelease[] = [
   thimbleHymn,
 ];
 
+// Only part of this release is shared, so an album import of its folder leaves
+// tracks out: the import must be skipped for the user to decide on.
+export const tornMap: FixtureRelease = {
+  releaseMbid: '7e8f9a0b-1c2d-4e3f-9a4b-5c6d7e8f9a0b',
+  releaseGroupMbid: '8f9a0b1c-2d3e-4f4a-8b5c-6d7e8f9a0b1c',
+  title: 'Torn Map',
+  artist: 'Hollow Signal',
+  artistMbid: '9a0b1c2d-3e4f-4a5b-9c6d-7e8f9a0b1c2d',
+  date: '2023-03-10',
+  primaryType: 'Album',
+  rating: 70,
+  tracks: [
+    {
+      mbid: '0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e',
+      title: 'Hollow Mile',
+      position: 1,
+      lengthMs: 30000,
+    },
+    {
+      mbid: '1c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f',
+      title: 'Signal Fire',
+      position: 2,
+      lengthMs: 30000,
+    },
+    {
+      mbid: '2d3e4f5a-6b7c-4d8e-8f9a-0b1c2d3e4f5a',
+      title: 'Torn Map',
+      position: 3,
+      lengthMs: 30000,
+    },
+  ],
+};
+
 // Releases MusicBrainz knows but no peer shares: other matches for an
 // import's files, rated below them so the app lists the shared one first.
 
@@ -456,6 +489,7 @@ export const releases: FixtureRelease[] = [
   foglight,
   maritime,
   ...importReleases,
+  tornMap,
   cinderPsalmChoir,
   bellwether,
 ];
@@ -546,6 +580,16 @@ export const peers: Peer[] = [
       sampleRate: 44100,
       bitDepth: null,
     })),
+  },
+  // Shares Torn Map without its third track: the folder is a partial album, so
+  // the import must not file it unseen (imports.spec.ts asserts the skip).
+  {
+    username: 'partial_hoarder',
+    uploadSpeed: 1500,
+    queueLength: 0,
+    hasFreeUploadSlot: true,
+    defaultBehavior: 'happy',
+    shares: albumShares('Music\\FLAC', tornMap, 'flac', null, 44100, 16).slice(0, 2),
   },
 ];
 

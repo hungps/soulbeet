@@ -8,16 +8,18 @@
 
 import type { BrowserContext, Locator, Page } from '@playwright/test';
 import { expect, test } from '@playwright/test';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import {
   expandTransferGroups,
   freshSession,
   openDownloadsPanel,
   performSearch,
+  setAlbumMode,
+  uniqueFolder,
   waitForTransferRow,
 } from '../helpers/app.js';
 import { mbRequests, resetStubs, setMbMode, stubState } from '../helpers/control.js';
-import { downloadsDirOnHost } from '../helpers/env.js';
+import { downloadsDirOnHost, musicDirOnHost } from '../helpers/env.js';
 import {
   expectFileAppears,
   importedTrackPath,
@@ -26,12 +28,14 @@ import {
 } from '../helpers/files.js';
 import { weakTitle } from '../stubs/src/mb-server.js';
 import {
+  ashLullaby,
   copperSeason,
   ferryLights,
   findPeer,
   quietRelay,
   saltRoads,
   tinMoons,
+  tornMap,
   vesperBells,
   type FixtureRelease,
   type PeerShare,
@@ -209,6 +213,63 @@ test('a downloaded track imports onto the recording selected in search', async (
   // beets looked up the picked recording and nothing else: it never searched
   // the weak matches it would have skipped.
   expect(await mbPathsSince(asked)).toEqual([`/ws/2/recording/${track.mbid}`]);
+});
+
+test('a folder missing tracks of the release is skipped for a decision', async ({
+  context,
+  page,
+}) => {
+  const { folder } = await freshSession(context, page, uniqueFolder('imports-partial'));
+  // App-wide, and read when the batch folder is imported: set before the click.
+  await setAlbumMode(context, true);
+  try {
+    const shared = findPeer('partial_hoarder')!.shares;
+    expect(shared.length).toBeLessThan(tornMap.tracks.length);
+
+    await performSearch(page, tornMap.title, 'ALBUM');
+    await downloadButton(page, tornMap.title).click();
+    await openDownloadsPanel(page);
+
+    const row = await waitForTransferRow(page, shared[0]!.remotePath, 180_000);
+    // The folder holds two of the release's three tracks, so the album import
+    // is not applied unseen: it is skipped with the matches kept, and nothing
+    // reaches the library. The card offers the decisions a skipped import does.
+    await expect(row.getByText('SKIP', { exact: true })).toBeVisible({ timeout: 180_000 });
+    await expect(drawer(page).getByRole('button', { name: 'Retry import' })).toBeVisible();
+    await expect(drawer(page).getByRole('button', { name: 'Import as-is' })).toBeVisible();
+    await expect(drawer(page).getByRole('button', { name: 'Force import' })).toBeVisible();
+    await expect(
+      drawer(page).getByRole('button', { name: /^(Show|Hide) matches/ }),
+    ).toBeVisible();
+    expect(
+      listFilesRecursive(join(musicDirOnHost, folder.name)).filter((path) =>
+        path.endsWith('.flac'),
+      ),
+    ).toEqual([]);
+  } finally {
+    await setAlbumMode(context, false);
+  }
+});
+
+test('a fully tagged card clears with a close icon, not a trash can', async ({ context, page }) => {
+  const { folder } = await freshSession(context, page, uniqueFolder('imports-tagged-x'));
+
+  await performSearch(page, ashLullaby.title, 'ALBUM');
+  await downloadButton(page, ashLullaby.title).click();
+  await openDownloadsPanel(page);
+  await expectAllInLibrary(page, ashLullaby, folder.name);
+
+  // Every file is in the library, so the card's action only drops the record:
+  // it is the clear (X) the rows use, and the trash can is gone.
+  await expect(drawer(page).getByRole('button', { name: 'Remove request' })).toHaveCount(0);
+  const clear = drawer(page)
+    .getByRole('button', { name: 'Clear from Active Transfers' })
+    .first();
+  await expect(clear).toBeVisible({ timeout: 60_000 });
+  await clear.click();
+  await expect(
+    drawer(page).getByRole('button', { name: 'Clear from Active Transfers' }),
+  ).toHaveCount(0);
 });
 
 test('a lookup outage is reported as a failure, not a skip', async ({ context, page }) => {

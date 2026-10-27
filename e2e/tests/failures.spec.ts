@@ -8,6 +8,7 @@ import {
   freshSession,
   openDownloadsPanel,
   performSearch,
+  queueDot,
   waitForTransferRow,
 } from '../helpers/app.js';
 import { resetStubs, setOutage, setPeerBehavior } from '../helpers/control.js';
@@ -222,6 +223,10 @@ test('parks a failed search for retry when slskd is unreachable', async ({ conte
   // request is parked in the retry queue, so the row carries the "Requested"
   // badge instead of a spinner that never resolves or a hard failure.
   await expect(row.getByText('Requested', { exact: true })).toBeVisible({ timeout: 90_000 });
+
+  // Nothing is transferring, so the navbar dot can only come from the parked
+  // request itself: the queue is known without opening the drawer.
+  await expect(queueDot(page)).toBeVisible({ timeout: 30_000 });
 
   // The drawer lists the parked request, waiting for the next retry attempt.
   await openDownloadsPanel(page);

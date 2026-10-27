@@ -36,6 +36,26 @@ test('lists scored sources and downloads a hand-picked track', async ({ context,
   await expectFileAppears(imported, 120_000);
 });
 
+test('hides the metadata pickers while browsing sources', async ({ context, page }) => {
+  await freshSession(context, page, 'manual-pickers');
+
+  await performSearch(page, glassAtlas.title, 'ALBUM');
+  await expect(page.getByLabel('Metadata Provider')).toBeVisible();
+
+  const card = page.locator('li').filter({ hasText: glassAtlas.title }).first();
+  await card.getByRole('button', { name: 'Search sources' }).click();
+  await expect(page.getByText('Download Options')).toBeVisible();
+
+  // Nothing here filters Soulseek: the provider, the release type, the
+  // secondary type and the medium only shape a metadata search.
+  await expect(page.getByLabel('Metadata Provider')).toHaveCount(0);
+  await expect(page.getByText('Secondary', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Medium', { exact: true })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByLabel('Metadata Provider')).toBeVisible();
+});
+
 test('returns to search results from the options view', async ({ context, page }) => {
   await freshSession(context, page, 'manual-back');
 

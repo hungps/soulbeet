@@ -7,10 +7,12 @@ import {
   freshSession,
   openDownloadsPanel,
   performSearch,
+  queueDot,
+  uniqueFolder,
   waitForTransferRow,
 } from '../helpers/app.js';
 import { expectFileAppears, importedTrackPath, listFilesRecursive } from '../helpers/files.js';
-import { glassAtlas, senders } from '../fixtures/dataset.js';
+import { glassAtlas, senders, thimbleHymn } from '../fixtures/dataset.js';
 import { basename } from 'node:path';
 import { downloadsDirOnHost } from '../helpers/env.js';
 
@@ -49,6 +51,29 @@ test('downloads and imports a single track', async ({ context, page }) => {
     return name === '01 - Northern Line.flac' || /_\d{18}\./.test(name);
   });
   expect(leftovers).toEqual([]);
+});
+
+test('lists a clicked download in the queue before a source is picked', async ({
+  context,
+  page,
+}) => {
+  await freshSession(context, page, uniqueFolder('happy-queued'));
+
+  await performSearch(page, thimbleHymn.title, 'ALBUM');
+  await page
+    .locator('li')
+    .filter({ hasText: thimbleHymn.title })
+    .first()
+    .getByRole('button', { name: 'Download' })
+    .click();
+
+  // The request is queued the moment it is clicked, so the navbar says a
+  // download is running and the drawer lists it without waiting for a
+  // transfer: the user can leave the search page straight away.
+  await expect(queueDot(page)).toBeVisible({ timeout: 20_000 });
+  await openDownloadsPanel(page);
+  const drawer = page.locator('div.bg-beet-panel').filter({ hasText: 'Active Transfers' });
+  await expect(drawer.getByText(thimbleHymn.title).first()).toBeVisible();
 });
 
 test('downloads and imports a full album from the album card', async ({ context, page }) => {

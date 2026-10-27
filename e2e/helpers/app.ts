@@ -92,6 +92,36 @@ export async function openDownloadsPanel(page: Page): Promise<void> {
   await expect(page.getByRole('heading', { name: 'Active Transfers' })).toBeVisible();
 }
 
+/**
+ * The navbar's queue dot: lit while a request is pending or unfinished, so a
+ * queued download is known without opening the drawer.
+ */
+export function queueDot(page: Page) {
+  return page
+    .getByRole('button', { name: 'Downloads', exact: true })
+    .locator('span.animate-ping');
+}
+
+/**
+ * Turns album mode on or off app-wide through the API. It is not a per-user
+ * setting, so a spec that needs it restores it before it ends. The endpoint
+ * takes the whole config, wrapped under its argument name.
+ */
+export async function setAlbumMode(context: BrowserContext, on: boolean): Promise<void> {
+  const response = await context.request.post('/api/config', {
+    data: { config: { beets_album_mode: on } },
+  });
+  expect(response.ok(), `album mode ${on}: ${response.status()}`).toBeTruthy();
+}
+
+/**
+ * A folder name no earlier run used: a leftover library at the same path would
+ * make the app ask to replace the release before downloading it.
+ */
+export function uniqueFolder(prefix: string): string {
+  return `${prefix}-${randomUUID().slice(0, 8)}`;
+}
+
 /** A registered, logged-in user with their own folder: the common baseline. */
 export async function freshSession(
   context: BrowserContext,
