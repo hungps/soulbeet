@@ -3,7 +3,7 @@ mod login;
 mod search;
 mod settings;
 
-pub use dashboard::DashboardPage;
+pub use dashboard::{DashboardPage, DashboardTabQuery};
 pub use login::LoginPage;
 pub use search::SearchPage;
 pub use settings::SettingsPage;

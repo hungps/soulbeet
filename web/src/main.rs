@@ -18,7 +18,10 @@ use ui::{
     AutoDownloadSignal, DownloadTick, Downloads, HealthProvider, Layout, MiniPlayer, Navbar,
     PlayerProvider, SearchPrefill, SearchReset, SettingsProvider,
 };
-use views::{DashboardPage, LoginPage, SearchPage, SettingsPage, SettingsTab, SettingsTabRequest};
+use views::{
+    DashboardPage, DashboardTabQuery, LoginPage, SearchPage, SettingsPage, SettingsTab,
+    SettingsTabRequest,
+};
 
 mod auth;
 mod views;
@@ -35,8 +38,8 @@ pub enum Route {
         #[layout(WebNavbar)]
             #[route("/")]
             SearchPage {},
-            #[route("/dashboard")]
-            DashboardPage {},
+            #[route("/dashboard?:tab")]
+            DashboardPage { tab: DashboardTabQuery },
             #[route("/settings")]
             SettingsPage {},
 }
@@ -284,7 +287,9 @@ fn WebNavbar() -> Element {
                     Link {
                         class: "nav-link text-white font-medium border-b-2 border-transparent hover:border-beet-accent pb-0.5",
                         active_class: "border-beet-accent",
-                        to: Route::DashboardPage {},
+                        to: Route::DashboardPage {
+                            tab: DashboardTabQuery::default(),
+                        },
                         span { class: "hidden md:block", "Dashboard" }
                         svg {
                             class: "md:hidden w-6 h-6",
