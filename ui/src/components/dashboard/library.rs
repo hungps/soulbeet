@@ -405,7 +405,7 @@ fn LibraryTrackRow(
                     path { d: "M8 5v14l11-7z" }
                 }
             }
-            span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0",
+            span { class: "text-[10px] font-mono text-gray-600 w-4 text-center shrink-0",
                 "{number}"
             }
             div { class: "flex-1 min-w-0",
@@ -514,7 +514,7 @@ fn LibraryMissingRow(
     rsx! {
         div { class: "flex items-center gap-3 p-2 rounded hover:bg-white/5 group",
             span { class: "w-[26px] shrink-0" }
-            span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0",
+            span { class: "text-[10px] font-mono text-gray-600 w-4 text-center shrink-0",
                 "{number}"
             }
             div { class: "flex-1 min-w-0",

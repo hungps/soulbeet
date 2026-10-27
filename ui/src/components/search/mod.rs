@@ -912,6 +912,14 @@ pub fn Search(
         }
     };
 
+    let can_search = move || {
+        !search.read().trim().is_empty()
+            || artist
+                .read()
+                .as_deref()
+                .is_some_and(|artist| !artist.trim().is_empty())
+    };
+
     let mut toggle_filter = move |(field, value): (u8, String)| {
         let mut current = filters();
         let list = match field {
@@ -926,7 +934,7 @@ pub fn Search(
             None => list.push(value),
         }
         filters.set(current);
-        if !search.peek().is_empty() {
+        if can_search() {
             spawn(perform_search());
         }
     };
@@ -1139,7 +1147,7 @@ pub fn Search(
               SearchTypeToggle { search_type }
               Button {
                 class: "rounded ml-2 whitespace-nowrap",
-                disabled: loading() || search.read().is_empty(),
+                disabled: loading() || !can_search(),
                 onclick: move |_| {
                     spawn(perform_search());
                 },
@@ -1169,7 +1177,7 @@ pub fn Search(
 
             Button {
               class: "rounded ml-2 whitespace-nowrap",
-              disabled: loading() || search.read().is_empty(),
+              disabled: loading() || !can_search(),
               onclick: move |_| {
                   spawn(perform_search());
               },
@@ -1178,55 +1186,56 @@ pub fn Search(
           }
         }
 
-        div { class: "w-full -mt-4 space-y-3",
-          div { class: "flex items-center justify-between gap-3 bg-beet-panel/30 border border-white/5 rounded-lg px-3 py-2",
-            span { class: "text-[10px] font-mono uppercase tracking-widest text-gray-500 shrink-0",
-              "Metadata Provider"
-            }
-            select {
-              class: "flex-grow min-w-0 bg-beet-dark border border-white/10 rounded px-2 py-1 text-xs font-mono text-gray-300 focus:border-beet-accent focus:outline-none",
-              aria_label: "Metadata Provider",
-              value: "{selected_provider}",
-              onchange: move |event| handle_provider_change(event.value()),
-              for provider in settings.providers().iter() {
-                option {
-                  value: "{provider.id}",
-                  selected: provider.id == selected_provider(),
-                  disabled: !provider.available,
-                  if provider.available {
-                    "{provider.name}"
-                  } else {
-                    "{provider.name} (not configured)"
+        if download_options.read().is_none() {
+            div { class: "w-full -mt-4 space-y-3",
+              div { class: "flex items-center justify-between gap-3 bg-beet-panel/30 border border-white/5 rounded-lg px-3 py-2",
+                span { class: "text-[10px] font-mono uppercase tracking-widest text-gray-500 shrink-0",
+                  "Metadata Provider"
+                }
+                select {
+                  class: "flex-grow min-w-0 bg-beet-dark border border-white/10 rounded px-2 py-1 text-xs font-mono text-gray-300 focus:border-beet-accent focus:outline-none",
+                  aria_label: "Metadata Provider",
+                  value: "{selected_provider}",
+                  onchange: move |event| handle_provider_change(event.value()),
+                  for provider in settings.providers().iter() {
+                    option {
+                      value: "{provider.id}",
+                      selected: provider.id == selected_provider(),
+                      disabled: !provider.available,
+                      if provider.available {
+                        "{provider.name}"
+                      } else {
+                        "{provider.name} (not configured)"
+                      }
+                    }
                   }
                 }
               }
-            }
-          }
 
-          if search_type() == SearchType::Album && filter_options.read().is_supported() {
-            div { class: "w-full space-y-2.5 bg-beet-panel/30 border border-white/5 rounded-lg p-3",
-              FilterChips {
-                label: "Type".to_string(),
-                values: filter_options.read().release_types.clone(),
-                selected: filters.read().release_types.clone(),
-                on_toggle: move |value| toggle_filter((0, value)),
-              }
-              FilterChips {
-                label: "Secondary".to_string(),
-                values: filter_options.read().secondary_types.clone(),
-                selected: filters.read().secondary_types.clone(),
-                on_toggle: move |value| toggle_filter((1, value)),
-              }
-              FilterChips {
-                label: "Medium".to_string(),
-                values: filter_options.read().media_formats.clone(),
-                selected: filters.read().media_formats.clone(),
-                on_toggle: move |value| toggle_filter((2, value)),
+            if search_type() == SearchType::Album && filter_options.read().is_supported() {
+              div { class: "w-full space-y-2.5 bg-beet-panel/30 border border-white/5 rounded-lg p-3",
+                FilterChips {
+                  label: "Type".to_string(),
+                  values: filter_options.read().release_types.clone(),
+                  selected: filters.read().release_types.clone(),
+                  on_toggle: move |value| toggle_filter((0, value)),
+                }
+                FilterChips {
+                  label: "Secondary".to_string(),
+                  values: filter_options.read().secondary_types.clone(),
+                  selected: filters.read().secondary_types.clone(),
+                  on_toggle: move |value| toggle_filter((1, value)),
+                }
+                FilterChips {
+                  label: "Medium".to_string(),
+                  values: filter_options.read().media_formats.clone(),
+                  selected: filters.read().media_formats.clone(),
+                  on_toggle: move |value| toggle_filter((2, value)),
+                }
               }
             }
-          }
+            }
         }
-
 
         SystemStatus {
             health: system_health.get(),

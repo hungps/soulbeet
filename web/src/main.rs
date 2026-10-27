@@ -158,17 +158,23 @@ fn WebNavbar() -> Element {
         if !auth.is_logged_in() {
             return;
         }
-        if let Ok(overview) = auth.call(api::list_download_requests()).await {
-            let active = !overview.pending.is_empty()
-                || overview.requests.iter().any(|request| {
-                    request
-                        .tracks
-                        .iter()
-                        .any(|track| !matches!(track.state, DownloadState::Imported))
-                });
-            if *has_downloads.peek() != active {
-                has_downloads.set(active);
+        loop {
+            // Polled, not read once: a request queued after the mount (a
+            // source search, a parked retry, a pick in the drawer) has to show
+            // up in the navbar without waiting for its first transfer event.
+            if let Ok(overview) = auth.call(api::list_download_requests()).await {
+                let active = !overview.pending.is_empty()
+                    || overview.requests.iter().any(|request| {
+                        request
+                            .tracks
+                            .iter()
+                            .any(|track| !matches!(track.state, DownloadState::Imported))
+                    });
+                if *has_downloads.peek() != active {
+                    has_downloads.set(active);
+                }
             }
+            gloo_timers::future::TimeoutFuture::new(2000).await;
         }
     });
 

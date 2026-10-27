@@ -622,6 +622,11 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                 let failed = has_failed(group);
                 let (status_label, status_class) = group_status(group);
                 let is_tagging = group.tracks.iter().all(|track| track.source == "beets");
+                let is_tagged = !group.tracks.is_empty()
+                    && group
+                        .tracks
+                        .iter()
+                        .all(|track| matches!(track.state, DownloadState::Imported));
                 let stop_id = group_id.clone();
                 let resume_id = group_id.clone();
                 let retry_id = group_id.clone();
@@ -794,8 +799,8 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                               rsx! {
                                 button {
                                   class: "p-1.5 rounded-md transition-colors cursor-pointer text-gray-500 hover:bg-red-500/10 hover:text-red-400",
-                                  title: "Remove request",
-                                  aria_label: "Remove request",
+                                  title: if is_tagged { "Clear from Active Transfers (keeps the library files)" } else { "Remove request" },
+                                  aria_label: if is_tagged { "Clear from Active Transfers" } else { "Remove request" },
                                   onclick: move |evt: MouseEvent| {
                                       evt.stop_propagation();
                                       let request_id = request_id.clone();
@@ -826,7 +831,7 @@ pub fn Downloads(mut props: DownloadsProps) -> Element {
                                     path {
                                       stroke_linecap: "round",
                                       stroke_linejoin: "round",
-                                      d: "M6 7h12M9 7V4h6v3m-8 0 1 13h8l1-13",
+                                      d: if is_tagged { "M6 18L18 6M6 6l12 12" } else { "M6 7h12M9 7V4h6v3m-8 0 1 13h8l1-13" },
                                     }
                                   }
                                 }
