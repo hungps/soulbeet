@@ -1,7 +1,6 @@
 // The import queue end to end: one import at a time per library with
-// waiting rows, repeat clicks that join the running download, a skipped
-// import kept for a Retry, an import with a match picked from what beets
-// found, a typed MusicBrainz link or the file's own tags, and a MusicBrainz
+// waiting rows, repeat clicks that join the running download, an import
+// pinned onto the release or recording selected in search, and a MusicBrainz
 // outage reported as a failure.
 // These tests script the MusicBrainz stub and reset the stubs, so the project
 // runs serially after everything else. Each test downloads releases no other
@@ -25,19 +24,13 @@ import {
   libraryItems,
   listFilesRecursive,
 } from '../helpers/files.js';
-import { shot } from '../helpers/shots.js';
 import { weakTitle } from '../stubs/src/mb-server.js';
 import {
-  ashLullaby,
-  bellwether,
-  cinderPsalm,
-  cinderPsalmChoir,
   copperSeason,
   ferryLights,
   findPeer,
   quietRelay,
   saltRoads,
-  thimbleHymn,
   tinMoons,
   vesperBells,
   type FixtureRelease,
@@ -88,11 +81,12 @@ async function expectAllInLibrary(page: Page, release: FixtureRelease, folderNam
 }
 
 /**
- * Downloads the single's track with MusicBrainz weak for beets and waits for
- * its row to end SKIP with "No close match". MusicBrainz stays weak, so a
- * later import can only go through by the choice the test makes.
+ * Downloads the single's track with MusicBrainz weak for beets, which is what
+ * makes a search of beets' own end "No close match". The request pins the
+ * recording selected in search, so beets looks that recording up and imports
+ * it with the pick instead.
  */
-async function skippedRow(
+async function pinnedRow(
   context: BrowserContext,
   page: Page,
   release: FixtureRelease,
@@ -102,22 +96,21 @@ async function skippedRow(
   const { folder } = await freshSession(context, page, folderName);
 
   await performSearch(page, release.title, 'TRACK');
+  const asked = (await mbRequests()).length;
   await downloadButton(page, release.tracks[0]!.title).click();
   await openDownloadsPanel(page);
 
   const [share] = sharesOf(release);
   const row = await waitForTransferRow(page, share!.remotePath);
-  await expect(row.getByText('SKIP', { exact: true })).toBeVisible({ timeout: 120_000 });
-  await expect(row.getByText(/^No close match/)).toBeVisible();
-  return { folder, row };
+  await expect(row.getByText('LIB', { exact: true })).toBeVisible({ timeout: 120_000 });
+  return { folder, row, asked };
 }
 
-/** Retry, Import as-is and the matches are offered together, or none of them. */
-async function expectImportActions(row: Locator, offered: boolean) {
-  const count = offered ? 1 : 0;
-  await expect(row.getByRole('button', { name: 'Retry import' })).toHaveCount(count);
-  await expect(row.getByRole('button', { name: 'Import as-is' })).toHaveCount(count);
-  await expect(row.getByRole('button', { name: /^(Show|Hide) matches/ })).toHaveCount(count);
+/** No Retry import, Import as-is or matches: the row kept nothing to import. */
+async function expectNothingKept(row: Locator) {
+  await expect(row.getByRole('button', { name: 'Retry import' })).toHaveCount(0);
+  await expect(row.getByRole('button', { name: 'Import as-is' })).toHaveCount(0);
+  await expect(row.getByRole('button', { name: /^(Show|Hide) matches/ })).toHaveCount(0);
 }
 
 /** The paths beets asked MusicBrainz for after the first `from`. */
@@ -197,143 +190,25 @@ test('rapid re-clicks give one transfer and no tick copies', async ({ context, p
   expect(tickCopies).toEqual([]);
 });
 
-test('a skipped row shows the reason, the kept folder and the beets output', async ({
+test('a downloaded track imports onto the recording selected in search', async ({
   context,
   page,
 }) => {
-  const { folder, row } = await skippedRow(context, page, vesperBells, 'imports-skip');
-  // A track search names its batch folder after the track.
-  await expect(row.getByText(/^Kept in .*Vesper Bells \[[0-9a-z]{8}\]/)).toBeVisible();
-  await row.getByRole('button', { name: 'Show beets output' }).click();
-  await expect(row.locator('pre')).not.toBeEmpty();
+  const track = vesperBells.tracks[0]!;
+  const { folder, row, asked } = await pinnedRow(context, page, vesperBells, 'imports-pinned');
+  // Pinned onto the selected recording, so the import neither skipped nor
+  // kept anything to retry.
+  await expectNothingKept(row);
 
-  await setMbMode('normal');
-  await row.getByRole('button', { name: 'Retry import' }).click();
-  await expect(row.getByText('LIB', { exact: true })).toBeVisible({ timeout: 120_000 });
+  const title = weakTitle(track.title);
   await expectFileAppears(
-    importedTrackPath(
-      folder.name,
-      vesperBells.artist,
-      vesperBells.title,
-      vesperBells.tracks[0]!.title,
-      'flac',
-    ),
+    importedTrackPath(folder.name, vesperBells.artist, vesperBells.title, title, 'flac'),
     30_000,
   );
-});
-
-test('a skipped row imports with the match picked from what beets found', async ({
-  context,
-  page,
-}) => {
-  const { folder, row } = await skippedRow(context, page, cinderPsalm, 'imports-pick');
-  await expect(row.getByText('No close match (2 candidates)', { exact: true })).toBeVisible();
-  await expectImportActions(row, true);
-  await shot(row, '01-skipped-row');
-
-  await row.getByRole('button', { name: 'Show matches' }).click();
-  await expect(row.getByRole('button', { name: 'Hide matches (2)' })).toBeVisible();
-  await expect(row.getByRole('radio')).toHaveCount(2);
-  const own = `${cinderPsalm.artist} - ${weakTitle(cinderPsalm.tracks[0]!.title)}`;
-  await expect(row.getByRole('radio', { name: own })).toBeVisible();
-  // The other match, a weaker fit than the file's own recording.
-  const picked = cinderPsalmChoir.tracks[0]!;
-  const pickedTitle = weakTitle(picked.title);
-  const option = `${cinderPsalmChoir.artist} - ${pickedTitle}`;
-  await row.getByText(option, { exact: true }).click();
-  await expect(row.getByRole('radio', { name: option })).toBeChecked();
-  await shot(row, '02-picker-open');
-
-  // The picker fits a phone without scrolling sideways, and so do the
-  // drawer's list and the page.
-  await page.setViewportSize({ width: 412, height: 839 });
-  await expect.poll(() => row.evaluate((el) => el.scrollWidth - el.clientWidth)).toBe(0);
-  const list = drawer(page).locator(':scope > div.overflow-y-auto');
-  await expect.poll(() => list.evaluate((el) => el.scrollWidth - el.clientWidth)).toBe(0);
-  await expect
-    .poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
-    .toBeLessThanOrEqual(0);
-  const box = await row.boundingBox();
-  expect(box!.x + box!.width).toBeLessThanOrEqual(412);
-  await shot(drawer(page), '03-picker-phone');
-  await page.setViewportSize({ width: 1280, height: 720 });
-
-  const asked = (await mbRequests()).length;
-  await row.getByRole('button', { name: 'Import with this match' }).click();
-  await expect(row.getByText('LIB', { exact: true })).toBeVisible({ timeout: 120_000 });
-  await expectImportActions(row, false);
-  await shot(row, '04-picked-row');
-
-  await expectFileAppears(
-    importedTrackPath(folder.name, cinderPsalm.artist, cinderPsalm.title, pickedTitle, 'flac'),
-    30_000,
-  );
-  expect(libraryItems(folder.name)).toEqual([{ title: pickedTitle, mbTrackId: picked.mbid }]);
-  // beets looked up the picked recording and nothing else.
-  expect(await mbPathsSince(asked)).toEqual([`/ws/2/recording/${picked.mbid}`]);
-});
-
-test('a skipped row imports as-is with its own tags, without asking MusicBrainz', async ({
-  context,
-  page,
-}) => {
-  const { folder, row } = await skippedRow(context, page, ashLullaby, 'imports-asis');
-  const track = ashLullaby.tracks[0]!;
-
-  const asked = (await mbRequests()).length;
-  await row.getByRole('button', { name: 'Import as-is' }).click();
-  await expect(row.getByText('LIB', { exact: true })).toBeVisible({ timeout: 120_000 });
-  await expect(row.getByText('Imported as-is (untagged)', { exact: true })).toBeVisible();
-  await expectImportActions(row, false);
-  await shot(row, '05-as-is-row');
-
-  await expectFileAppears(
-    importedTrackPath(folder.name, ashLullaby.artist, ashLullaby.title, track.title, 'flac'),
-    30_000,
-  );
-  expect(libraryItems(folder.name)).toEqual([{ title: track.title, mbTrackId: '' }]);
-  expect(await mbPathsSince(asked)).toEqual([]);
-  // beets moved the file in, so nothing of it is left in the downloads.
-  const left = listFilesRecursive(downloadsDirOnHost).filter((path) =>
-    basename(path).includes(track.title),
-  );
-  expect(left).toEqual([]);
-});
-
-test('a typed MusicBrainz recording link imports with it, and a release link is refused', async ({
-  context,
-  page,
-}) => {
-  const { folder, row } = await skippedRow(context, page, thimbleHymn, 'imports-link');
-  await row.getByRole('button', { name: 'Show matches' }).click();
-  // beets did not find the recording the link names.
-  const linked = bellwether.tracks[0]!;
-  const linkedTitle = weakTitle(linked.title);
-  await expect(row.getByRole('radio')).toHaveCount(1);
-  await expect(row.getByRole('radio', { name: linkedTitle })).toHaveCount(0);
-
-  const field = row.getByRole('textbox', { name: 'MusicBrainz recording link or ID' });
-  const importButton = row.getByRole('button', { name: 'Import with this match' });
-  const asked = (await mbRequests()).length;
-  await field.fill(`https://musicbrainz.org/release/${thimbleHymn.releaseMbid}`);
-  await importButton.click();
-  // The refusal shows in the picker, and the skip reason stays.
-  await expect(row.getByRole('status')).toHaveText(
-    'Track imports need a MusicBrainz recording, not a release',
-  );
-  await expect(row.getByText(/^No close match/)).toBeVisible();
-  await expect(row.getByText('SKIP', { exact: true })).toBeVisible();
-  expect(await mbPathsSince(asked)).toEqual([]);
-
-  // The refusal leaves the picker as it was, to correct the link.
-  await field.fill(`https://musicbrainz.org/recording/${linked.mbid}`);
-  await importButton.click();
-  await expect(row.getByText('LIB', { exact: true })).toBeVisible({ timeout: 120_000 });
-  await expectFileAppears(
-    importedTrackPath(folder.name, thimbleHymn.artist, thimbleHymn.title, linkedTitle, 'flac'),
-    30_000,
-  );
-  expect(libraryItems(folder.name)).toEqual([{ title: linkedTitle, mbTrackId: linked.mbid }]);
+  expect(libraryItems(folder.name)).toEqual([{ title, mbTrackId: track.mbid }]);
+  // beets looked up the picked recording and nothing else: it never searched
+  // the weak matches it would have skipped.
+  expect(await mbPathsSince(asked)).toEqual([`/ws/2/recording/${track.mbid}`]);
 });
 
 test('a lookup outage is reported as a failure, not a skip', async ({ context, page }) => {
@@ -349,4 +224,8 @@ test('a lookup outage is reported as a failure, not a skip', async ({ context, p
   const row = await waitForTransferRow(page, share!.remotePath);
   await expect(row.getByText('ERR', { exact: true })).toBeVisible({ timeout: 150_000 });
   await expect(row.getByText(/^Lookup failed in MusicBrainz/)).toBeVisible();
+  // A kept row names the folder its file sits in and shows the beets output.
+  await expect(row.getByText(/^Kept in .*Quiet Relay \[[0-9a-z]{8}\]/)).toBeVisible();
+  await row.getByRole('button', { name: 'Show beets output' }).click();
+  await expect(row.locator('pre')).not.toBeEmpty();
 });
