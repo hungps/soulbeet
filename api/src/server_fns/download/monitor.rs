@@ -8,7 +8,9 @@
 //! moving the file, which strands the file in slskd's incomplete folder.
 
 use dioxus::logger::tracing::{debug, info, warn};
-use shared::download::{DownloadEvent, DownloadProgress, DownloadState, QueuedDownload};
+use shared::download::{
+    DownloadEvent, DownloadProgress, DownloadReleaseInfo, DownloadState, QueuedDownload,
+};
 use soulbeet::error::SoulseekError;
 use soulbeet::{DownloadBackend, ImportMode};
 use std::collections::HashSet;
@@ -193,6 +195,11 @@ pub struct DownloadMonitor {
     /// deadline is evaluated from a readable list, so this one bounds the
     /// case where no list is readable at all.
     last_readable_poll: Instant,
+    /// The release selected in search, so its imports match it rather than
+    /// whatever beets picks on its own.
+    release: DownloadReleaseInfo,
+    /// Key of the request these rows belong to.
+    request_key: String,
 }
 
 impl DownloadMonitor {
@@ -209,6 +216,8 @@ impl DownloadMonitor {
         batch: BatchRef,
         album_mode: bool,
         download_base: PathBuf,
+        release: DownloadReleaseInfo,
+        request_key: String,
     ) -> Self {
         let tracked_files: Vec<TrackedFile> = transfers
             .into_iter()
@@ -239,6 +248,8 @@ impl DownloadMonitor {
             abandoned: Vec::new(),
             handoffs: Vec::new(),
             last_readable_poll: Instant::now(),
+            release,
+            request_key,
         }
     }
 
@@ -1006,6 +1017,8 @@ impl DownloadMonitor {
             username: self.username.clone(),
             download_base: self.download_base.clone(),
             claimed: Arc::clone(&self.claimed),
+            release: self.release.clone(),
+            request_key: self.request_key.clone(),
         };
         // Spawned so the poll loop never waits on the file showing up.
         self.handoffs
@@ -1235,6 +1248,8 @@ impl DownloadMonitor {
             &self.target_path,
             &self.username,
             &self.download_base,
+            &self.release,
+            &self.request_key,
         );
         info!(
             "Album mode: queueing {} import(s) of {} downloads into {:?}",
@@ -1277,6 +1292,8 @@ struct Handoff {
     username: String,
     download_base: PathBuf,
     claimed: Arc<Mutex<HashSet<FileId>>>,
+    release: DownloadReleaseInfo,
+    request_key: String,
 }
 
 /// Find the file on disk, remove its slskd record, import it and free its
@@ -1313,6 +1330,8 @@ async fn hand_off(h: Handoff, backend: Arc<dyn DownloadBackend>) {
         &h.target,
         &h.username,
         &h.download_base,
+        &h.release,
+        &h.request_key,
     );
     IMPORT_QUEUE.submit(job).await.wait().await;
     registry.release(&h.key, &h.owner);
@@ -1479,6 +1498,8 @@ mod tests {
             batch("X"),
             false,
             PathBuf::from("/downloads"),
+            DownloadReleaseInfo::default(),
+            String::new(),
         )
     }
 

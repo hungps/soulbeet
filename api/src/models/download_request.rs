@@ -207,18 +207,26 @@ impl DownloadRequestTrackRow {
 
 impl DownloadRequestRow {
     #[cfg(feature = "server")]
+    pub fn release_info(&self) -> DownloadReleaseInfo {
+        let mut release = self
+            .context_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<DownloadRequestContext>(json).ok())
+            .map(|context| context.release)
+            .unwrap_or_default();
+        if !release.has_force_target() {
+            fill_release_from_key(&mut release, &self.request_key);
+        }
+        release
+    }
+
+    #[cfg(feature = "server")]
     pub fn to_summary(&self, tracks: Vec<DownloadRequestTrackRow>) -> DownloadRequestSummary {
         let context = self
             .context_json
             .as_deref()
             .and_then(|json| serde_json::from_str::<DownloadRequestContext>(json).ok());
-        let mut release = context
-            .as_ref()
-            .map(|context| context.release.clone())
-            .unwrap_or_default();
-        if !release.has_force_target() {
-            fill_release_from_key(&mut release, &self.request_key);
-        }
+        let release = self.release_info();
         DownloadRequestSummary {
             id: self.id.clone(),
             label: self.label.clone(),

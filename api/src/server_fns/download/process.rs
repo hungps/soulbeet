@@ -1,5 +1,5 @@
 use dioxus::logger::tracing::{info, warn};
-use shared::download::{DownloadProgress, DownloadState};
+use shared::download::{DownloadProgress, DownloadReleaseInfo, DownloadState};
 use soulbeet::{DriverChoice, ImportMode};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -85,8 +85,38 @@ pub struct ResolvedSlot {
     pub destination: Option<String>,
 }
 
+/// beets' name for its MusicBrainz source.
+const MUSICBRAINZ: &str = "MusicBrainz";
+
+/// How the import of a requested release should match it: onto the release or
+/// recording selected in search, when the request kept a MusicBrainz id for
+/// it, and beets' own match otherwise. A release id is only used when it is
+/// the album the request was keyed on, so a release group from another
+/// provider is never handed to beets as a release.
+pub fn import_choice(
+    mode: ImportMode,
+    release: &DownloadReleaseInfo,
+    request_key: &str,
+) -> DriverChoice {
+    let id = match mode {
+        ImportMode::Album => release
+            .release_mbid
+            .as_deref()
+            .filter(|id| request_key == format!("album:{id}")),
+        ImportMode::Singleton => release.recording_mbid.as_deref(),
+    };
+    match id.filter(|id| !id.is_empty()) {
+        Some(id) => DriverChoice::Pick {
+            data_source: MUSICBRAINZ.to_string(),
+            id: id.to_string(),
+        },
+        None => DriverChoice::Auto,
+    }
+}
+
 /// An import of `source` reporting to `username` through `rows`, which are
 /// already stamped with their batch.
+#[allow(clippy::too_many_arguments)]
 pub fn import_job(
     source: PathBuf,
     mode: ImportMode,
@@ -94,6 +124,8 @@ pub fn import_job(
     target: &Path,
     username: &str,
     base: &Path,
+    release: &DownloadReleaseInfo,
+    request_key: &str,
 ) -> ImportJob {
     ImportJob {
         sources: vec![source],
@@ -105,7 +137,7 @@ pub fn import_job(
         }),
         snapshot_target: false,
         cleanup_root: Some(base.to_path_buf()),
-        choice: DriverChoice::Auto,
+        choice: import_choice(mode, release, request_key),
         choices: None,
     }
 }
@@ -118,6 +150,8 @@ pub fn album_jobs(
     target: &Path,
     username: &str,
     base: &Path,
+    release: &DownloadReleaseInfo,
+    request_key: &str,
 ) -> Vec<ImportJob> {
     let mut albums: Vec<(PathBuf, Vec<DownloadProgress>)> = Vec::new();
     let mut jobs = Vec::new();
@@ -137,12 +171,23 @@ pub fn album_jobs(
                 target,
                 username,
                 base,
+                &DownloadReleaseInfo::default(),
+                "",
             )),
         }
     }
-    let album_jobs = albums
-        .into_iter()
-        .map(|(folder, rows)| import_job(folder, ImportMode::Album, rows, target, username, base));
+    let album_jobs = albums.into_iter().map(|(folder, rows)| {
+        import_job(
+            folder,
+            ImportMode::Album,
+            rows,
+            target,
+            username,
+            base,
+            release,
+            request_key,
+        )
+    });
     album_jobs.chain(jobs).collect()
 }
 
@@ -172,18 +217,24 @@ mod tests {
             },
         ];
 
-        let jobs: Vec<(Vec<PathBuf>, ImportMode, Vec<String>)> =
-            album_jobs(resolved, Path::new("/music"), "u", Path::new("/dl"))
-                .into_iter()
-                .map(|job| {
-                    assert_eq!(job.cleanup_root.as_deref(), Some(Path::new("/dl")));
-                    assert_eq!(job.target, Path::new("/music"));
-                    let owner = job.owner.unwrap();
-                    assert_eq!(owner.username, "u");
-                    let items = owner.rows.into_iter().map(|r| r.item).collect();
-                    (job.sources, job.mode, items)
-                })
-                .collect();
+        let jobs: Vec<(Vec<PathBuf>, ImportMode, Vec<String>)> = album_jobs(
+            resolved,
+            Path::new("/music"),
+            "u",
+            Path::new("/dl"),
+            &DownloadReleaseInfo::default(),
+            "",
+        )
+        .into_iter()
+        .map(|job| {
+            assert_eq!(job.cleanup_root.as_deref(), Some(Path::new("/dl")));
+            assert_eq!(job.target, Path::new("/music"));
+            let owner = job.owner.unwrap();
+            assert_eq!(owner.username, "u");
+            let items = owner.rows.into_iter().map(|r| r.item).collect();
+            (job.sources, job.mode, items)
+        })
+        .collect();
 
         assert_eq!(
             jobs,
@@ -199,6 +250,108 @@ mod tests {
                     vec!["adopted".to_string()]
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn an_album_job_carries_the_picked_release() {
+        let resolved = vec![ResolvedSlot {
+            row: row("a"),
+            path: PathBuf::from("/dl/X [12345678]/a.flac"),
+            destination: Some("X [12345678]".to_string()),
+        }];
+
+        let jobs = album_jobs(
+            resolved,
+            Path::new("/music"),
+            "u",
+            Path::new("/dl"),
+            &release(Some("release-id"), None),
+            "album:release-id",
+        );
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].choice, picked("release-id"));
+    }
+
+    fn release(release_mbid: Option<&str>, recording_mbid: Option<&str>) -> DownloadReleaseInfo {
+        DownloadReleaseInfo {
+            release_mbid: release_mbid.map(str::to_string),
+            recording_mbid: recording_mbid.map(str::to_string),
+            ..DownloadReleaseInfo::default()
+        }
+    }
+
+    fn picked(id: &str) -> DriverChoice {
+        DriverChoice::Pick {
+            data_source: MUSICBRAINZ.to_string(),
+            id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_album_import_picks_the_release_the_request_was_keyed_on() {
+        assert_eq!(
+            import_choice(
+                ImportMode::Album,
+                &release(Some("release-id"), None),
+                "album:release-id"
+            ),
+            picked("release-id")
+        );
+    }
+
+    #[test]
+    fn an_album_import_ignores_an_id_the_request_is_not_keyed_on() {
+        // Another provider's id is a release group, not a release beets could
+        // be pointed at.
+        assert_eq!(
+            import_choice(
+                ImportMode::Album,
+                &release(Some("release-group-id"), None),
+                "album:lastfm:Artist:Album"
+            ),
+            DriverChoice::Auto
+        );
+    }
+
+    #[test]
+    fn an_album_import_without_a_release_id_matches_on_its_own() {
+        assert_eq!(
+            import_choice(ImportMode::Album, &DownloadReleaseInfo::default(), "album:x"),
+            DriverChoice::Auto
+        );
+    }
+
+    #[test]
+    fn a_singleton_import_picks_the_recording_it_was_requested_for() {
+        assert_eq!(
+            import_choice(
+                ImportMode::Singleton,
+                &release(None, Some("recording-id")),
+                "track:recording-id"
+            ),
+            picked("recording-id")
+        );
+    }
+
+    #[test]
+    fn a_singleton_import_without_a_recording_id_matches_on_its_own() {
+        assert_eq!(
+            import_choice(
+                ImportMode::Singleton,
+                &release(Some("release-id"), None),
+                "track:x"
+            ),
+            DriverChoice::Auto
+        );
+    }
+
+    #[test]
+    fn an_empty_id_is_not_forced() {
+        assert_eq!(
+            import_choice(ImportMode::Album, &release(Some(""), None), "album:"),
+            DriverChoice::Auto
         );
     }
 

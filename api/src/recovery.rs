@@ -303,7 +303,16 @@ async fn import_tracks(
             true => soulbeet::ImportMode::Album,
             false => soulbeet::ImportMode::Singleton,
         };
-        let job = make_import_job(source, mode, rows, target, username, &download_base);
+        let job = make_import_job(
+            source,
+            mode,
+            rows,
+            target,
+            username,
+            &download_base,
+            &request.release_info(),
+            &request.request_key,
+        );
         IMPORT_QUEUE.submit(job).await;
     }
 }

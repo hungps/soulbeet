@@ -33,8 +33,8 @@ use dioxus::logger::tracing::{info, warn};
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use shared::download::{
-    DownloadEvent, DownloadProgress, DownloadRequestContext, DownloadState, DownloadableItem,
-    EnqueueStatus, QueuedDownload,
+    DownloadEvent, DownloadProgress, DownloadReleaseInfo, DownloadRequestContext, DownloadState,
+    DownloadableItem, EnqueueStatus, QueuedDownload,
 };
 #[cfg(feature = "server")]
 use tokio::sync::{broadcast, RwLock};
@@ -310,6 +310,8 @@ pub async fn spawn_monitor(
             batch,
             album_mode,
             download_base,
+            DownloadReleaseInfo::default(),
+            String::new(),
         );
         monitor.run().await;
         unregister_user_task(&username).await;
@@ -332,6 +334,8 @@ pub async fn start_monitor_on_batch(
     let username = username.to_string();
     let album_mode = crate::models::app_config::AppConfig::is_album_mode().await;
     let download_base = crate::models::app_config::AppConfig::download_path().await;
+    let release = request.release_info();
+    let request_key = request.request_key.clone();
     tokio::spawn(async move {
         let mut monitor = DownloadMonitor::new(
             accepted.iter().map(WatchedTransfer::from).collect(),
@@ -342,6 +346,8 @@ pub async fn start_monitor_on_batch(
             batch,
             album_mode,
             download_base,
+            release,
+            request_key,
         );
         monitor.run().await;
         unregister_user_task(&username).await;

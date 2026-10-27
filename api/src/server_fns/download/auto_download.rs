@@ -580,6 +580,8 @@ pub async fn auto_download(req: AutoDownloadRequest) -> Result<AutoDownloadResul
             batch,
             album_mode,
             crate::models::app_config::AppConfig::download_path().await,
+            request_context.release.clone(),
+            request_context.key.clone(),
         )
         .with_failover(pool);
         monitor.run().await;
