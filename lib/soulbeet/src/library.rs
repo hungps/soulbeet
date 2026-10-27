@@ -32,6 +32,8 @@ pub struct ScannedTrack {
     pub bitrate: Option<u32>,
     pub bit_depth: Option<u32>,
     pub sample_rate: Option<u32>,
+    /// The release's track count as beets recorded it for this item.
+    pub track_total: Option<u32>,
     pub has_metadata: bool,
 }
 
@@ -49,6 +51,8 @@ pub struct ScannedRelease {
     pub mb_album_id: Option<String>,
     pub mb_release_group_id: Option<String>,
     pub path: String,
+    /// How many tracks the matched release has, when beets recorded it.
+    pub expected_track_count: Option<u32>,
     pub tracks: Vec<ScannedTrack>,
 }
 
@@ -83,6 +87,7 @@ struct BeetsTrack {
     bitrate: Option<u32>,
     bit_depth: Option<u32>,
     sample_rate: Option<u32>,
+    track_total: Option<u32>,
 }
 
 fn beets_config_path() -> String {
@@ -240,6 +245,7 @@ fn parse_beets_line(root: &Path, line: &str) -> Option<(PathBuf, BeetsTrack)> {
         bitrate: parse_bitrate(parts[15]),
         bit_depth: parse_positive(parts[16]),
         sample_rate: parse_samplerate(parts[17]),
+        track_total: parts.get(18).and_then(|value| parse_positive(value)),
     };
     Some((path, track))
 }
@@ -281,7 +287,7 @@ async fn query_beets(root: &Path) -> Result<HashMap<PathBuf, BeetsTrack>, String
         return Ok(HashMap::new());
     }
     let config = beets_config_path();
-    let format = "$path\u{1f}$title\u{1f}$artist\u{1f}$album\u{1f}$albumartist\u{1f}$track\u{1f}$disc\u{1f}$mb_trackid\u{1f}$mb_albumid\u{1f}$mb_releasegroupid\u{1f}$length\u{1f}$year\u{1f}$albumdisambig\u{1f}$media\u{1f}$country\u{1f}$bitrate\u{1f}$bitdepth\u{1f}$samplerate";
+    let format = "$path\u{1f}$title\u{1f}$artist\u{1f}$album\u{1f}$albumartist\u{1f}$track\u{1f}$disc\u{1f}$mb_trackid\u{1f}$mb_albumid\u{1f}$mb_releasegroupid\u{1f}$length\u{1f}$year\u{1f}$albumdisambig\u{1f}$media\u{1f}$country\u{1f}$bitrate\u{1f}$bitdepth\u{1f}$samplerate\u{1f}$tracktotal";
 
     let mut cmd = Command::new("beet");
     cmd.arg("-c")
@@ -514,6 +520,7 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
                 bitrate: meta.bitrate,
                 bit_depth: meta.bit_depth,
                 sample_rate: meta.sample_rate,
+                track_total: meta.track_total,
                 has_metadata,
             };
 
@@ -556,6 +563,7 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
                     mb_album_id: meta.mb_album_id.clone(),
                     mb_release_group_id: meta.mb_release_group_id.clone(),
                     path: String::new(),
+                    expected_track_count: None,
                     tracks: vec![track],
                 });
             }
@@ -592,6 +600,7 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
                 bitrate: None,
                 bit_depth: None,
                 sample_rate: None,
+                track_total: None,
                 has_metadata: false,
             });
         }
@@ -632,6 +641,9 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
     }
     merge_one_folder(&mut releases);
     for release in &mut releases {
+        release.expected_track_count = expected_track_count(&release.tracks);
+    }
+    for release in &mut releases {
         release.tracks.sort_by(|a, b| {
             a.disc_number
                 .cmp(&b.disc_number)
@@ -647,6 +659,16 @@ pub async fn scan_library(root: &Path, sync_beets: bool) -> Result<ScannedLibrar
     });
 
     Ok(ScannedLibrary { releases, warnings })
+}
+
+/// The track count beets recorded for the release, when it has one. Every item
+/// of a matched release carries the same total unless per-disc numbering is on.
+fn expected_track_count(tracks: &[ScannedTrack]) -> Option<u32> {
+    tracks
+        .iter()
+        .filter_map(|track| track.track_total)
+        .filter(|total| *total > 0)
+        .max()
 }
 
 /// One folder holding one album is one release, even when its tracks credit
@@ -1013,7 +1035,7 @@ mod tests {
     #[test]
     fn parses_beets_metadata_including_musicbrainz_ids() {
         let root = Path::new("/music/user");
-        let line = "Artist/Album/01 - One.flac\u{1f}One\u{1f}Artist\u{1f}Album\u{1f}Album Artist\u{1f}1\u{1f}2\u{1f}recording-id\u{1f}release-id\u{1f}release-group-id\u{1f}215.4\u{1f}2019\u{1f}deluxe edition\u{1f}CD\u{1f}GB\u{1f}320\u{1f}16\u{1f}44100";
+        let line = "Artist/Album/01 - One.flac\u{1f}One\u{1f}Artist\u{1f}Album\u{1f}Album Artist\u{1f}1\u{1f}2\u{1f}recording-id\u{1f}release-id\u{1f}release-group-id\u{1f}215.4\u{1f}2019\u{1f}deluxe edition\u{1f}CD\u{1f}GB\u{1f}320\u{1f}16\u{1f}44100\u{1f}11";
         let (path, track) = parse_beets_line(root, line).unwrap();
         assert_eq!(path, Path::new("/music/user/Artist/Album/01 - One.flac"));
         assert_eq!(track.title, "One");
@@ -1033,6 +1055,7 @@ mod tests {
         assert_eq!(track.bitrate, Some(320));
         assert_eq!(track.bit_depth, Some(16));
         assert_eq!(track.sample_rate, Some(44100));
+        assert_eq!(track.track_total, Some(11));
     }
 
     #[test]
@@ -1082,6 +1105,31 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_expected_track_count_is_what_beets_recorded_for_the_release() {
+        let tracks: Vec<ScannedTrack> = [Some(11), None, Some(11)]
+            .into_iter()
+            .map(|track_total| ScannedTrack {
+                track_total,
+                ..Default::default()
+            })
+            .collect();
+
+        assert_eq!(expected_track_count(&tracks), Some(11));
+        assert_eq!(
+            expected_track_count(&[ScannedTrack::default()]),
+            None,
+            "beets recorded no total, so nothing is expected"
+        );
+        assert_eq!(
+            expected_track_count(&[ScannedTrack {
+                track_total: Some(0),
+                ..Default::default()
+            }]),
+            None
+        );
     }
 
     #[test]

@@ -210,15 +210,17 @@ impl LibraryReleaseRow {
         folder_path: &str,
         scan: &ScannedLibrary,
     ) -> Result<(usize, usize), String> {
-        let prior_ignored: std::collections::HashMap<String, i64> =
-            sqlx::query_as::<_, (String, i64)>(
-                "SELECT release_path, ignored FROM library_releases WHERE folder_id = ?",
+        let prior: std::collections::HashMap<String, (i64, Option<i64>)> =
+            sqlx::query_as::<_, (String, i64, Option<i64>)>(
+                "SELECT release_path, ignored, expected_track_count
+                 FROM library_releases WHERE folder_id = ?",
             )
             .bind(folder_id)
             .fetch_all(&*DB)
             .await
             .map_err(|e| e.to_string())?
             .into_iter()
+            .map(|(path, ignored, expected)| (path, (ignored, expected)))
             .collect();
 
         let mut tx = DB.begin().await.map_err(|e| e.to_string())?;
@@ -266,7 +268,7 @@ impl LibraryReleaseRow {
                      release_path, track_count, matched_track_count, expected_track_count,
                      total_size, audio_format, bitrate, bit_depth, sample_rate, quality_varies,
                      scanned_at, ignored)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&release_id)
             .bind(folder_id)
@@ -284,6 +286,12 @@ impl LibraryReleaseRow {
             .bind(&release_path)
             .bind(release.tracks.len() as i64)
             .bind(matched)
+            .bind(
+                release
+                    .expected_track_count
+                    .map(|value| value as i64)
+                    .or_else(|| prior.get(&release_path).and_then(|(_, expected)| *expected)),
+            )
             .bind(total_size)
             .bind(&quality.audio_format)
             .bind(quality.bitrate.map(|value| value as i64))
@@ -291,7 +299,7 @@ impl LibraryReleaseRow {
             .bind(quality.sample_rate.map(|value| value as i64))
             .bind(if quality_varies { 1i64 } else { 0i64 })
             .bind(&scanned_at)
-            .bind(prior_ignored.get(&release_path).copied().unwrap_or(0))
+            .bind(prior.get(&release_path).map(|(ignored, _)| *ignored).unwrap_or(0))
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
