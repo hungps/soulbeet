@@ -7,6 +7,9 @@
 #   auto            decide as `beet import -q` does, recording each task's candidates
 #   asis            import with the files' own tags (-A); refused when one lacks them
 #   pick SOURCE ID  apply what SOURCE returns for ID (-S ID), whatever its distance
+#   auto-pick SOURCE ID
+#                   as pick, but skip an album match that leaves tracks of the
+#                   release out or that beets does not find strong
 #   mapped MAPFILE  import as-is, with the fields MAPFILE gives each file
 #
 # REPORT gets {"tasks": [...], "pick_missing": bool, "refused": str or null},
@@ -61,7 +64,7 @@ from beets.importer import Action
 from beets.importer.tasks import ImportTaskFactory
 from beets.ui.commands import import_ as import_cmd
 
-USAGE = "usage: import.py REPORT (auto | asis | pick SOURCE ID) -- BEET_ARGS"
+USAGE = "usage: import.py REPORT (auto | asis | pick SOURCE ID | auto-pick SOURCE ID) -- BEET_ARGS"
 
 report = {"tasks": [], "pick_missing": False, "refused": None}
 
@@ -111,29 +114,65 @@ def describe(match):
 Session = import_cmd.TerminalImportSession
 
 
-class AutoSession(Session):
-    def _record(self, task):
-        report["tasks"].append(
-            {
-                "paths": [path_text(p) for p in task.paths],
-                "album": task.is_album,
-                # A candidate without an id or a source cannot be picked.
-                "candidates": [
-                    describe(m)
-                    for m in task.candidates
-                    if m.info.id is not None and m.info.data_source
-                ],
-            }
-        )
+def record_task(task):
+    report["tasks"].append(
+        {
+            "paths": [path_text(p) for p in task.paths],
+            "album": task.is_album,
+            # A candidate without an id or a source cannot be picked.
+            "candidates": [
+                describe(m)
+                for m in task.candidates
+                if m.info.id is not None and m.info.data_source
+            ],
+        }
+    )
 
+
+def weak_album(match):
+    """Why an automatic import may not apply this album match, or None.
+
+    A folder holding only part of the release, or a match beets does not find
+    strong, is left to the user: import as-is, force import, or pick another
+    release.
+    """
+    info, dist = match.info, match.distance
+    missing = len(info.tracks) - len(match.mapping)
+    if missing > 0:
+        return f"{missing} of the {len(info.tracks)} tracks of this release are missing"
+    threshold = float(config["match"]["strong_rec_thresh"].get(float))
+    if float(dist) > threshold:
+        return (
+            f"the match is {round((1 - float(dist)) * 1000)}‰ close, under the"
+            f" {round((1 - threshold) * 1000)}‰ an automatic import needs"
+        )
+    return None
+
+
+def gated(task, choice):
+    """`choice` unless it would apply a weak album match unseen."""
+    if not isinstance(choice, AlbumMatch):
+        return choice
+    why = weak_album(task.candidates[0])
+    if why is None:
+        return choice
+    print(f"soulbeet: skipped the automatic match: {why}", file=sys.stderr)
+    return Action.SKIP
+
+
+class Session(import_cmd.TerminalImportSession):
+    pass
+
+
+class AutoSession(Session):
     def choose_match(self, task):
         choice = super().choose_match(task)
-        self._record(task)
-        return choice
+        record_task(task)
+        return gated(task, choice)
 
     def choose_item(self, task):
         choice = super().choose_item(task)
-        self._record(task)
+        record_task(task)
         return choice
 
 
@@ -164,6 +203,17 @@ class PickSession(Session):
 
     def choose_item(self, task):
         return super().choose_item(task) if self._pin(task) else Action.SKIP
+
+
+class GatedPickSession(PickSession):
+    """A pick the import made for itself, so the album gate still applies."""
+
+    def choose_match(self, task):
+        if not self._pin(task):
+            return Action.SKIP
+        # Recorded before the gate, so a skipped pick still offers the matches.
+        record_task(task)
+        return gated(task, Session.choose_match(self, task))
 
 
 def source_items(session, toppath):
@@ -287,9 +337,10 @@ def parse(argv):
         return report_path, AutoSession, beet_args
     if choice == ["asis"]:
         return report_path, AsIsSession, [*beet_args, "-A"]
-    if len(choice) == 3 and choice[0] == "pick":
-        PickSession.source, PickSession.wanted = choice[1], choice[2]
-        return report_path, PickSession, [*beet_args, "-S", choice[2]]
+    if len(choice) == 3 and choice[0] in ("pick", "auto-pick"):
+        picker = PickSession if choice[0] == "pick" else GatedPickSession
+        picker.source, picker.wanted = choice[1], choice[2]
+        return report_path, picker, [*beet_args, "-S", choice[2]]
     if len(choice) == 2 and choice[0] == "mapped":
         with open(choice[1], encoding="utf-8") as f:
             MappedFiles(json.load(f))

@@ -150,12 +150,9 @@ impl Report {
             return result;
         }
         match choice {
-            DriverChoice::Auto => {
-                if let Ok([task]) = <[MatchChoices; 1]>::try_from(self.tasks) {
-                    result.choices = Some(task);
-                }
-            }
-            DriverChoice::Pick { data_source, id } if self.pick_missing => {
+            DriverChoice::Pick { data_source, id } | DriverChoice::AutoPick { data_source, id }
+                if self.pick_missing =>
+            {
                 let entity = match mode {
                     ImportMode::Singleton => "recording",
                     ImportMode::Album => "release",
@@ -163,6 +160,11 @@ impl Report {
                 result.outcome = ImportOutcome::Failed {
                     message: format!("{data_source} has no {entity} {id}"),
                 };
+            }
+            DriverChoice::Auto | DriverChoice::AutoPick { .. } => {
+                if let Ok([task]) = <[MatchChoices; 1]>::try_from(self.tasks) {
+                    result.choices = Some(task);
+                }
             }
             DriverChoice::Pick { .. } | DriverChoice::AsIs | DriverChoice::Mapped { .. } => {}
         }
@@ -347,6 +349,34 @@ mod tests {
                 report(&[ALBUM_TASK], false, None).apply(no_match(), ImportMode::Album, &choice);
             assert_eq!(applied, no_match());
         }
+    }
+
+    #[test]
+    fn a_gated_pick_keeps_the_matches_a_skip_left() {
+        let gated = DriverChoice::AutoPick {
+            data_source: "MusicBrainz".into(),
+            id: "6a09041b-0f79-3278-88d9-0552dd28d37f".into(),
+        };
+        let applied = report(&[ALBUM_TASK], false, None).apply(
+            no_match(),
+            ImportMode::Album,
+            &gated,
+        );
+        assert_eq!(applied.outcome, no_match().outcome);
+        assert_eq!(
+            applied.choices.and_then(|choices| choices.candidates.first().cloned()),
+            report(&[ALBUM_TASK], false, None)
+                .apply(no_match(), ImportMode::Album, &DriverChoice::Auto)
+                .choices
+                .and_then(|choices| choices.candidates.first().cloned())
+        );
+
+        // A gated pick whose release beets never found is still a failure.
+        let missing = report(&[], true, None).apply(no_match(), ImportMode::Album, &gated);
+        assert_eq!(
+            missing.to_string(),
+            "MusicBrainz has no release 6a09041b-0f79-3278-88d9-0552dd28d37f"
+        );
     }
 
     #[test]

@@ -106,7 +106,7 @@ pub fn import_choice(
         ImportMode::Singleton => release.recording_mbid.as_deref(),
     };
     match id.filter(|id| !id.is_empty()) {
-        Some(id) => DriverChoice::Pick {
+        Some(id) => DriverChoice::AutoPick {
             data_source: MUSICBRAINZ.to_string(),
             id: id.to_string(),
         },
@@ -283,7 +283,7 @@ mod tests {
     }
 
     fn picked(id: &str) -> DriverChoice {
-        DriverChoice::Pick {
+        DriverChoice::AutoPick {
             data_source: MUSICBRAINZ.to_string(),
             id: id.to_string(),
         }

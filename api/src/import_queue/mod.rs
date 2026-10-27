@@ -384,7 +384,9 @@ impl Shared {
         // run keeps it, so a pick that failed still offers the others, and so
         // does a run the importer never got (broken, unavailable, panicked).
         let choices = match (&job.choice, outcome.ran) {
-            (DriverChoice::Auto, true) => outcome.result.choices.clone().map(Arc::new),
+            (DriverChoice::Auto | DriverChoice::AutoPick { .. }, true) => {
+                outcome.result.choices.clone().map(Arc::new)
+            }
             _ => job.choices.clone(),
         };
         let job = Arc::new(ImportJob {

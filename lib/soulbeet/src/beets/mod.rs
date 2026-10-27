@@ -150,6 +150,9 @@ fn driver_args(
         DriverChoice::Pick { data_source, id } => {
             args.extend(["pick".into(), data_source.into(), id.into()])
         }
+        DriverChoice::AutoPick { data_source, id } => {
+            args.extend(["auto-pick".into(), data_source.into(), id.into()])
+        }
         DriverChoice::Mapped { .. } => match mapping {
             Some(mapping) => args.extend(["mapped".into(), mapping.as_os_str().to_owned()]),
             None => args.push("asis".into()),
@@ -589,6 +592,17 @@ mod tests {
                 pick,
                 vec![
                     "pick",
+                    "MusicBrainz",
+                    "dfeb96a7-f78a-4b04-93ce-c39e28c9a173",
+                ],
+            ),
+            (
+                DriverChoice::AutoPick {
+                    data_source: "MusicBrainz".into(),
+                    id: "dfeb96a7-f78a-4b04-93ce-c39e28c9a173".into(),
+                },
+                vec![
+                    "auto-pick",
                     "MusicBrainz",
                     "dfeb96a7-f78a-4b04-93ce-c39e28c9a173",
                 ],

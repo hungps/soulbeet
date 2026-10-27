@@ -93,6 +93,9 @@ pub enum DriverChoice {
     AsIs,
     /// Apply what `data_source` returns for `id`, however close it is.
     Pick { data_source: String, id: String },
+    /// As [`DriverChoice::Pick`], but an album is left to the user when its
+    /// match leaves tracks of the release out or is not strong enough.
+    AutoPick { data_source: String, id: String },
     /// No lookup; each file is imported with the fields the caller mapped it
     /// to, and files without fields are left alone. Kept as `Arc` so the
     /// choice stays small to clone and compare.

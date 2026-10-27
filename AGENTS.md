@@ -206,7 +206,10 @@ per-user in `user_settings`.
 - slskd transfers can complete before the file is visible through the shared volume; path
   resolution retries with exponential backoff for roughly 15s.
 - The beets image is quiet (`-q`), so ambiguous imports are skipped unless `beets_config.yaml`
-  is made permissive (see README "Album Mode").
+  is made permissive (see README "Album Mode"). An album import the driver picks for itself
+  (`DriverChoice::AutoPick`, or `Auto`) is skipped whatever the config says when the folder leaves
+  tracks of the release out or the match is not strong; the skip keeps the matches, so the row
+  still offers Import as-is / Force import / Show matches.
 
 ## Adding things
 

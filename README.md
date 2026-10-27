@@ -165,7 +165,7 @@ Default `beet import` flags used:
 
 #### Skipped Imports
 
-In quiet mode beets skips files it cannot match closely, and the row says "No close match". Soulbeet keeps the downloaded files and the row offers:
+In quiet mode beets skips files it cannot match closely, and the row says "No close match". Soulbeet also skips an album match it would otherwise apply unseen when the folder leaves tracks of the release out, or when the match is not a strong recommendation (`match.strong_rec_thresh`). Soulbeet keeps the downloaded files and the row offers:
 -   **Retry import**: the same import again, for example after you changed the beets config.
 
 When beets handled the import as one task (one track, or one album folder that beets reads as one album), the row also offers the choices below. Show matches and Import as-is need the matches beets weighed for it; Force import needs only the selection stored with the request.
@@ -223,7 +223,7 @@ Enable **Album mode** in Settings > Config. Soulbeet then saves every download b
 This option is only needed when you want album tags on your tracks. E.g: `albumartist` `mb_albumid` and so on..
 
 **Important for Album Mode:**
-Since `beets` is run in quiet mode (`-q`), it will skip any imports that require user intervention (e.g., if the metadata doesn't match confidently). A skipped album that beets read as one album can still be imported with a match you pick or as-is (see [Skipped Imports](#skipped-imports)). To ensure partial albums or less popular releases are imported correctly, you **must** configure your config file to be more permissive.
+Since `beets` is run in quiet mode (`-q`), it will skip any imports that require user intervention (e.g., if the metadata doesn't match confidently). A skipped album that beets read as one album can still be imported with a match you pick or as-is (see [Skipped Imports](#skipped-imports)). A folder that leaves tracks of the release out, or matches it too weakly, is always skipped to that prompt, whatever the config says.
 
 Recommended additions to your config file for Album Mode:
 
@@ -235,14 +235,12 @@ import:
 match:
   strong_rec_thresh: 0.10  # Lower threshold to accept less confident matches
   max_rec:
-    missing_tracks: strong
     unmatched_tracks: strong
   distance_weights:
-    missing_tracks: 0.1  # Reduce weight (I think default is 0.9) to penalize less for missing tracks, improving the overall score.
-    # unmatched_tracks: 0.2  # Optional: Similar for extra tracks.
+    # unmatched_tracks: 0.2  # Optional: Penalize extra files less.
 ```
 
-*Note: Tweaking `strong_rec_thresh` and other matching parameters increases the risk of incorrect tags, but is necessary for fully automated imports of obscure or partial albums.*
+*Note: Tweaking `strong_rec_thresh` and other matching parameters increases the risk of incorrect tags, but is necessary for fully automated imports of obscure releases.*
 
 ### Discovery Setup
 
