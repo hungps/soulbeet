@@ -16,6 +16,9 @@ pub struct LibraryReleaseRow {
     pub folder_path: String,
     pub album: String,
     pub album_artist: String,
+    /// The first artist MusicBrainz credits for the release, when it resolved
+    /// one. The scan cannot know it, so it is kept across rescans.
+    pub mb_album_artist: Option<String>,
     pub album_key: String,
     pub album_artist_key: String,
     pub album_disambig: Option<String>,
@@ -146,6 +149,10 @@ impl LibraryReleaseRow {
             folder_path: self.folder_path.clone(),
             album: self.album.clone(),
             album_artist: self.album_artist.clone(),
+            main_artist: self
+                .mb_album_artist
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
             album_disambig: self.album_disambig.clone(),
             media: self.media.clone(),
             country: self.country.clone(),
@@ -204,15 +211,22 @@ impl LibraryTrackRow {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PriorRelease {
+    ignored: i64,
+    expected: Option<i64>,
+    main_artist: Option<String>,
+}
+
 impl LibraryReleaseRow {
     pub async fn replace_folder(
         folder_id: &str,
         folder_path: &str,
         scan: &ScannedLibrary,
     ) -> Result<(usize, usize), String> {
-        let prior: std::collections::HashMap<String, (i64, Option<i64>)> =
-            sqlx::query_as::<_, (String, i64, Option<i64>)>(
-                "SELECT release_path, ignored, expected_track_count
+        let prior: std::collections::HashMap<String, PriorRelease> =
+            sqlx::query_as::<_, (String, i64, Option<i64>, Option<String>)>(
+                "SELECT release_path, ignored, expected_track_count, mb_album_artist
                  FROM library_releases WHERE folder_id = ?",
             )
             .bind(folder_id)
@@ -220,7 +234,16 @@ impl LibraryReleaseRow {
             .await
             .map_err(|e| e.to_string())?
             .into_iter()
-            .map(|(path, ignored, expected)| (path, (ignored, expected)))
+            .map(|(path, ignored, expected, main_artist)| {
+                (
+                    path,
+                    PriorRelease {
+                        ignored,
+                        expected,
+                        main_artist,
+                    },
+                )
+            })
             .collect();
 
         let mut tx = DB.begin().await.map_err(|e| e.to_string())?;
@@ -267,8 +290,8 @@ impl LibraryReleaseRow {
                      album_disambig, media, country, year, mb_album_id, mb_release_group_id,
                      release_path, track_count, matched_track_count, expected_track_count,
                      total_size, audio_format, bitrate, bit_depth, sample_rate, quality_varies,
-                     scanned_at, ignored)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     scanned_at, ignored, mb_album_artist)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&release_id)
             .bind(folder_id)
@@ -290,7 +313,7 @@ impl LibraryReleaseRow {
                 release
                     .expected_track_count
                     .map(|value| value as i64)
-                    .or_else(|| prior.get(&release_path).and_then(|(_, expected)| *expected)),
+                    .or_else(|| prior.get(&release_path).and_then(|prior| prior.expected)),
             )
             .bind(total_size)
             .bind(&quality.audio_format)
@@ -299,7 +322,12 @@ impl LibraryReleaseRow {
             .bind(quality.sample_rate.map(|value| value as i64))
             .bind(if quality_varies { 1i64 } else { 0i64 })
             .bind(&scanned_at)
-            .bind(prior.get(&release_path).map(|(ignored, _)| *ignored).unwrap_or(0))
+            .bind(prior.get(&release_path).map(|prior| prior.ignored).unwrap_or(0))
+            .bind(
+                prior
+                    .get(&release_path)
+                    .and_then(|prior| prior.main_artist.clone()),
+            )
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
@@ -402,6 +430,16 @@ impl LibraryReleaseRow {
     pub async fn set_expected_track_count(id: &str, expected: u32) -> Result<(), String> {
         sqlx::query("UPDATE library_releases SET expected_track_count = ? WHERE id = ?")
             .bind(expected as i64)
+            .bind(id)
+            .execute(&*DB)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn set_main_artist(id: &str, artist: &str) -> Result<(), String> {
+        sqlx::query("UPDATE library_releases SET mb_album_artist = ? WHERE id = ?")
+            .bind(artist)
             .bind(id)
             .execute(&*DB)
             .await
@@ -739,6 +777,7 @@ mod tests {
             folder_path: "/music".to_string(),
             album: "Album".to_string(),
             album_artist: "Artist".to_string(),
+            mb_album_artist: None,
             album_key: "album".to_string(),
             album_artist_key: "artist".to_string(),
             album_disambig: None,

@@ -315,15 +315,40 @@ fn release_title(release: &LibraryRelease) -> String {
     }
 }
 
-/// Who made it and which pressing it is: `Ed Sheeran · 2017 · CD · GB`.
+/// Which pressing it is: `2017 · CD · GB`. The artist is not repeated, since
+/// the library groups the release under it already.
 fn release_subtitle(release: &LibraryRelease) -> String {
-    let mut parts = vec![release.album_artist.clone()];
+    let mut parts = Vec::new();
     if let Some(year) = release.year {
         parts.push(year.to_string());
     }
     parts.extend(filled(release.media.as_ref()).map(str::to_string));
     parts.extend(filled(release.country.as_ref()).map(str::to_string));
     parts.join(" · ")
+}
+
+/// Who the library files the release under: MusicBrainz's first credit when it
+/// knows one, the scanned album artist otherwise.
+fn release_artist(release: &LibraryRelease) -> String {
+    filled(release.main_artist.as_ref())
+        .unwrap_or(&release.album_artist)
+        .to_string()
+}
+
+/// The releases by the act they belong to, so a featured credit is filed under
+/// the main artist instead of a heading of its own.
+fn group_by_artist(
+    releases: &[LibraryRelease],
+    main_artists: &HashMap<String, String>,
+) -> BTreeMap<String, Vec<LibraryRelease>> {
+    releases.iter().cloned().fold(BTreeMap::new(), |mut map, release| {
+        let artist = main_artists
+            .get(&release.id)
+            .cloned()
+            .unwrap_or_else(|| release_artist(&release));
+        map.entry(artist).or_default().push(release);
+        map
+    })
 }
 
 fn track_quality_badge(track: &LibraryTrackInfo) -> Element {
@@ -367,13 +392,25 @@ fn LibraryTrackRow(
     let number = track_number_label(track.disc_number, track.track_number);
 
     rsx! {
-        div { class: "flex items-start gap-3 p-2 rounded hover:bg-white/5 group",
-            span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0 pt-0.5",
+        div { class: "flex items-center gap-3 p-2 rounded hover:bg-white/5 group",
+            button {
+                class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-accent transition-all cursor-pointer shrink-0",
+                title: "Preview track",
+                aria_label: "Preview track",
+                onclick: move |_| player.play_track(play_track.clone()),
+                svg {
+                    class: "w-3.5 h-3.5",
+                    fill: "currentColor",
+                    view_box: "0 0 24 24",
+                    path { d: "M8 5v14l11-7z" }
+                }
+            }
+            span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0",
                 "{number}"
             }
             div { class: "flex-1 min-w-0",
                 div { class: "flex items-center gap-2 min-w-0",
-                    p { class: "text-xs font-mono text-gray-300 break-words min-w-0 flex-1",
+                    p { class: "text-xs font-mono text-gray-300 break-words min-w-0",
                         "{track.title}"
                     }
                     {track_quality_badge(&track)}
@@ -387,18 +424,6 @@ fn LibraryTrackRow(
                 }
             }
             div { class: "flex items-center gap-1 shrink-0",
-                button {
-                    class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-accent transition-all cursor-pointer opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100",
-                    title: "Preview track",
-                    aria_label: "Preview track",
-                    onclick: move |_| player.play_track(play_track.clone()),
-                    svg {
-                        class: "w-3.5 h-3.5",
-                        fill: "currentColor",
-                        view_box: "0 0 24 24",
-                        path { d: "M8 5v14l11-7z" }
-                    }
-                }
                 if !track.matched {
                     button {
                         class: "p-1.5 rounded-full hover:bg-white/10 text-gray-500 hover:text-beet-leaf transition-colors cursor-pointer",
@@ -469,7 +494,7 @@ fn LibraryTrackRow(
                         path {
                             stroke_linecap: "round",
                             stroke_linejoin: "round",
-                            d: "M6 18L18 6M6 6l12 12",
+                            d: "M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673A2.25 2.25 0 0115.916 21H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0",
                         }
                     }
                 }
@@ -487,8 +512,9 @@ fn LibraryMissingRow(
     let number = track_number_label(missing.disc_number, missing.track_number);
 
     rsx! {
-        div { class: "flex items-start gap-3 p-2 rounded hover:bg-white/5 group",
-            span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0 pt-0.5",
+        div { class: "flex items-center gap-3 p-2 rounded hover:bg-white/5 group",
+            span { class: "w-[26px] shrink-0" }
+            span { class: "text-[10px] font-mono text-gray-600 w-8 text-right shrink-0",
                 "{number}"
             }
             div { class: "flex-1 min-w-0",
@@ -570,6 +596,8 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
     let mut details = use_signal(HashMap::<String, LibraryReleaseDetail>::new);
     let mut activity = use_signal(DownloadActivity::default);
     let mut last_tick = use_signal(|| 0u32);
+    let mut ignored_overrides = use_signal(HashMap::<String, bool>::new);
+    let main_artists = use_signal(HashMap::<String, String>::new);
     let mut pending = use_signal(|| None::<PendingRemoval>);
     let mut pending_request = use_signal(|| None::<PendingRequest>);
     let mut message = use_signal(String::new);
@@ -676,15 +704,10 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
         .filter(|release| !is_unknown(release))
         .cloned()
         .collect();
-    let known_by_artist: BTreeMap<String, Vec<LibraryRelease>> = known_releases
-        .iter()
-        .cloned()
-        .fold(BTreeMap::new(), |mut map, release| {
-            map.entry(release.album_artist.clone())
-                .or_default()
-                .push(release);
-            map
-        });
+    let known_by_artist = {
+        let overrides = main_artists.read().clone();
+        group_by_artist(&known_releases, &overrides)
+    };
 
     let scan_selected = move |_| {
         let Some(folder_id) = selected_folder() else {
@@ -739,14 +762,15 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
 
     let mut request_release = move |release: LibraryRelease| {
         message.set(String::new());
+        let artist = release_artist(&release);
         if release.mbid.is_none() {
-            open_search(&release.album_artist, &release.album, None, "album");
+            open_search(&artist, &release.album, None, "album");
             return;
         }
         let album = Album {
             id: release.mbid.clone().unwrap_or_default(),
             title: release.album.clone(),
-            artist: release.album_artist.clone(),
+            artist,
             release_date: release.year.map(|year| year.to_string()),
             mbid: release.mbid.clone(),
             cover_url: None,
@@ -828,7 +852,7 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
     let mut request_missing_track = move |release: LibraryRelease, missing: LibraryMissingTrack| {
         message.set(String::new());
         let artist = if missing.artist.trim().is_empty() {
-            release.album_artist.clone()
+            release_artist(&release)
         } else {
             missing.artist.clone()
         };
@@ -914,12 +938,15 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
         });
     };
 
-    let ignore_release = move |(release_id, ignored): (String, bool)| {
+    let mut ignore_release = move |(release_id, ignored): (String, bool)| {
+        ignored_overrides.write().insert(release_id.clone(), ignored);
+        let mut ignored_overrides = ignored_overrides;
         spawn(async move {
             if let Err(e) = auth
-                .call(api::set_library_release_ignored(release_id, ignored))
+                .call(api::set_library_release_ignored(release_id.clone(), ignored))
                 .await
             {
+                ignored_overrides.write().remove(&release_id);
                 message.set(format!("Could not update ignore flag: {e}"));
                 return;
             }
@@ -1021,6 +1048,38 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
         });
     };
 
+    let load_release = move |id: String| {
+        let mut details = details;
+        let mut main_artists = main_artists;
+        let mut expanded = expanded;
+        spawn(async move {
+            match auth.call(api::get_library_release_detail(id.clone())).await {
+                Ok(Some(detail)) => {
+                    details.write().insert(id.clone(), detail);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    info!("Failed to load release detail: {:?}", e);
+                    expanded.write().remove(&id);
+                    return;
+                }
+            }
+            match auth.call(api::get_library_release_extra(id.clone())).await {
+                Ok(Some(extra)) => {
+                    if let Some(artist) = extra.release.main_artist.clone() {
+                        main_artists.write().insert(id.clone(), artist);
+                    }
+                    if let Some(detail) = details.write().get_mut(&id) {
+                        detail.release = extra.release;
+                        detail.missing_tracks = extra.missing_tracks;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => info!("Failed to load what the release is missing: {:?}", e),
+            }
+        });
+    };
+
     let mut toggle_release = move |release: LibraryRelease| {
         let id = release.id.clone();
         let is_open = expanded.read().contains(&id);
@@ -1032,18 +1091,7 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
         if details.peek().contains_key(&id) {
             return;
         }
-        spawn(async move {
-            match auth.call(api::get_library_release_detail(id.clone())).await {
-                Ok(Some(detail)) => {
-                    details.write().insert(id, detail);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    info!("Failed to load release detail: {:?}", e);
-                    expanded.write().remove(&id);
-                }
-            }
-        });
+        load_release(id);
     };
 
     use_effect(move || {
@@ -1070,15 +1118,7 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
         let release_id = release.id.clone();
         expanded.write().insert(release_id.clone());
         if !details.peek().contains_key(&release_id) {
-            let mut details = details;
-            let id = release_id.clone();
-            spawn(async move {
-                if let Ok(Some(detail)) =
-                    auth.call(api::get_library_release_detail(id.clone())).await
-                {
-                    details.write().insert(id, detail);
-                }
-            });
+            load_release(release_id.clone());
         }
         spawn(async move {
             gloo_timers::future::TimeoutFuture::new(250).await;
@@ -1111,10 +1151,17 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
         let release_for_tag = release.clone();
         let is_open = expanded.read().contains(&release.id);
         let detail = details.read().get(&release.id).cloned();
-        let display_release = detail
+        let mut display_release = detail
             .as_ref()
-            .map(|detail| &detail.release)
-            .unwrap_or(&release);
+            .map(|detail| detail.release.clone())
+            .unwrap_or_else(|| release.clone());
+        if let Some(ignored) = ignored_overrides.read().get(&release.id) {
+            display_release.ignored = *ignored;
+        }
+        let album_artist = release_artist(&display_release);
+        let artist_for_tag = album_artist.clone();
+        let artist_for_search = album_artist.clone();
+        let artist_for_request = album_artist.clone();
         let folder_path = display_release.folder_path.clone();
         let album_key = album_activity_key(&release.album_artist, &release.album);
         let activity_guard = activity.read();
@@ -1126,14 +1173,14 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
             .unwrap_or(0);
         drop(activity_guard);
         let (badge, badge_class) =
-            completeness_label(display_release, active_tracks, download_state.is_some());
+            completeness_label(&display_release, active_tracks, download_state.is_some());
         let can_ignore = display_release.ignored
             || display_release.completeness != ReleaseCompleteness::Complete
             || display_release
                 .expected_track_count
                 .map(|expected| expected > display_release.track_count)
                 .unwrap_or(false);
-        let can_tag = is_unknown(display_release)
+        let can_tag = is_unknown(&display_release)
             || display_release.matched_track_count < display_release.track_count;
         let is_complete = display_release.completeness == ReleaseCompleteness::Complete;
         let cover_urls: Vec<String> = [
@@ -1165,25 +1212,32 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
                             p { class: "text-sm font-bold text-white break-words min-w-0",
                                 "{release_title(&release)}"
                             }
-                            span {
-                                class: "text-[10px] font-mono px-1.5 py-0.5 rounded border shrink-0 {badge_class}",
-                                "{badge}"
+                            if display_release.ignored {
+                                button {
+                                    class: "text-[10px] font-mono px-1.5 py-0.5 rounded border shrink-0 cursor-pointer {badge_class}",
+                                    title: "Unignore release",
+                                    onclick: {
+                                        let release_id = release_for_ignore.id.clone();
+                                        move |event: MouseEvent| {
+                                            event.stop_propagation();
+                                            ignore_release((release_id.clone(), false));
+                                        }
+                                    },
+                                    "{badge}"
+                                }
+                            } else {
+                                span {
+                                    class: "text-[10px] font-mono px-1.5 py-0.5 rounded border shrink-0 {badge_class}",
+                                    "{badge}"
+                                }
                             }
                             {release_quality_badge(&release)}
                             {download_state_badge(download_state.as_ref())}
                         }
-                        p { class: "text-xs text-gray-400 font-mono break-words",
+                        p { class: "text-xs text-gray-400 font-mono break-words mt-1",
                             "{release_subtitle(&release)}"
                         }
                         div { class: "flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] font-mono text-gray-600 mt-0.5",
-                            span { "{release.track_count} tracks" }
-                            if let Some(expected) = display_release.expected_track_count {
-                                if expected > display_release.track_count {
-                                    span { class: "text-yellow-500/80",
-                                        "{expected - display_release.track_count} missing"
-                                    }
-                                }
-                            }
                             span { "{format_size(release.total_size)}" }
                         }
                     }
@@ -1211,7 +1265,7 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
                                         folder_id: release_for_tag.folder_id.clone(),
                                         release_id: Some(release_for_tag.id.clone()),
                                         path: release_for_tag.path.clone(),
-                                        artist: Some(release_for_tag.album_artist.clone()),
+                                        artist: Some(artist_for_tag.clone()),
                                         album: Some(release_for_tag.album.clone()),
                                         is_track: false,
                                     });
@@ -1219,25 +1273,18 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
                                 "TAG"
                             }
                         }
-                        if can_ignore {
+                        if can_ignore && !display_release.ignored {
                             button {
-                                class: format!(
-                                    "px-2 py-1 text-[10px] font-mono rounded border transition-colors cursor-pointer {}",
-                                    if release_for_ignore.ignored {
-                                        "border-gray-600 text-gray-400 hover:bg-white/5"
-                                    } else {
-                                        "border-gray-600 text-gray-500 hover:text-gray-300 hover:bg-white/5"
+                                class: "px-2 py-1 text-[10px] font-mono rounded border transition-colors cursor-pointer border-gray-600 text-gray-500 hover:text-gray-300 hover:bg-white/5",
+                                title: "Ignore incomplete release",
+                                onclick: {
+                                    let release_id = release_for_ignore.id.clone();
+                                    move |event: MouseEvent| {
+                                        event.stop_propagation();
+                                        ignore_release((release_id.clone(), true));
                                     }
-                                ),
-                                title: if release_for_ignore.ignored { "Unignore release" } else { "Ignore incomplete release" },
-                                onclick: move |event: MouseEvent| {
-                                    event.stop_propagation();
-                                    ignore_release((
-                                        release_for_ignore.id.clone(),
-                                        !release_for_ignore.ignored,
-                                    ));
                                 },
-                                if release_for_ignore.ignored { "UNIGNORE" } else { "IGNORE" }
+                                "IGNORE"
                             }
                         }
                         if !is_complete {
@@ -1247,7 +1294,7 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
                                 onclick: move |event: MouseEvent| {
                                     event.stop_propagation();
                                     open_search(
-                                        &release_for_search.album_artist,
+                                        &artist_for_search,
                                         &release_for_search.album,
                                         release_for_search.mbid.as_deref(),
                                         "album",
@@ -1275,7 +1322,7 @@ pub fn LibraryTab(#[props(default)] focus: LibraryFocus) -> Element {
                                     event.stop_propagation();
                                     if release_for_request.mbid.is_none() {
                                         open_search(
-                                            &release_for_request.album_artist,
+                                            &artist_for_request,
                                             &release_for_request.album,
                                             None,
                                             "album",
@@ -1713,11 +1760,45 @@ mod tests {
     fn the_subtitle_carries_the_edition_facts_instead_of_the_folder() {
         assert_eq!(
             release_subtitle(&release("÷", None, Some("CD"))),
-            "Ed Sheeran · 2017 · CD · GB"
+            "2017 · CD · GB"
         );
+        assert_eq!(release_subtitle(&release("÷", None, None)), "2017 · GB");
+    }
+
+    #[test]
+    fn the_artist_is_the_first_one_musicbrainz_credits() {        let mut featured = release("Singles", None, None);
+        featured.album_artist = "5 Seconds of Summer feat. Julia Michaels".into();
+        featured.main_artist = Some("5 Seconds of Summer".into());
+        assert_eq!(release_artist(&featured), "5 Seconds of Summer");
+
+        let mut unfiled = release("÷", None, None);
+        unfiled.album_artist = "Ed Sheeran".into();
+        assert_eq!(release_artist(&unfiled), "Ed Sheeran");
+    }
+
+    #[test]
+    fn releases_are_grouped_under_the_artist_musicbrainz_names_first() {
+        let mut featured = release("Singles", None, None);
+        featured.id = "featured".into();
+        featured.album_artist = "5 Seconds of Summer feat. Julia Michaels".into();
+        featured.main_artist = Some("5 Seconds of Summer".into());
+        let mut other = release("÷", None, None);
+        other.id = "other".into();
+
+        let groups = group_by_artist(&[featured, other], &HashMap::new());
         assert_eq!(
-            release_subtitle(&release("÷", None, None)),
-            "Ed Sheeran · 2017 · GB"
+            groups.keys().collect::<Vec<_>>(),
+            ["5 Seconds of Summer", "Ed Sheeran"]
+        );
+
+        let mut learned = release("Singles", None, None);
+        learned.id = "learned".into();
+        learned.album_artist = "5 Seconds of Summer feat. Julia Michaels".into();
+        let overrides = HashMap::from([("learned".to_string(), "5 Seconds of Summer".to_string())]);
+        let groups = group_by_artist(&[learned], &overrides);
+        assert_eq!(
+            groups.keys().collect::<Vec<_>>(),
+            ["5 Seconds of Summer"]
         );
     }
 

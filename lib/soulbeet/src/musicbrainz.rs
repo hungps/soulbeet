@@ -72,6 +72,16 @@ fn format_artist_credit(credits: &Option<Vec<ArtistCredit>>) -> String {
         .unwrap_or_else(|| "Unknown Artist".to_string())
 }
 
+/// The first artist of a credit list: MusicBrainz names every artist of a
+/// collaboration and the first one is the act the release is filed under.
+fn main_artist(credits: &Option<Vec<ArtistCredit>>) -> Option<String> {
+    credits
+        .as_ref()
+        .and_then(|credits| credits.first())
+        .map(|credit| credit.name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
 /// Formats a duration from milliseconds to a MM:SS string.
 fn format_duration(duration_ms: &Option<u32>) -> Option<String> {
     duration_ms.map(|ms| {
@@ -787,7 +797,11 @@ impl MusicBrainzProvider {
             track_count,
         };
 
-        Ok(AlbumWithTracks { album, tracks })
+        Ok(AlbumWithTracks {
+            main_artist: main_artist(&release.artist_credit),
+            album,
+            tracks,
+        })
     }
 }
 

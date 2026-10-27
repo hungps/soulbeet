@@ -79,6 +79,10 @@ pub struct LibraryRelease {
     pub folder_path: String,
     pub album: String,
     pub album_artist: String,
+    /// The first artist MusicBrainz credits when it names several, e.g.
+    /// `5 Seconds of Summer` for `5 Seconds of Summer feat. Julia Michaels`.
+    #[serde(default)]
+    pub main_artist: Option<String>,
     /// MusicBrainz's own disambiguation of this pressing, e.g. `deluxe edition`.
     #[serde(default)]
     pub album_disambig: Option<String>,
@@ -160,6 +164,14 @@ pub struct LibraryMissingTrack {
 pub struct LibraryReleaseDetail {
     pub release: LibraryRelease,
     pub tracks: Vec<LibraryTrackInfo>,
+    pub missing_tracks: Vec<LibraryMissingTrack>,
+}
+
+/// What the metadata source adds to a release that the scan cannot know: how
+/// many tracks it should have and which ones are missing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct LibraryReleaseExtra {
+    pub release: LibraryRelease,
     pub missing_tracks: Vec<LibraryMissingTrack>,
 }
 

@@ -850,6 +850,7 @@ impl crate::MetadataProvider for LastFmProvider {
                     .unwrap_or_default();
 
                 return Ok(AlbumWithTracks {
+                    main_artist: None,
                     album: Album {
                         id: id.to_string(),
                         title: info.name,

@@ -2,7 +2,8 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use shared::library::{
     DownloadActivity, LibraryFolderInfo, LibraryMatchQuery, LibraryMatchResult, LibraryOverview,
-    LibraryRelease, LibraryReleaseDetail, LibraryRemovalResult, LibraryScanSettings,
+    LibraryRelease, LibraryReleaseDetail, LibraryReleaseExtra, LibraryRemovalResult,
+    LibraryScanSettings,
 };
 
 #[cfg(feature = "server")]
@@ -79,30 +80,56 @@ pub async fn get_library_release_detail(
 ) -> Result<Option<LibraryReleaseDetail>, ServerFnError> {
     #[cfg(feature = "server")]
     {
-        let row = LibraryReleaseRow::get_for_user(&release_id, &auth.0.sub)
+        LibraryReleaseRow::detail(&release_id, &auth.0.sub)
             .await
-            .map_err(server_error)?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let Some(mut detail) = LibraryReleaseRow::detail(&release_id, &auth.0.sub)
+            .map_err(server_error)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = release_id;
+        Ok(None)
+    }
+}
+
+/// What the metadata source adds to a release: its expected track count, the
+/// missing tracks and the act it is filed under. Kept apart from the detail so
+/// expanding a release does not wait on a provider round trip.
+#[post("/api/library/release/extra", auth: AuthSession)]
+pub async fn get_library_release_extra(
+    release_id: String,
+) -> Result<Option<LibraryReleaseExtra>, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let Some(row) = LibraryReleaseRow::get_for_user(&release_id, &auth.0.sub)
             .await
             .map_err(server_error)?
         else {
             return Ok(None);
         };
-        if let Some((expected, missing)) =
-            crate::library::expected_tracks(&row, &detail.tracks).await
-        {
-            detail.release.expected_track_count = Some(expected);
-            if (!missing.is_empty() || expected > detail.release.track_count)
-                && detail.release.matched_track_count > 0
+        let tracks = LibraryTrackRow::list_for_release(&release_id)
+            .await
+            .map_err(server_error)?
+            .iter()
+            .map(LibraryTrackRow::to_shared)
+            .collect::<Vec<_>>();
+        let mut release = row.to_shared();
+        let mut missing_tracks = Vec::new();
+        if let Some(resolved) = crate::library::expected_tracks(&row, &tracks).await {
+            release.expected_track_count = Some(resolved.expected);
+            if (!resolved.missing.is_empty() || resolved.expected > release.track_count)
+                && release.matched_track_count > 0
             {
-                detail.release.completeness = shared::library::ReleaseCompleteness::Partial;
+                release.completeness = shared::library::ReleaseCompleteness::Partial;
             }
-            detail.missing_tracks = missing;
+            if let Some(artist) = resolved.main_artist {
+                release.main_artist = Some(artist);
+            }
+            missing_tracks = resolved.missing;
         }
-        Ok(Some(detail))
+        Ok(Some(LibraryReleaseExtra {
+            release,
+            missing_tracks,
+        }))
     }
     #[cfg(not(feature = "server"))]
     {

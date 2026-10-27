@@ -146,6 +146,10 @@ impl Album {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct AlbumWithTracks {
     pub album: Album,
+    /// The first artist the provider credits, when it names more than one:
+    /// `5 Seconds of Summer` for `5 Seconds of Summer feat. Julia Michaels`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_artist: Option<String>,
     pub tracks: Vec<Track>,
 }
 
